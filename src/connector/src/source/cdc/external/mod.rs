@@ -81,6 +81,16 @@ impl ExternalCdcTableType {
         matches!(self, Self::MySql | Self::Postgres)
     }
 
+    pub fn get_cdc_offset_parser(&self) -> ConnectorResult<CdcOffsetParseFunc> {
+        match self {
+            Self::MySql => Ok(MySqlExternalTableReader::get_cdc_offset_parser()),
+            Self::Postgres => Ok(PostgresExternalTableReader::get_cdc_offset_parser()),
+            Self::SqlServer => Ok(SqlServerExternalTableReader::get_cdc_offset_parser()),
+            Self::Mock => Ok(MockExternalTableReader::get_cdc_offset_parser()),
+            _ => bail!("invalid external table type: {:?}", *self),
+        }
+    }
+
     pub async fn create_table_reader(
         &self,
         config: ExternalTableConfig,

@@ -47,6 +47,9 @@ pub struct ExternalStorageTable {
     /// Indices of primary key.
     /// Note that the index is based on the all columns of the table.
     pk_indices: Vec<usize>,
+
+    #[cfg(test)]
+    mock_snapshot_errors: Option<usize>,
 }
 
 impl ExternalStorageTable {
@@ -74,6 +77,8 @@ impl ExternalStorageTable {
             schema,
             pk_order_types,
             pk_indices,
+            #[cfg(test)]
+            mock_snapshot_errors: None,
         }
     }
 
@@ -89,7 +94,14 @@ impl ExternalStorageTable {
             schema: Schema::empty().to_owned(),
             pk_order_types: vec![],
             pk_indices: vec![],
+            mock_snapshot_errors: None,
         }
+    }
+
+    #[cfg(test)]
+    pub fn with_mock_snapshot_errors(mut self, snapshot_errors: usize) -> Self {
+        self.mock_snapshot_errors = Some(snapshot_errors);
+        self
     }
 
     pub fn table_id(&self) -> TableId {
@@ -116,6 +128,13 @@ impl ExternalStorageTable {
     }
 
     pub async fn create_table_reader(&self) -> ConnectorResult<ExternalTableReaderImpl> {
+        #[cfg(test)]
+        if let Some(snapshot_errors) = self.mock_snapshot_errors {
+            return Ok(ExternalTableReaderImpl::Mock(
+                risingwave_connector::source::cdc::external::mock_external_table::MockExternalTableReader::new_with_snapshot_errors(snapshot_errors),
+            ));
+        }
+
         self.table_type
             .create_table_reader(
                 self.config.clone(),
