@@ -53,7 +53,7 @@ use crate::executor::backfill::utils::{
 use crate::executor::monitor::CdcBackfillMetrics;
 use crate::executor::prelude::*;
 use crate::executor::source::get_infinite_backoff_strategy;
-use crate::task::CreateMviewProgressReporter;
+use crate::task::{ActorId, CreateMviewProgressReporter, FragmentId};
 
 /// `split_id`, `is_finished`, `row_count`, `cdc_offset` all occupy 1 column each.
 const METADATA_STATE_LEN: usize = 4;
@@ -382,21 +382,11 @@ impl<S: StateStore> CdcBackfillExecutor<S> {
             let external_table = self.external_table.clone();
             let actor_id = self.actor_ctx.id;
             let fragment_id = self.actor_ctx.fragment_id;
-            let mut future = Box::pin(async move {
-                let backoff = get_infinite_backoff_strategy();
-                tokio_retry::Retry::spawn(backoff, || async {
-                    match external_table.create_table_reader().await {
-                        Ok(reader) => Ok(reader),
-                        Err(e) => {
-                            tracing::warn!(error = %e.as_report(), actor_id = %actor_id, fragment_id = %fragment_id, "failed to create cdc table reader, retrying...");
-                            Err(e)
-                        }
-                    }
-                })
-                .instrument(tracing::info_span!("create_cdc_table_reader_with_retry"))
-                .await
-                .expect("Retry create cdc table reader until success.")
-            });
+            let mut future = Box::pin(create_table_reader_with_retry(
+                external_table,
+                actor_id,
+                fragment_id,
+            ));
             loop {
                 if let Some(msg) =
                     build_reader_and_poll_upstream(&mut upstream, &mut table_reader, &mut future)
@@ -428,7 +418,7 @@ impl<S: StateStore> CdcBackfillExecutor<S> {
                 }
             }
 
-            let upstream_table_reader = UpstreamTableReader::new(
+            let mut upstream_table_reader = UpstreamTableReader::new(
                 self.external_table.clone(),
                 table_reader.expect("table reader must created"),
             );
@@ -448,16 +438,14 @@ impl<S: StateStore> CdcBackfillExecutor<S> {
             // Whether each pk column needs unsigned `i64` comparison. Frontend up-casts narrower
             // unsigned integers, while unsigned float/double/decimal keep their native comparison
             // semantics; only `BIGINT UNSIGNED` can overflow into a negative `i64` in RisingWave.
-            let pk_needs_unsigned_i64_compare = {
-                let schema = self.external_table.schema();
-                let pk_names: Vec<String> = pk_indices
-                    .iter()
-                    .map(|&i| schema.fields[i].name.clone())
-                    .collect();
-                upstream_table_reader
-                    .reader
-                    .pk_column_unsigned_i64_compare_flags(&pk_names)?
-            };
+            let schema = self.external_table.schema();
+            let pk_names: Vec<String> = pk_indices
+                .iter()
+                .map(|&i| schema.fields[i].name.clone())
+                .collect();
+            let mut pk_needs_unsigned_i64_compare = upstream_table_reader
+                .reader
+                .pk_column_unsigned_i64_compare_flags(&pk_names)?;
 
             tracing::info!(
                 %table_id,
@@ -527,8 +515,138 @@ impl<S: StateStore> CdcBackfillExecutor<S> {
 
             // the buffer will be drained when a barrier comes
             let mut upstream_chunk_buffer: Vec<StreamChunk> = vec![];
+            let mut needs_reader_rebuild = false;
 
             'backfill_loop: loop {
+                if needs_reader_rebuild {
+                    tracing::info!(
+                        %table_id,
+                        upstream_table_name,
+                        "rebuilding CDC table reader after snapshot read failure"
+                    );
+                    let mut table_reader = None;
+                    let mut future = Box::pin(create_table_reader_with_retry(
+                        self.external_table.clone(),
+                        self.actor_ctx.id,
+                        self.actor_ctx.fragment_id,
+                    ));
+
+                    loop {
+                        let Some(msg) = build_reader_and_poll_upstream(
+                            &mut upstream,
+                            &mut table_reader,
+                            &mut future,
+                        )
+                        .await?
+                        else {
+                            break;
+                        };
+
+                        match msg {
+                            Message::Barrier(barrier) => {
+                                if let Some(mutation) = barrier.mutation.as_deref() {
+                                    use crate::executor::Mutation;
+                                    match mutation {
+                                        Mutation::Pause => {
+                                            is_snapshot_paused = true;
+                                        }
+                                        Mutation::Resume => {
+                                            is_snapshot_paused = false;
+                                        }
+                                        Mutation::Throttle(some) => {
+                                            if let Some(entry) =
+                                                some.get(&self.actor_ctx.fragment_id)
+                                                && entry.throttle_type() == ThrottleType::Backfill
+                                            {
+                                                self.rate_limit_rps = entry.rate_limit;
+                                            }
+                                        }
+                                        mutation if mutation.is_stop(self.actor_ctx.id) => {
+                                            tracing::info!(
+                                                %table_id,
+                                                upstream_table_name,
+                                                "CdcBackfill has been dropped due to config change"
+                                            );
+                                            yield Message::Barrier(barrier);
+                                            break 'backfill_loop;
+                                        }
+                                        _ => (),
+                                    }
+                                }
+
+                                let (
+                                    emitted_upstream_chunks,
+                                    upstream_processed_row_count,
+                                    consumed_binlog_offset,
+                                ) = Self::consume_upstream_chunk_buffer(
+                                    &offset_parse_func,
+                                    &mut upstream_chunk_buffer,
+                                    current_pk_pos.as_ref(),
+                                    PkCompareInfo {
+                                        indices: &pk_indices,
+                                        order: &pk_order,
+                                        needs_unsigned_i64_compare: &pk_needs_unsigned_i64_compare,
+                                    },
+                                    &last_binlog_offset,
+                                    &self.output_indices,
+                                )?;
+                                if let Some(consumed_binlog_offset) = consumed_binlog_offset {
+                                    last_binlog_offset = Some(consumed_binlog_offset);
+                                }
+                                for chunk in emitted_upstream_chunks {
+                                    yield Message::Chunk(chunk);
+                                }
+
+                                Self::report_metrics(
+                                    &self.metrics,
+                                    0,
+                                    upstream_processed_row_count,
+                                );
+                                state_impl
+                                    .mutate_state(
+                                        current_pk_pos.clone(),
+                                        last_binlog_offset.clone(),
+                                        total_snapshot_row_count,
+                                        false,
+                                    )
+                                    .await?;
+                                state_impl.commit_state(barrier.epoch).await?;
+                                yield Message::Barrier(barrier);
+                            }
+                            Message::Chunk(chunk) => {
+                                if chunk.cardinality() == 0 {
+                                    continue;
+                                }
+                                let chunk_binlog_offset =
+                                    get_cdc_chunk_last_offset(&offset_parse_func, &chunk)?;
+                                if let Some(last_binlog_offset) = last_binlog_offset.as_ref()
+                                    && let Some(chunk_offset) = chunk_binlog_offset
+                                    && chunk_offset < *last_binlog_offset
+                                {
+                                    continue;
+                                }
+                                upstream_chunk_buffer.push(chunk.compact_vis());
+                            }
+                            Message::Watermark(_) => {
+                                // Ignore watermark while the snapshot reader is unavailable.
+                            }
+                        }
+                    }
+
+                    upstream_table_reader = UpstreamTableReader::new(
+                        self.external_table.clone(),
+                        table_reader.expect("table reader must be created"),
+                    );
+                    pk_needs_unsigned_i64_compare = upstream_table_reader
+                        .reader
+                        .pk_column_unsigned_i64_compare_flags(&pk_names)?;
+                    tracing::info!(
+                        %table_id,
+                        upstream_table_name,
+                        "CDC table reader rebuilt successfully"
+                    );
+                }
+
                 let mut should_bypass_snapshot_stream_patch =
                     self.rate_limit_rps.is_some_and(|val| val == 0);
                 let left_upstream = upstream.by_ref().map(Either::Left);
@@ -562,6 +680,7 @@ impl<S: StateStore> CdcBackfillExecutor<S> {
                 let mut cur_barrier_upstream_processed_rows: u64 = 0;
                 let mut barrier_count: u32 = 0;
                 let mut pending_barrier = None;
+                let mut snapshot_read_failed = false;
 
                 #[for_await]
                 for either in &mut backfill_stream {
@@ -619,7 +738,10 @@ impl<S: StateStore> CdcBackfillExecutor<S> {
 
                                     // when processing a barrier, check whether can start a new snapshot
                                     // if the number of barriers reaches the snapshot interval
-                                    if can_start_new_snapshot || needs_rebuild_snapshot {
+                                    if can_start_new_snapshot
+                                        || needs_rebuild_snapshot
+                                        || snapshot_read_failed
+                                    {
                                         // staging the barrier
                                         pending_barrier = Some(barrier);
                                         tracing::debug!(
@@ -762,11 +884,12 @@ impl<S: StateStore> CdcBackfillExecutor<S> {
                                     ));
                                 }
                                 Err(error) => {
+                                    snapshot_read_failed = true;
                                     tracing::warn!(
                                         error = %error.as_report(),
                                         %table_id,
                                         upstream_table_name,
-                                        "failed to read CDC snapshot; retrying after a barrier"
+                                        "failed to read CDC snapshot; rebuilding reader after a barrier"
                                     );
                                 }
                             }
@@ -847,11 +970,12 @@ impl<S: StateStore> CdcBackfillExecutor<S> {
                             yield Message::Chunk(mapping_chunk(chunk, &self.output_indices));
                         }
                         Err(error) => {
+                            snapshot_read_failed = true;
                             tracing::warn!(
                                 error = %error.as_report(),
                                 %table_id,
                                 upstream_table_name,
-                                "failed to read CDC snapshot; retrying after a barrier"
+                                "failed to read CDC snapshot; rebuilding reader after a barrier"
                             );
                         }
                     }
@@ -910,6 +1034,7 @@ impl<S: StateStore> CdcBackfillExecutor<S> {
 
                 state_impl.commit_state(pending_barrier.epoch).await?;
                 yield Message::Barrier(pending_barrier);
+                needs_reader_rebuild = snapshot_read_failed;
             }
             upstream_table_reader.disconnect().await?;
         } else if self.options.disable_backfill {
@@ -1001,6 +1126,31 @@ pub(crate) async fn build_reader_and_poll_upstream(
             msg.transpose()
         }
     }
+}
+
+pub(crate) async fn create_table_reader_with_retry(
+    external_table: ExternalStorageTable,
+    actor_id: ActorId,
+    fragment_id: FragmentId,
+) -> ExternalTableReaderImpl {
+    let backoff = get_infinite_backoff_strategy();
+    tokio_retry::Retry::spawn(backoff, || async {
+        match external_table.create_table_reader().await {
+            Ok(reader) => Ok(reader),
+            Err(error) => {
+                tracing::warn!(
+                    error = %error.as_report(),
+                    actor_id = %actor_id,
+                    fragment_id = %fragment_id,
+                    "failed to create CDC table reader; retrying"
+                );
+                Err(error)
+            }
+        }
+    })
+    .instrument(tracing::info_span!("create_cdc_table_reader_with_retry"))
+    .await
+    .expect("retry creating CDC table reader until success")
 }
 
 #[try_stream(ok = Message, error = StreamExecutorError)]
@@ -1348,7 +1498,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_snapshot_read_error_retries_without_failing_executor() {
+    async fn test_snapshot_read_error_rebuilds_reader() {
         let (tx, source) = MockSource::channel();
         let source = source.into_executor(
             Schema::new(vec![
@@ -1373,7 +1523,8 @@ mod tests {
             vec![OrderType::ascending()],
             vec![0],
         )
-        .with_mock_snapshot_errors(usize::MAX);
+        .with_mock_snapshot_errors([1, 0]);
+        let reader_create_probe = external_table.clone();
         let executor = CdcBackfillExecutor::new(
             ActorContext::for_test(0x1a),
             external_table,
@@ -1402,8 +1553,7 @@ mod tests {
             Message::Barrier(_)
         ));
 
-        // The second barrier starts the snapshot. Its permanent reader error must leave the
-        // executor pending rather than escape and trigger recovery.
+        // The second barrier starts the snapshot. The first reader fails when it is polled.
         tx.send_barrier(Barrier::new_test_barrier(test_epoch(2)));
         assert!(matches!(
             executor.next().await.unwrap().unwrap(),
@@ -1414,15 +1564,27 @@ mod tests {
                 .await
                 .is_err()
         );
+        assert_eq!(reader_create_probe.mock_reader_create_count(), 1);
 
-        // Barriers continue to pass while each new snapshot attempt remains retryable.
-        for epoch in [3, 4] {
-            tx.send_barrier(Barrier::new_test_barrier(test_epoch(epoch)));
-            assert!(matches!(
-                executor.next().await.unwrap().unwrap(),
-                Message::Barrier(_)
-            ));
-        }
+        // The next barrier checkpoints the resume position before the failed reader is replaced.
+        tx.send_barrier(Barrier::new_test_barrier(test_epoch(3)));
+        assert!(matches!(
+            executor.next().await.unwrap().unwrap(),
+            Message::Barrier(_)
+        ));
+
+        // The replacement reader succeeds, proving that retries do not reuse the failed reader.
+        let Message::Chunk(chunk) = executor.next().await.unwrap().unwrap() else {
+            panic!("replacement reader should produce the snapshot chunk");
+        };
+        assert_eq!(chunk.cardinality(), 6);
+        assert_eq!(reader_create_probe.mock_reader_create_count(), 2);
+
+        tx.send_barrier(Barrier::new_test_barrier(test_epoch(4)));
+        assert!(matches!(
+            executor.next().await.unwrap().unwrap(),
+            Message::Barrier(_)
+        ));
     }
 
     #[tokio::test]

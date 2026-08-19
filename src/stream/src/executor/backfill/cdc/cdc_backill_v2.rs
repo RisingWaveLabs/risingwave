@@ -30,11 +30,10 @@ use risingwave_connector::source::cdc::external::{
 use risingwave_connector::source::{CdcTableSnapshotSplit, CdcTableSnapshotSplitRaw};
 use risingwave_pb::common::ThrottleType;
 use rw_futures_util::pausable;
-use thiserror_ext::AsReport;
-use tracing::Instrument;
 
 use crate::executor::backfill::cdc::cdc_backfill::{
-    build_reader_and_poll_upstream, get_cdc_json_parse_handling_from_properties, transform_upstream,
+    build_reader_and_poll_upstream, create_table_reader_with_retry,
+    get_cdc_json_parse_handling_from_properties, transform_upstream,
 };
 use crate::executor::backfill::cdc::state_v2::ParallelizedCdcBackfillState;
 use crate::executor::backfill::cdc::upstream_table::external::ExternalStorageTable;
@@ -43,7 +42,6 @@ use crate::executor::backfill::cdc::upstream_table::snapshot::{
 };
 use crate::executor::backfill::utils::{get_cdc_chunk_last_offset, mapping_chunk, mapping_message};
 use crate::executor::prelude::*;
-use crate::executor::source::get_infinite_backoff_strategy;
 use crate::task::cdc_progress::CdcProgressReporter;
 pub struct ParallelizedCdcBackfillExecutor<S: StateStore> {
     actor_ctx: ActorContextRef,
@@ -264,21 +262,11 @@ impl<S: StateStore> ParallelizedCdcBackfillExecutor<S> {
                 let external_table = self.external_table.clone();
                 let actor_id = self.actor_ctx.id;
                 let fragment_id = self.actor_ctx.fragment_id;
-                let mut future = Box::pin(async move {
-                    let backoff = get_infinite_backoff_strategy();
-                    tokio_retry::Retry::spawn(backoff, || async {
-                        match external_table.create_table_reader().await {
-                            Ok(reader) => Ok(reader),
-                            Err(e) => {
-                                tracing::warn!(error = %e.as_report(), actor_id = %actor_id, fragment_id = %fragment_id, "failed to create cdc table reader, retrying...");
-                                Err(e)
-                            }
-                        }
-                    })
-                    .instrument(tracing::info_span!("create_cdc_table_reader_with_retry"))
-                    .await
-                    .expect("Retry create cdc table reader until success.")
-                });
+                let mut future = Box::pin(create_table_reader_with_retry(
+                    external_table,
+                    actor_id,
+                    fragment_id,
+                ));
                 loop {
                     if let Some(msg) = build_reader_and_poll_upstream(
                         &mut upstream,
