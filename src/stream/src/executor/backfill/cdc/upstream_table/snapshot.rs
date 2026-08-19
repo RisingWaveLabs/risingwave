@@ -27,12 +27,10 @@ use risingwave_connector::source::cdc::external::{
     CdcOffset, ExternalTableReader, ExternalTableReaderImpl, SchemaTableName,
 };
 use risingwave_pb::plan_common::additional_column::ColumnType;
-use thiserror_ext::AsReport;
 
 use super::external::ExternalStorageTable;
 use crate::common::rate_limit::limited_chunk_size;
 use crate::executor::backfill::utils::{get_new_pos, iter_chunks};
-use crate::executor::source::get_infinite_backoff_strategy;
 use crate::executor::{StreamExecutorError, StreamExecutorResult};
 
 pub trait UpstreamTableRead {
@@ -302,79 +300,53 @@ impl UpstreamTableRead for UpstreamTableReader<ExternalStorageTable> {
         let database_name = read_args.database_name.clone();
         // tracing::debug!(?args, "snapshot_read",);
 
-        let mut backoff = get_infinite_backoff_strategy();
-        let mut emitted_rows = false;
-        'retry: loop {
-            let row_stream = self.reader.split_snapshot_read(
-                self.table.schema_table_name(),
-                read_args.left_bound_inclusive.clone(),
-                read_args.right_bound_exclusive.clone(),
-                read_args.split_columns.clone(),
-            );
+        let row_stream = self.reader.split_snapshot_read(
+            self.table.schema_table_name(),
+            read_args.left_bound_inclusive.clone(),
+            read_args.right_bound_exclusive.clone(),
+            read_args.split_columns.clone(),
+        );
 
-            pin_mut!(row_stream);
-            let mut builder = DataChunkBuilder::new(
-                self.table.schema().data_types(),
-                limited_chunk_size(read_args.rate_limit_rps),
-            );
-            let chunk_stream = iter_chunks(row_stream, &mut builder);
+        pin_mut!(row_stream);
+        let mut builder = DataChunkBuilder::new(
+            self.table.schema().data_types(),
+            limited_chunk_size(read_args.rate_limit_rps),
+        );
+        let chunk_stream = iter_chunks(row_stream, &mut builder);
 
-            #[for_await]
-            for chunk in chunk_stream {
-                let chunk = match chunk {
-                    Ok(chunk) => chunk,
-                    Err(error) => {
-                        tracing::warn!(
-                            error = %error.as_report(),
-                            table = %self.table.qualified_table_name(),
-                            "failed to read CDC snapshot split"
-                        );
-                        if emitted_rows {
-                            // Restarting a partially emitted split can duplicate rows. Leave it
-                            // unfinished until a split reset or actor reschedule rebuilds it.
-                            let () = futures::future::pending().await;
-                            unreachable!();
-                        }
-                        tokio::time::sleep(
-                            backoff.next().expect("CDC snapshot retry must be infinite"),
-                        )
-                        .await;
-                        continue 'retry;
-                    }
-                };
-                let chunk_size = chunk.capacity();
-                emitted_rows |= chunk.cardinality() > 0;
+        #[for_await]
+        for chunk in chunk_stream {
+            let chunk = chunk?;
+            let chunk_size = chunk.capacity();
 
-                if let Some(rate_limit_rps) = read_args.rate_limit_rps
-                    && chunk_size != 0
-                {
-                    // Apply rate limit, see `risingwave_stream::executor::source::apply_rate_limit` for more.
-                    // May be should be refactored to a common function later.
-                    let limit = rate_limit_rps as usize;
+            if let Some(rate_limit_rps) = read_args.rate_limit_rps
+                && chunk_size != 0
+            {
+                // Apply rate limit, see `risingwave_stream::executor::source::apply_rate_limit` for more.
+                // May be should be refactored to a common function later.
+                let limit = rate_limit_rps as usize;
 
-                    // Because we produce chunks with limited-sized data chunk builder and all rows
-                    // are `Insert`s, the chunk size should never exceed the limit.
-                    assert!(chunk_size <= limit);
+                // Because we produce chunks with limited-sized data chunk builder and all rows
+                // are `Insert`s, the chunk size should never exceed the limit.
+                assert!(chunk_size <= limit);
 
-                    // `InsufficientCapacity` should never happen because we have check the cardinality
-                    rate_limiter.wait(chunk_size as _).await;
-                    yield Some(with_additional_columns(
-                        chunk,
-                        &read_args.additional_columns,
-                        schema_table_name.clone(),
-                        database_name.clone(),
-                    ));
-                } else {
-                    // no limit, or empty chunk
-                    yield Some(with_additional_columns(
-                        chunk,
-                        &read_args.additional_columns,
-                        schema_table_name.clone(),
-                        database_name.clone(),
-                    ));
-                }
+                // `InsufficientCapacity` should never happen because we have check the cardinality
+                rate_limiter.wait(chunk_size as _).await;
+                yield Some(with_additional_columns(
+                    chunk,
+                    &read_args.additional_columns,
+                    schema_table_name.clone(),
+                    database_name.clone(),
+                ));
+            } else {
+                // no limit, or empty chunk
+                yield Some(with_additional_columns(
+                    chunk,
+                    &read_args.additional_columns,
+                    schema_table_name.clone(),
+                    database_name.clone(),
+                ));
             }
-            break;
         }
         yield None;
     }
@@ -398,67 +370,16 @@ mod tests {
     use futures::pin_mut;
     use futures_async_stream::for_await;
     use maplit::{convert_args, hashmap};
-    use risingwave_common::catalog::{ColumnDesc, ColumnId, Field, Schema, TableId};
+    use risingwave_common::catalog::{ColumnDesc, ColumnId, Field, Schema};
     use risingwave_common::row::OwnedRow;
     use risingwave_common::types::{DataType, ScalarImpl};
     use risingwave_common::util::chunk_coalesce::DataChunkBuilder;
-    use risingwave_common::util::sort_util::OrderType;
     use risingwave_connector::source::cdc::external::mysql::MySqlExternalTableReader;
     use risingwave_connector::source::cdc::external::{
-        ExternalCdcTableType, ExternalTableConfig, ExternalTableReader, SchemaTableName,
+        ExternalTableConfig, ExternalTableReader, SchemaTableName,
     };
 
-    use super::{SplitSnapshotReadArgs, UpstreamTableRead, UpstreamTableReader};
-    use crate::executor::backfill::cdc::upstream_table::external::ExternalStorageTable;
     use crate::executor::backfill::utils::{get_new_pos, iter_chunks};
-
-    #[tokio::test]
-    async fn test_split_snapshot_retries_before_emitting_rows() {
-        let external_table = ExternalStorageTable::new(
-            TableId::new(1),
-            SchemaTableName {
-                schema_name: "public".to_owned(),
-                table_name: "mock_table".to_owned(),
-            },
-            "mock_database".to_owned(),
-            ExternalTableConfig::default(),
-            ExternalCdcTableType::Mock,
-            Schema::new(vec![
-                Field::with_name(DataType::Int64, "id"),
-                Field::with_name(DataType::Float64, "price"),
-            ]),
-            vec![OrderType::ascending()],
-            vec![0],
-        )
-        .with_mock_snapshot_errors(1);
-        let reader = external_table.create_table_reader().await.unwrap();
-        let upstream_table_reader = UpstreamTableReader::new(external_table, reader);
-        let stream = upstream_table_reader.snapshot_read_table_split(SplitSnapshotReadArgs::new(
-            OwnedRow::new(vec![None]),
-            OwnedRow::new(vec![None]),
-            vec![Field::with_name(DataType::Int64, "id")],
-            None,
-            vec![],
-            SchemaTableName {
-                schema_name: "public".to_owned(),
-                table_name: "mock_table".to_owned(),
-            },
-            "mock_database".to_owned(),
-        ));
-        pin_mut!(stream);
-
-        let mut row_count = 0;
-        let mut finished = false;
-        #[for_await]
-        for result in stream {
-            match result.unwrap() {
-                Some(chunk) => row_count += chunk.cardinality(),
-                None => finished = true,
-            }
-        }
-        assert!(finished);
-        assert_eq!(row_count, 8);
-    }
 
     #[ignore]
     #[tokio::test]
