@@ -24,11 +24,8 @@ use risingwave_common::row::RowDeserializer;
 use risingwave_common::util::iter_util::ZipEqFast;
 use risingwave_common::util::sort_util::{OrderType, cmp_datum};
 use risingwave_connector::source::cdc::CdcScanOptions;
-use risingwave_connector::source::cdc::external::{
-    CdcOffset, ExternalCdcTableType, ExternalTableReaderImpl,
-};
+use risingwave_connector::source::cdc::external::{CdcOffset, ExternalCdcTableType};
 use risingwave_connector::source::{CdcTableSnapshotSplit, CdcTableSnapshotSplitRaw};
-use risingwave_pb::common::ThrottleType;
 use rw_futures_util::pausable;
 
 use crate::executor::backfill::cdc::cdc_backfill::{
@@ -258,7 +255,6 @@ impl<S: StateStore> ParallelizedCdcBackfillExecutor<S> {
             // Once all splits are complete, the executor only forwards the table-filtered CDC
             // stream and must not depend on the upstream snapshot table still existing.
             let upstream_table_reader = if next_split_idx < actor_snapshot_splits.len() {
-                let mut table_reader: Option<ExternalTableReaderImpl> = None;
                 let external_table = self.external_table.clone();
                 let actor_id = self.actor_ctx.id;
                 let fragment_id = self.actor_ctx.fragment_id;
@@ -267,55 +263,49 @@ impl<S: StateStore> ParallelizedCdcBackfillExecutor<S> {
                     actor_id,
                     fragment_id,
                 ));
-                loop {
-                    if let Some(msg) = build_reader_and_poll_upstream(
-                        &mut upstream,
-                        &mut table_reader,
-                        &mut future,
-                    )
-                    .await?
-                    {
-                        if let Some(msg) = mapping_message(msg, &self.output_indices) {
-                            match msg {
-                                Message::Barrier(barrier) => {
-                                    state_impl.commit_state(barrier.epoch).await?;
-                                    if is_reset_barrier(&barrier, self.actor_ctx.id) {
-                                        next_reset_barrier = Some(barrier);
-                                        continue 'with_cdc_table_snapshot_splits;
+                let table_reader = loop {
+                    match build_reader_and_poll_upstream(&mut upstream, &mut future).await? {
+                        Either::Left(msg) => {
+                            if let Some(msg) = mapping_message(msg, &self.output_indices) {
+                                match msg {
+                                    Message::Barrier(barrier) => {
+                                        state_impl.commit_state(barrier.epoch).await?;
+                                        if is_reset_barrier(&barrier, self.actor_ctx.id) {
+                                            next_reset_barrier = Some(barrier);
+                                            continue 'with_cdc_table_snapshot_splits;
+                                        }
+                                        yield Message::Barrier(barrier);
                                     }
-                                    yield Message::Barrier(barrier);
-                                }
-                                Message::Chunk(chunk) => {
-                                    if chunk.cardinality() == 0 {
-                                        continue;
+                                    Message::Chunk(chunk) => {
+                                        if chunk.cardinality() == 0 {
+                                            continue;
+                                        }
+                                        if let Some(filtered_chunk) = filter_stream_chunk(
+                                            chunk,
+                                            &current_actor_bounds,
+                                            snapshot_split_column_index,
+                                        ) && filtered_chunk.cardinality() > 0
+                                        {
+                                            yield Message::Chunk(filtered_chunk);
+                                        }
                                     }
-                                    if let Some(filtered_chunk) = filter_stream_chunk(
-                                        chunk,
-                                        &current_actor_bounds,
-                                        snapshot_split_column_index,
-                                    ) && filtered_chunk.cardinality() > 0
-                                    {
-                                        yield Message::Chunk(filtered_chunk);
+                                    Message::Watermark(_) => {
+                                        // Ignore watermark, like the `CdcBackfillExecutor`.
                                     }
-                                }
-                                Message::Watermark(_) => {
-                                    // Ignore watermark, like the `CdcBackfillExecutor`.
                                 }
                             }
                         }
-                    } else {
-                        assert!(table_reader.is_some(), "table reader must be created");
-                        tracing::info!(
-                            %table_id,
-                            upstream_table_name,
-                            "table reader created successfully"
-                        );
-                        break;
+                        Either::Right(table_reader) => break table_reader,
                     }
-                }
+                };
+                tracing::info!(
+                    %table_id,
+                    upstream_table_name,
+                    "table reader created successfully"
+                );
                 Some(UpstreamTableReader::new(
                     self.external_table.clone(),
-                    table_reader.expect("table reader must be created"),
+                    table_reader,
                 ))
             } else {
                 None
@@ -402,14 +392,14 @@ impl<S: StateStore> ParallelizedCdcBackfillExecutor<S> {
                                                 is_snapshot_paused = false;
                                                 snapshot_valve.resume();
                                             }
-                                            Mutation::Throttle(some) => {
+                                            Mutation::Throttle(_) => {
                                                 // TODO(zw): optimization: improve throttle.
                                                 // 1. Handle rate limit 0. Currently, to resume the process, the actor must be rebuilt.
                                                 // 2. Apply new rate limit immediately.
-                                                if let Some(entry) =
-                                                    some.get(&self.actor_ctx.fragment_id)
-                                                    && entry.throttle_type()
-                                                        == ThrottleType::Backfill
+                                                if let Some(entry) = mutation
+                                                    .backfill_throttle_config(
+                                                        self.actor_ctx.fragment_id,
+                                                    )
                                                     && entry.rate_limit != self.rate_limit_rps
                                                 {
                                                     // The new rate limit will take effect since next split.
