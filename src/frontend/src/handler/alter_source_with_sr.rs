@@ -194,11 +194,23 @@ pub async fn refresh_sr_and_get_columns_diff(
 
 fn get_format_encode_from_source(source: &SourceCatalog) -> Result<FormatEncodeOptions> {
     let stmt = source.create_sql_ast()?;
-    let Statement::CreateSource {
-        stmt: CreateSourceStatement { format_encode, .. },
-    } = stmt
-    else {
-        unreachable!()
+    let format_encode = match stmt {
+        Statement::CreateSource {
+            stmt: CreateSourceStatement { format_encode, .. },
+        } => format_encode,
+        // Sources that back a `CREATE TABLE … FORMAT … ENCODE …` statement store the
+        // original `CREATE TABLE` SQL as their definition.  Extract format_encode from it.
+        Statement::CreateTable {
+            format_encode: Some(format_encode),
+            ..
+        } => format_encode,
+        stmt => {
+            return Err(ErrorCode::InternalError(format!(
+                "expected CREATE SOURCE or CREATE TABLE with FORMAT/ENCODE, got: {:?}",
+                stmt
+            ))
+            .into());
+        }
     };
     Ok(format_encode.into_v2_with_warning())
 }
