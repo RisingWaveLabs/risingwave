@@ -284,7 +284,7 @@ fn task_main(
                 }
 
                 ServiceConfig::Pubsub(c) => {
-                    let mut service = PubsubService::new(c.clone())?;
+                    let mut service = PubsubService::new(c.clone());
                     service.execute(&mut ctx)?;
                     let mut task = risedev::PubsubReadyTaskCheck::new(c.clone())?;
                     task.execute(&mut ctx)?;

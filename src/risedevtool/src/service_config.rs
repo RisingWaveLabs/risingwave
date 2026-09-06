@@ -329,6 +329,7 @@ pub struct PubsubConfig {
     pub id: String,
     #[serde(default)]
     pub user_managed: bool,
+    pub image: String,
     #[serde(with = "string")]
     pub port: u16,
     pub address: String,

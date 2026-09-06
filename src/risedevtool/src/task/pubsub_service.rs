@@ -12,66 +12,38 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::env;
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use super::docker_service::{DockerService, DockerServiceConfig};
+use crate::PubsubConfig;
 
-use anyhow::{Result, anyhow};
-
-use super::{ExecuteContext, Task};
-use crate::util::stylized_risedev_subcmd;
-use crate::{DummyService, PubsubConfig};
-
-pub struct PubsubService {
-    config: PubsubConfig,
-}
-
-impl PubsubService {
-    pub fn new(config: PubsubConfig) -> Result<Self> {
-        Ok(Self { config })
-    }
-
-    fn gcloud_path(&self) -> Result<PathBuf> {
-        let prefix_bin = env::var("PREFIX_BIN")?;
-        Ok(Path::new(&prefix_bin)
-            .join("gcloud")
-            .join("start-pubsub-emulator.sh"))
-    }
-
-    fn gcloud(&self) -> Result<Command> {
-        Ok(Command::new(self.gcloud_path()?))
-    }
-}
-
-impl Task for PubsubService {
-    fn execute(&mut self, ctx: &mut ExecuteContext<impl std::io::Write>) -> anyhow::Result<()> {
-        if self.config.user_managed {
-            return DummyService::new(&self.id()).execute(ctx);
-        }
-
-        ctx.service(self);
-        ctx.pb.set_message("starting...");
-
-        let path = self.gcloud_path()?;
-        if !path.exists() {
-            return Err(anyhow!(
-                "gcloud binary not found in {:?}\nDid you enable pubsub-emulator feature in `{}`?",
-                path,
-                stylized_risedev_subcmd("configure")
-            ));
-        }
-
-        let mut cmd = self.gcloud()?;
-        cmd.arg(format!("{}", self.config.port));
-
-        ctx.run_command(ctx.tmux_run(cmd)?)?;
-
-        ctx.pb.set_message("started");
-
-        Ok(())
-    }
-
+impl DockerServiceConfig for PubsubConfig {
     fn id(&self) -> String {
-        self.config.id.clone()
+        self.id.clone()
+    }
+
+    fn is_user_managed(&self) -> bool {
+        self.user_managed
+    }
+
+    fn image(&self) -> String {
+        self.image.clone()
+    }
+
+    fn args(&self) -> Vec<String> {
+        vec![
+            "gcloud".to_owned(),
+            "beta".to_owned(),
+            "emulators".to_owned(),
+            "pubsub".to_owned(),
+            "start".to_owned(),
+            "--project=demo".to_owned(),
+            "--host-port=0.0.0.0:8900".to_owned(),
+        ]
+    }
+
+    fn ports(&self) -> Vec<(String, String)> {
+        vec![(self.port.to_string(), "8900".to_owned())]
     }
 }
+
+/// Docker-backed Google Pub/Sub emulator service.
+pub type PubsubService = DockerService<PubsubConfig>;
