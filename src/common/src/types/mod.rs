@@ -100,7 +100,7 @@ pub use self::struct_type::StructType;
 pub use self::successor::Successor;
 pub use self::timestamptz::*;
 pub use self::to_text::ToText;
-pub use self::variant::{VariantRef, VariantVal};
+pub use self::variant::{VariantPath, VariantRef, VariantVal};
 pub use self::with_data_type::WithDataType;
 
 /// A 32-bit floating point type with total order.

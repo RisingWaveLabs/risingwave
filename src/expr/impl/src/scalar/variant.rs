@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use risingwave_common::types::{ScalarRefImpl, VariantRef, VariantVal};
+use risingwave_common::types::{ScalarRefImpl, VariantPath, VariantRef, VariantVal};
 use risingwave_expr::expr::Context;
 use risingwave_expr::{ExprError, Result, function};
 use thiserror_ext::AsReport;
@@ -25,19 +25,38 @@ fn to_variant(input: Option<ScalarRefImpl<'_>>, ctx: &Context) -> Result<Variant
     })
 }
 
-#[function("variant_get(variant, varchar) -> variant")]
-fn variant_get(value: VariantRef<'_>, path: &str) -> Result<Option<VariantVal>> {
-    value
-        .access_path_strict(path)
-        .map_err(|e| ExprError::InvalidParam {
-            name: "variant_get",
-            reason: e.to_report_string().into(),
-        })
+#[function(
+    "variant_get(variant, varchar) -> variant",
+    prebuild = "VariantPath::parse($1).map_err(variant_get_error)?"
+)]
+fn variant_get(value: VariantRef<'_>, path: &VariantPath) -> Result<Option<VariantVal>> {
+    value.access_path_parsed(path).map_err(variant_get_error)
 }
 
-#[function("try_variant_get(variant, varchar) -> variant")]
-fn try_variant_get(value: VariantRef<'_>, path: &str) -> Option<VariantVal> {
-    value.access_path(path)
+fn variant_get_error(e: anyhow::Error) -> ExprError {
+    ExprError::InvalidParam {
+        name: "variant_get",
+        reason: e.to_report_string().into(),
+    }
+}
+
+#[derive(Debug)]
+struct TryVariantPath(Option<VariantPath>);
+
+impl TryVariantPath {
+    fn parse(path: &str) -> Self {
+        Self(VariantPath::parse(path).ok())
+    }
+}
+
+#[function(
+    "try_variant_get(variant, varchar) -> variant",
+    prebuild = "TryVariantPath::parse($1)"
+)]
+fn try_variant_get(value: VariantRef<'_>, path: &TryVariantPath) -> Option<VariantVal> {
+    path.0
+        .as_ref()
+        .and_then(|path| value.access_path_parsed(path).ok().flatten())
 }
 
 #[function("variant_typeof(variant) -> varchar")]

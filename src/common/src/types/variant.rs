@@ -55,6 +55,22 @@ pub struct VariantRef<'a> {
     data: &'a [u8],
 }
 
+/// A parsed path for accessing nested fields in a [`VariantRef`].
+///
+/// Parsing a path once and reusing it avoids repeated string parsing and allocations when the same
+/// path is applied to multiple values.
+#[derive(Debug)]
+pub struct VariantPath {
+    tokens: Vec<PathToken>,
+}
+
+impl VariantPath {
+    /// Parses a variant path.
+    pub fn parse(path: &str) -> anyhow::Result<Self> {
+        parse_path(path).map(|tokens| Self { tokens })
+    }
+}
+
 impl EstimateSize for VariantVal {
     fn estimated_heap_size(&self) -> usize {
         self.data.len()
@@ -379,18 +395,23 @@ impl<'a> VariantRef<'a> {
     }
 
     pub fn access_path_strict(self, path: &str) -> anyhow::Result<Option<VariantVal>> {
+        self.access_path_parsed(&VariantPath::parse(path)?)
+    }
+
+    /// Accesses a nested value using a pre-parsed path.
+    pub fn access_path_parsed(self, path: &VariantPath) -> anyhow::Result<Option<VariantVal>> {
         // Walk the whole path on borrowed variants sharing the same metadata, and canonicalize
         // (re-encode) only the final leaf.
         let mut variant = self.parquet_variant();
-        for token in parse_path(path)? {
+        for token in &path.tokens {
             let next = match token {
-                PathToken::Field(field) => variant.get_object_field(&field),
+                PathToken::Field(field) => variant.get_object_field(field),
                 // Pattern-match instead of `as_list`, whose `&'m self` receiver would keep
                 // `variant` borrowed and forbid the reassignment below.
                 PathToken::Index(index) => match &variant {
                     ParquetVariant::List(list) => {
-                        let index = if index >= 0 {
-                            Some(index as usize)
+                        let index = if *index >= 0 {
+                            Some(*index as usize)
                         } else {
                             list.len().checked_sub(index.unsigned_abs() as usize)
                         };
@@ -899,6 +920,7 @@ fn append_decimal(value: Decimal, builder: &mut impl VariantBuilderExt) -> anyho
     Ok(())
 }
 
+#[derive(Debug)]
 enum PathToken {
     Field(String),
     Index(i32),
@@ -1008,6 +1030,20 @@ mod tests {
             hex::encode(variant.value()),
             expected_value_hex,
             "{name} value bytes changed"
+        );
+    }
+
+    #[test]
+    fn access_path_with_preparsed_path() {
+        let v: VariantVal = r#"{"a":[{"b":7}]}"#.parse().unwrap();
+        let path = VariantPath::parse("$.a[0].b").unwrap();
+        assert_eq!(
+            v.as_scalar_ref()
+                .access_path_parsed(&path)
+                .unwrap()
+                .unwrap()
+                .to_string(),
+            "7"
         );
     }
 
