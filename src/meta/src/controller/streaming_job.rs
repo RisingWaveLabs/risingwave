@@ -88,8 +88,8 @@ use crate::controller::fragment::FragmentTypeMaskExt;
 use crate::controller::utils::{
     PartialObject, build_object_group_for_delete, check_if_belongs_to_iceberg_table,
     check_relation_name_duplicate, check_sink_into_table_cycle, ensure_job_not_canceled,
-    ensure_object_id, ensure_user_id, fetch_target_fragments, get_belong_objects,
-    get_belong_objects_by_ids, get_referring_objects, get_table_columns,
+    ensure_object_id, ensure_user_id, fetch_target_fragments, format_with_option_secret_resolved,
+    get_belong_objects, get_belong_objects_by_ids, get_referring_objects, get_table_columns,
     grant_default_privileges_automatically, insert_fragment_relations,
     list_object_dependencies_by_object_id, list_user_info_by_ids, upsert_user_privileges,
 };
@@ -2914,6 +2914,8 @@ impl CatalogController {
                 .map(|secret_ref| secret_ref.to_protobuf())
                 .unwrap_or_default(),
         );
+        let altered_options_with_secret =
+            WithOptionsSecResolved::new(alter_props.clone(), alter_secret_refs.clone());
         let (to_add_secret_dep, to_remove_secret_dep) =
             options_with_secret.handle_update(alter_props, alter_secret_refs)?;
 
@@ -2944,50 +2946,18 @@ impl CatalogController {
                 .try_into()
                 .unwrap();
 
-            /// Formats SQL options with secret values properly resolved
-            ///
-            /// This function processes configuration options that may contain sensitive data:
-            /// - Plaintext options are directly converted to `SqlOption`
-            /// - Secret options are retrieved from the database and formatted as "SECRET {name}"
-            ///   without exposing the actual secret value
-            ///
-            /// # Arguments
-            /// * `txn` - Database transaction for retrieving secrets
-            /// * `options_with_secret` - Container of options with both plaintext and secret values
-            ///
-            /// # Returns
-            /// * `MetaResult<Vec<SqlOption>>` - List of formatted SQL options or error
-            async fn format_with_option_secret_resolved(
-                txn: &DatabaseTransaction,
-                options_with_secret: &WithOptionsSecResolved,
-            ) -> MetaResult<Vec<SqlOption>> {
-                let mut options = Vec::new();
-                for (k, v) in options_with_secret.as_plaintext() {
-                    let sql_option = SqlOption::try_from((k, &format!("'{}'", v)))
-                        .map_err(|e| MetaError::invalid_parameter(e.to_report_string()))?;
-                    options.push(sql_option);
-                }
-                for (k, v) in options_with_secret.as_secret() {
-                    if let Some(secret_model) = Secret::find_by_id(v.secret_id).one(txn).await? {
-                        let sql_option =
-                            SqlOption::try_from((k, &format!("SECRET {}", secret_model.name)))
-                                .map_err(|e| MetaError::invalid_parameter(e.to_report_string()))?;
-                        options.push(sql_option);
-                    } else {
-                        return Err(MetaError::catalog_id_not_found("secret", v.secret_id));
-                    }
-                }
-                Ok(options)
-            }
-
             match &mut stmt {
                 Statement::CreateSource { stmt } => {
-                    stmt.with_properties.0 =
-                        format_with_option_secret_resolved(&txn, &options_with_secret).await?;
+                    let altered_sql_options =
+                        format_with_option_secret_resolved(&txn, &altered_options_with_secret)
+                            .await?;
+                    merge_with_options(&mut stmt.with_properties.0, altered_sql_options);
                 }
                 Statement::CreateTable { with_options, .. } => {
-                    *with_options =
-                        format_with_option_secret_resolved(&txn, &options_with_secret).await?;
+                    let altered_sql_options =
+                        format_with_option_secret_resolved(&txn, &altered_options_with_secret)
+                            .await?;
+                    merge_with_options(with_options, altered_sql_options);
                     associate_table_id = source.optional_associated_table_id;
                     preferred_id = associate_table_id.unwrap().as_object_id();
                 }
@@ -3991,6 +3961,19 @@ fn update_stmt_with_props(
     Ok(())
 }
 
+fn merge_with_options(with_properties: &mut Vec<SqlOption>, altered_options: Vec<SqlOption>) {
+    for altered_option in altered_options {
+        if let Some(existing_option) = with_properties
+            .iter_mut()
+            .find(|option| option.name.real_value() == altered_option.name.real_value())
+        {
+            *existing_option = altered_option;
+        } else {
+            with_properties.push(altered_option);
+        }
+    }
+}
+
 async fn update_sink_fragment_props(
     txn: &DatabaseTransaction,
     sink_id: SinkId,
@@ -4111,4 +4094,38 @@ where
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use risingwave_sqlparser::ast::{SqlOption, Statement};
+
+    use super::{Parser, merge_with_options};
+
+    #[test]
+    fn test_merge_with_options_normalizes_altered_option_name() {
+        let mut statements = Parser::parse_sql(
+            "CREATE SOURCE s WITH (properties.receive.message.max.bytes = 'old', \
+             connection = kafka_conn) FORMAT PLAIN ENCODE JSON",
+        )
+        .unwrap();
+        let Statement::CreateSource { stmt } = statements.remove(0) else {
+            unreachable!()
+        };
+        let mut with_properties = stmt.with_properties.0;
+        let altered_name = "properties.receive.message.max.bytes".to_owned();
+        let altered_value = "new".to_owned();
+
+        merge_with_options(
+            &mut with_properties,
+            vec![SqlOption::try_from((&altered_name, &altered_value)).unwrap()],
+        );
+
+        assert_eq!(with_properties.len(), 2);
+        assert_eq!(
+            with_properties[0].to_string(),
+            "properties.receive.\"message\".\"max\".bytes = 'new'"
+        );
+        assert_eq!(with_properties[1].to_string(), "connection = kafka_conn");
+    }
 }

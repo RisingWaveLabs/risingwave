@@ -13,6 +13,9 @@ statement ok
 set streaming_use_shared_source to false;
 
 system ok
+rpk topic delete test_alter_non_shared_source -X brokers=message_queue_sasl_1:19092 -X sasl.mechanism=PLAIN -X user=dev -X pass=rw || true
+
+system ok
 rpk topic create test_alter_non_shared_source -X brokers=message_queue_sasl_1:19092 -X sasl.mechanism=PLAIN -X user=dev -X pass=rw
 
 system ok
@@ -21,6 +24,9 @@ cat << EOF | rpk topic produce test_alter_non_shared_source -X brokers=message_q
 {"x": 2}
 {"x": 3}
 EOF
+
+system ok
+rpk topic delete test_alter_non_shared_source -X brokers=message_queue_sasl_2:19093 -X sasl.mechanism=PLAIN -X user=dev1 -X pass=rw || true
 
 system ok
 rpk topic create test_alter_non_shared_source -X brokers=message_queue_sasl_2:19093 -X sasl.mechanism=PLAIN -X user=dev1 -X pass=rw
@@ -90,13 +96,19 @@ statement ok
 alter source non_shared_source_2 connector WITH (properties.receive.message.max.bytes = secret s2);
 
 query I retry 5 backoff 1s
-select count(*)  from rw_sources where definition ILIKE '%secret s2%' and name = 'non_shared_source_1';
+select count(*) from rw_sources
+where definition ILIKE '%properties.receive."message"."max".bytes = secret public.s2%'
+  and definition ILIKE '%topic = ''test_alter_non_shared_source''%'
+  and name = 'non_shared_source_1';
 ----
 1
 
 
 query I retry 5 backoff 1s
-select count(*)  from rw_sources where definition ILIKE '%secret s2%' and name = 'non_shared_source_2';
+select count(*) from rw_sources
+where definition ILIKE '%properties.receive."message"."max".bytes = secret public.s2%'
+  and definition ILIKE '%topic = ''test_alter_non_shared_source''%'
+  and name = 'non_shared_source_2';
 ----
 1
 
@@ -125,6 +137,9 @@ select * from non_shared_source_1_mv order by x;
 # ==== test non shared source with connection ====
 
 system ok
+rpk topic delete test_alter_non_shared_source_conn -X brokers=message_queue_sasl_1:19092 -X sasl.mechanism=PLAIN -X user=dev -X pass=rw || true
+
+system ok
 rpk topic create test_alter_non_shared_source_conn -X brokers=message_queue_sasl_1:19092 -X sasl.mechanism=PLAIN -X user=dev -X pass=rw
 
 system ok
@@ -133,6 +148,9 @@ cat << EOF | rpk topic produce test_alter_non_shared_source_conn -X brokers=mess
 {"x": 2}
 {"x": 3}
 EOF
+
+system ok
+rpk topic delete test_alter_non_shared_source_conn -X brokers=message_queue_sasl_2:19093 -X sasl.mechanism=PLAIN -X user=dev1 -X pass=rw || true
 
 system ok
 rpk topic create test_alter_non_shared_source_conn -X brokers=message_queue_sasl_2:19093 -X sasl.mechanism=PLAIN -X user=dev1 -X pass=rw
@@ -167,11 +185,25 @@ statement ok
 create source non_shared_conn_source (x int) with (
     connector = 'kafka',
     connection = kafka_conn_non_shared,
+    properties.receive.message.max.bytes = secret s1,
     topic = 'test_alter_non_shared_source_conn'
 ) format plain encode json;
 
 statement ok
 create materialized view non_shared_conn_source_mv as select * from non_shared_conn_source;
+
+statement ok
+alter source non_shared_conn_source connector with (
+    properties.receive.message.max.bytes = secret s2
+);
+
+query I
+select count(*) from rw_sources
+where name = 'non_shared_conn_source'
+  and definition ILIKE '%connection = kafka_conn_non_shared%'
+  and definition ILIKE '%properties.receive."message"."max".bytes = secret public.s2%';
+----
+1
 
 query I retry 3 backoff 1s
 select * from non_shared_conn_source_mv order by x;
@@ -248,16 +280,16 @@ statement ok
 drop secret s_password_conn_new;
 
 system ok
-rpk topic delete test_alter_non_shared_source -X brokers=message_queue_sasl_1:19092 -X sasl.mechanism=PLAIN -X user=dev -X pass=rw
+rpk topic delete test_alter_non_shared_source -X brokers=message_queue_sasl_1:19092 -X sasl.mechanism=PLAIN -X user=dev -X pass=rw || true
 
 system ok
-rpk topic delete test_alter_non_shared_source -X brokers=message_queue_sasl_2:19093 -X sasl.mechanism=PLAIN -X user=dev1 -X pass=rw
+rpk topic delete test_alter_non_shared_source -X brokers=message_queue_sasl_2:19093 -X sasl.mechanism=PLAIN -X user=dev1 -X pass=rw || true
 
 system ok
-rpk topic delete test_alter_non_shared_source_conn -X brokers=message_queue_sasl_1:19092 -X sasl.mechanism=PLAIN -X user=dev -X pass=rw
+rpk topic delete test_alter_non_shared_source_conn -X brokers=message_queue_sasl_1:19092 -X sasl.mechanism=PLAIN -X user=dev -X pass=rw || true
 
 system ok
-rpk topic delete test_alter_non_shared_source_conn -X brokers=message_queue_sasl_2:19093 -X sasl.mechanism=PLAIN -X user=dev1 -X pass=rw
+rpk topic delete test_alter_non_shared_source_conn -X brokers=message_queue_sasl_2:19093 -X sasl.mechanism=PLAIN -X user=dev1 -X pass=rw || true
 
 statement ok
 set streaming_use_shared_source to true;

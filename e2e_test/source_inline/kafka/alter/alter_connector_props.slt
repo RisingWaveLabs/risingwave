@@ -42,6 +42,23 @@ FORMAT PLAIN ENCODE JSON;
 statement error Invalid input syntax: Cannot alter connector properties that are set by CONNECTION.
 alter table plain_students_1 connector with ( properties.security.protocol = 'sasl_ssl' ) ;
 
+statement ok
+alter table plain_students_1 connector with (
+    properties.receive.message.max.bytes = secret s2
+);
+
+query I
+select definition from rw_tables
+where name = 'plain_students_1';
+----
+CREATE TABLE plain_students_1 ("ID" INT, "firstName" CHARACTER VARYING, "lastName" CHARACTER VARYING, age INT, height REAL, weight REAL) WITH (connector = 'kafka', connection = conn, topic = 'kafka_alter_connector_props', properties.receive."message"."max".bytes = secret public.s2) FORMAT PLAIN ENCODE JSON
+
+query I
+select definition from rw_sources
+where name = 'plain_students_1';
+----
+CREATE TABLE plain_students_1 ("ID" INT, "firstName" CHARACTER VARYING, "lastName" CHARACTER VARYING, age INT, height REAL, weight REAL) WITH (connector = 'kafka', connection = conn, topic = 'kafka_alter_connector_props', properties.receive."message"."max".bytes = secret public.s2) FORMAT PLAIN ENCODE JSON
+
 
 statement ok
 CREATE TABLE plain_students (
@@ -74,13 +91,25 @@ ALTER TABLE plain_students CONNECTOR WITH (properties.receive.message.max.bytes 
 
 # the table definition is changed accordingly
 query I
-select count(*)  from rw_tables where definition ILIKE '%secret s2%' and name = 'plain_students';
+select count(*) from rw_tables
+where definition ILIKE '%properties.receive."message"."max".bytes = secret public.s2%'
+  and definition ILIKE '%topic = ''kafka_alter_connector_props''%'
+  and name = 'plain_students';
 ----
 1
 
+query I
+select definition from rw_tables
+where name = 'plain_students';
+----
+CREATE TABLE plain_students ("ID" INT, "firstName" CHARACTER VARYING, "lastName" CHARACTER VARYING, age INT, height REAL, weight REAL) WITH (connector = 'kafka', properties.bootstrap.server = '127.0.0.1:29092', topic = 'kafka_alter_connector_props', properties.receive."message"."max".bytes = secret public.s2) FORMAT PLAIN ENCODE JSON
+
 # the associated source definition is changed accordingly
 query I
-select count(*)  from rw_sources where definition ILIKE '%secret s2%' and name = 'plain_students';
+select count(*) from rw_sources
+where definition ILIKE '%properties.receive."message"."max".bytes = secret public.s2%'
+  and definition ILIKE '%topic = ''kafka_alter_connector_props''%'
+  and name = 'plain_students';
 ----
 1
 
