@@ -31,7 +31,6 @@ use risingwave_pb::meta::subscribe_response::{Info, Operation};
 use risingwave_pb::stream_service::barrier_complete_response::{
     PbIcebergPkIndexSinkMetadata, PbListFinishedSource, PbLoadFinishedSource,
 };
-use risingwave_pb::stream_service::streaming_control_stream_request::PbInitRequest;
 use risingwave_rpc_client::StreamingControlHandle;
 use thiserror_ext::AsReport;
 
@@ -297,12 +296,8 @@ impl GlobalBarrierWorkerContext for GlobalBarrierWorkerContextImpl {
     }
 
     #[await_tree::instrument("new_control_stream({})", node.id)]
-    async fn new_control_stream(
-        &self,
-        node: &WorkerNode,
-        init_request: &PbInitRequest,
-    ) -> MetaResult<StreamingControlHandle> {
-        self.new_control_stream_impl(node, init_request).await
+    async fn new_control_stream(&self, node: &WorkerNode) -> MetaResult<StreamingControlHandle> {
+        self.new_control_stream_impl(node).await
     }
 
     async fn reload_runtime_info(&self) -> MetaResult<BarrierWorkerRuntimeInfoSnapshot> {

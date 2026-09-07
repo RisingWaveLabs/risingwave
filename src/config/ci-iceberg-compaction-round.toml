@@ -1,0 +1,9 @@
+[storage]
+# With one compactor worker, admit and execute only one partition plan per task.
+compactor_max_task_multiplier = 1.0
+iceberg_compaction_pending_parallelism_budget_multiplier = 1.0
+iceberg_compaction_task_parallelism_ratio = 1.0
+
+[system]
+barrier_interval_ms = 250
+checkpoint_frequency = 1

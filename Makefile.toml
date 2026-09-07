@@ -1226,9 +1226,11 @@ script = """
 echo "Running $(tput setaf 4)cargo clippy$(tput sgr0) checks"
 set -x
 cargo clippy $@ ${RISINGWAVE_FEATURE_FLAGS}
+STATUS=$?
 set +x
 echo "If cargo clippy check failed or generates warning, you may run $(tput setaf 4)cargo clippy --workspace --all-targets --fix$(tput sgr0) to fix it. Note that clippy fix requires manual review, as not all auto fixes are guaranteed to be reasonable."
 echo "Alternately, you may run $(tput setaf 4)./risedev cf {package_names}$(tput sgr0) to fix those packages (e.g. frontend, meta)."
+exit $STATUS
 """
 
 [tasks.check-clippy-fix]
@@ -1263,6 +1265,7 @@ script = """
 
 if ! typos ; then
   echo "Hint: use 'typos -w' to fix."
+  exit 1
 fi
 """
 

@@ -26,8 +26,12 @@ message SubscribeIcebergCompactionEventRequest {
   message ReportTask {
     enum Status {
       UNSPECIFIED = 0;
+      // The dispatched task completed successfully. For a bounded automatic
+      // round, this means progress; only DRAINED completes the round.
       SUCCESS = 1;
       FAILED = 2;
+      // A bounded planning attempt completed successfully and produced no plans.
+      DRAINED = 3;
     }
 
     uint64 task_id = 1;
@@ -80,6 +84,9 @@ message IcebergCompactionTask {
   // path for iceberg pk-index sinks, the compactor performs the rewrite
   // without committing and reports the result back to meta instead.
   bool pk_index_coordinated = 5;
+
+  // Inclusive file sequence boundary shared by every task in an automatic compaction round.
+  optional int64 max_file_sequence_number = 6;
 }
 
 message CancelCompactTask {

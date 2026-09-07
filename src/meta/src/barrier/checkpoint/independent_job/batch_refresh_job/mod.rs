@@ -475,6 +475,7 @@ impl BatchRefreshJobCheckpointControl {
         snapshot_backfill_upstream_tables: HashSet<TableId>,
         snapshot_epoch: u64,
         version_stat: &HummockVersionStats,
+        term_id: &str,
         partial_graph_manager: &mut PartialGraphManager,
         logical: &BatchRefreshLogicalFragments,
         worker_nodes: &HashMap<WorkerId, WorkerNode>,
@@ -531,6 +532,7 @@ impl BatchRefreshJobCheckpointControl {
 
         let mut graph_adder = partial_graph_manager.add_partial_graph(
             partial_graph_id,
+            term_id,
             BatchRefreshBarrierStats::new(job_id, snapshot_epoch),
         );
 
@@ -588,6 +590,7 @@ impl BatchRefreshJobCheckpointControl {
         version_stat: &HummockVersionStats,
         initial_mutation: Mutation,
         render_result: BatchRefreshRenderResult,
+        term_id: &str,
         partial_graph_recoverer: &mut crate::barrier::partial_graph::PartialGraphRecoverer<'_>,
         batch_refresh_seconds: u64,
     ) -> MetaResult<Self> {
@@ -649,6 +652,7 @@ impl BatchRefreshJobCheckpointControl {
 
         partial_graph_recoverer.recover_graph(
             partial_graph_id,
+            term_id,
             initial_mutation,
             &first_barrier_info,
             &render_result.node_actors,
@@ -1196,6 +1200,7 @@ impl BatchRefreshJobCheckpointControl {
         context: &BatchRefreshJobTriggerContext,
         worker_nodes: &HashMap<WorkerId, WorkerNode>,
         actor_id_counter: &AtomicU32,
+        term_id: &str,
         partial_graph_manager: &mut PartialGraphManager,
     ) -> MetaResult<bool> {
         let last_committed_epoch = match &self.status {
@@ -1282,6 +1287,7 @@ impl BatchRefreshJobCheckpointControl {
         let mut partial_graph_recoverer = partial_graph_manager.start_recover();
         let recover_result = partial_graph_recoverer.recover_graph(
             self.partial_graph_id,
+            term_id,
             initial_mutation,
             &initial_barrier,
             node_actors,

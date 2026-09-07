@@ -478,6 +478,7 @@ impl PersistedFileScanTask {
             unified_partition_type: None,
             case_sensitive,
             key_metadata: None,
+            file_sequence_number: None,
         }
     }
 
@@ -495,6 +496,7 @@ impl PersistedFileScanTask {
             predicate,
             deletes,
             sequence_number,
+            file_sequence_number: _,
             file_size_in_bytes,
             case_sensitive,
             ..

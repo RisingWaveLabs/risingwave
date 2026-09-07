@@ -312,18 +312,15 @@ pub(super) struct LocalBarrierWorker {
     control_stream_handle: ControlStreamHandle,
 
     pub(super) actor_manager: Arc<StreamActorManager>,
-
-    pub(super) term_id: String,
 }
 
 impl LocalBarrierWorker {
-    pub(super) fn new(actor_manager: Arc<StreamActorManager>, term_id: String) -> Self {
+    pub(super) fn new(actor_manager: Arc<StreamActorManager>) -> Self {
         Self {
             state: Default::default(),
             await_epoch_completed_futures: Default::default(),
             control_stream_handle: ControlStreamHandle::empty(),
             actor_manager,
-            term_id,
         }
     }
 
@@ -401,11 +398,12 @@ impl LocalBarrierWorker {
                             actor_id,
                             upstream_actor_id,
                             upstream_partial_graph_id,
+                            term_id,
                             tx
                         } => {
                             self.handle_actor_op(LocalActorOperation::TakeReceiver {
                                 partial_graph_id: upstream_partial_graph_id,
-                                term_id: self.term_id.clone(),
+                                term_id,
                                 ids: (upstream_actor_id, actor_id),
                                 request: TakeReceiverRequest::Local(tx),
                             });
@@ -495,7 +493,7 @@ impl LocalBarrierWorker {
                 Ok(())
             }
             Request::CreatePartialGraph(req) => {
-                self.add_partial_graph(req.partial_graph_id);
+                self.add_partial_graph(req.partial_graph_id, req.term_id);
                 Ok(())
             }
             Request::ResetPartialGraphs(req) => {
@@ -519,29 +517,28 @@ impl LocalBarrierWorker {
                 ids,
                 request,
             } => {
-                let err = if self.term_id != term_id {
-                    {
-                        warn!(
-                            ?ids,
-                            term_id,
-                            current_term_id = self.term_id,
-                            "take receiver on unmatched term_id"
-                        );
-                        anyhow!(
-                            "take receiver {:?} on unmatched term_id {} to current term_id {}",
-                            ids,
-                            term_id,
-                            self.term_id
-                        )
-                    }
-                } else {
-                    match self.state.partial_graphs.entry(partial_graph_id) {
-                        Entry::Occupied(mut entry) => match entry.get_mut() {
-                            PartialGraphStatus::ReceivedExchangeRequest(pending_requests) => {
-                                pending_requests.push((ids, request));
-                                return;
-                            }
-                            PartialGraphStatus::Running(graph) => {
+                let err = match self.state.partial_graphs.entry(partial_graph_id) {
+                    Entry::Occupied(mut entry) => match entry.get_mut() {
+                        PartialGraphStatus::ReceivedExchangeRequest(pending_requests) => {
+                            pending_requests.push((term_id, ids, request));
+                            return;
+                        }
+                        PartialGraphStatus::Running(graph) => {
+                            if graph.local_barrier_manager.term_id != term_id {
+                                warn!(
+                                    %partial_graph_id,
+                                    ?ids,
+                                    request_term_id = term_id,
+                                    current_term_id = graph.local_barrier_manager.term_id,
+                                    "take receiver on unmatched partial graph term"
+                                );
+                                anyhow!(
+                                    "take receiver {:?} on unmatched partial graph term {} to current term {}",
+                                    ids,
+                                    term_id,
+                                    graph.local_barrier_manager.term_id
+                                )
+                            } else {
                                 let (upstream_actor_id, actor_id) = ids;
                                 graph.new_actor_output_request(
                                     actor_id,
@@ -550,22 +547,16 @@ impl LocalBarrierWorker {
                                 );
                                 return;
                             }
-                            PartialGraphStatus::Suspended(_) => {
-                                anyhow!("partial graph suspended")
-                            }
-                            PartialGraphStatus::Resetting => {
-                                anyhow!("partial graph resetting")
-                            }
-                            PartialGraphStatus::Unspecified => {
-                                unreachable!()
-                            }
-                        },
-                        Entry::Vacant(entry) => {
-                            entry.insert(PartialGraphStatus::ReceivedExchangeRequest(vec![(
-                                ids, request,
-                            )]));
-                            return;
                         }
+                        PartialGraphStatus::Suspended(_) => anyhow!("partial graph suspended"),
+                        PartialGraphStatus::Resetting => anyhow!("partial graph resetting"),
+                        PartialGraphStatus::Unspecified => unreachable!(),
+                    },
+                    Entry::Vacant(entry) => {
+                        entry.insert(PartialGraphStatus::ReceivedExchangeRequest(vec![(
+                            term_id, ids, request,
+                        )]));
+                        return;
                     }
                 };
                 if let TakeReceiverRequest::Remote { result_sender, .. } = request {
@@ -946,18 +937,37 @@ impl LocalBarrierWorker {
         }
     }
 
-    fn add_partial_graph(&mut self, partial_graph_id: PartialGraphId) {
+    fn add_partial_graph(&mut self, partial_graph_id: PartialGraphId, term_id: String) {
         match self.state.partial_graphs.entry(partial_graph_id) {
             Entry::Occupied(entry) => {
                 let status = entry.into_mut();
                 if let PartialGraphStatus::ReceivedExchangeRequest(pending_requests) = status {
                     let mut graph = PartialGraphState::new(
                         partial_graph_id,
-                        self.term_id.clone(),
+                        term_id.clone(),
                         self.actor_manager.clone(),
                     );
-                    for ((upstream_actor_id, actor_id), request) in pending_requests.drain(..) {
-                        graph.new_actor_output_request(actor_id, upstream_actor_id, request);
+                    for (request_term_id, (upstream_actor_id, actor_id), request) in
+                        pending_requests.drain(..)
+                    {
+                        if request_term_id == term_id {
+                            graph.new_actor_output_request(actor_id, upstream_actor_id, request);
+                        } else {
+                            warn!(
+                                %partial_graph_id,
+                                %upstream_actor_id,
+                                %actor_id,
+                                request_term_id,
+                                current_term_id = term_id,
+                                "reject buffered exchange request with stale partial graph term"
+                            );
+                            if let TakeReceiverRequest::Remote { result_sender, .. } = request {
+                                let _ = result_sender.send(Err(anyhow!(
+                                    "take receiver ({upstream_actor_id}, {actor_id}) on stale partial graph term {request_term_id}; current term is {term_id}"
+                                )
+                                .into()));
+                            }
+                        }
                     }
                     *status = PartialGraphStatus::Running(graph);
                 } else {
@@ -966,13 +976,9 @@ impl LocalBarrierWorker {
 
                 status
             }
-            Entry::Vacant(entry) => {
-                entry.insert(PartialGraphStatus::Running(PartialGraphState::new(
-                    partial_graph_id,
-                    self.term_id.clone(),
-                    self.actor_manager.clone(),
-                )))
-            }
+            Entry::Vacant(entry) => entry.insert(PartialGraphStatus::Running(
+                PartialGraphState::new(partial_graph_id, term_id, self.actor_manager.clone()),
+            )),
         };
     }
 
@@ -1057,7 +1063,7 @@ impl LocalBarrierWorker {
     }
 
     /// Force stop all actors on this worker, and then drop their resources.
-    async fn reset(&mut self, init_request: InitRequest) {
+    async fn reset(&mut self, _init_request: InitRequest) {
         join(
             join_all(
                 self.state
@@ -1083,7 +1089,7 @@ impl LocalBarrierWorker {
                 .await
         }
         self.actor_manager.env.dml_manager_ref().clear();
-        *self = Self::new(self.actor_manager.clone(), init_request.term_id);
+        *self = Self::new(self.actor_manager.clone());
         self.actor_manager.env.client_pool().invalidate_all();
     }
 
@@ -1115,7 +1121,7 @@ impl LocalBarrierWorker {
             runtime: runtime.into(),
             config_override_cache: ConfigOverrideCache::new(CONFIG_OVERRIDE_CACHE_DEFAULT_CAPACITY),
         });
-        let worker = LocalBarrierWorker::new(actor_manager, "uninitialized".into());
+        let worker = LocalBarrierWorker::new(actor_manager);
         tokio::spawn(worker.run(actor_op_rx))
     }
 }
@@ -1191,6 +1197,7 @@ pub(crate) mod barrier_test_utils {
                         streaming_control_stream_request::Request::CreatePartialGraph(
                             PbCreatePartialGraphRequest {
                                 partial_graph_id: TEST_PARTIAL_GRAPH_ID,
+                                term_id: "for_test".into(),
                             },
                         ),
                     ),
@@ -1202,9 +1209,7 @@ pub(crate) mod barrier_test_utils {
                     response_tx,
                     UnboundedReceiverStream::new(request_rx).boxed(),
                 ),
-                init_request: InitRequest {
-                    term_id: "for_test".into(),
-                },
+                init_request: InitRequest {},
             });
 
             assert_matches!(

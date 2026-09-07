@@ -101,6 +101,8 @@ pub trait FrontendMetaClient: Send + Sync {
         value: Option<String>,
     ) -> Result<Option<SystemParamsReader>>;
 
+    async fn clear_file_cache(&self, clear_meta_cache: bool, clear_data_cache: bool) -> Result<()>;
+
     async fn get_session_params(&self) -> Result<SessionConfig>;
 
     async fn set_session_param(&self, param: String, value: Option<String>) -> Result<String>;
@@ -325,6 +327,12 @@ impl FrontendMetaClient for FrontendMetaClientImpl {
         value: Option<String>,
     ) -> Result<Option<SystemParamsReader>> {
         self.0.set_system_param(param, value).await
+    }
+
+    async fn clear_file_cache(&self, clear_meta_cache: bool, clear_data_cache: bool) -> Result<()> {
+        self.0
+            .clear_file_cache(clear_meta_cache, clear_data_cache)
+            .await
     }
 
     async fn get_session_params(&self) -> Result<SessionConfig> {

@@ -37,8 +37,9 @@
 use std::collections::HashMap;
 use std::fs;
 
-use anyhow::Context;
+use anyhow::{Context, anyhow};
 use risingwave_common::catalog::Field;
+use risingwave_common::util::panic::rw_catch_unwind;
 use serde_json::Value;
 use thiserror::Error;
 use url::Url;
@@ -190,8 +191,6 @@ impl JsonRef {
 }
 
 impl crate::JsonSchema {
-    /// FIXME: when the JSON schema is invalid, it will panic.
-    ///
     /// ## Notes on type conversion
     /// Map will be used when an object doesn't have `properties` but has `additionalProperties`.
     /// When an object has `properties` and `additionalProperties`, the latter will be ignored.
@@ -205,7 +204,14 @@ impl crate::JsonSchema {
         JsonRef::new()
             .deref_value(&mut self.0, &retrieval_url)
             .await?;
-        let avro_schema = jst::convert_avro(&self.0, jst::Context::default()).to_string();
+        let avro_schema =
+            rw_catch_unwind(|| jst::convert_avro(&self.0, jst::Context::default()).to_string())
+                .map_err(|payload| {
+                    anyhow!(
+                        "failed to convert JSON schema to Avro schema: {}",
+                        panic_message::panic_message(&payload)
+                    )
+                })?;
         let schema =
             apache_avro::Schema::parse_str(&avro_schema).context("failed to parse avro schema")?;
         avro_schema_to_fields(&schema, Some(MapHandling::Jsonb))

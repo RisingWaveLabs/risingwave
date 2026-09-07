@@ -61,7 +61,21 @@ cd ../.. && ./risedev k
 
 ## CI
 
-CI runs `ci/scripts/e2e-iceberg-test.sh` with the `ci-iceberg-test` profile, which is not reproducible locally: it needs an external postgres for the meta store and prebuilt connector libs downloaded from CI artifacts. The steps above are the local equivalent.
+CI runs `ci/scripts/e2e-iceberg-test.sh`. The main suite uses the `ci-iceberg-test` profile, which needs an external postgres for the meta store and prebuilt connector libs downloaded from CI artifacts. The steps above are the local equivalent.
+
+### Multi-batch compaction rounds
+
+CI runs `compaction_round.slt` first in its own profile, with one compactor worker and a
+one-plan admission budget. It checks that scheduled compaction rewrites all three
+partitions without further sink commits, excludes earlier batches' output, and drains.
+It only needs MinIO and the connector libs. Start it with fresh RiseDev data, as
+the profile uses an in-memory meta store:
+
+```sh
+./risedev d ci-iceberg-compaction-round
+./risedev slt './e2e_test/iceberg/compaction_round.slt'
+./risedev k
+```
 
 ## Key Config Files
 

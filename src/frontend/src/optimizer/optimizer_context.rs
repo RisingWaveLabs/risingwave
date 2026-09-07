@@ -19,6 +19,7 @@ use std::marker::PhantomData;
 use std::rc::{Rc, Weak};
 use std::sync::Arc;
 
+use risingwave_common::id::SourceId;
 use risingwave_sqlparser::ast::{ExplainFormat, ExplainOptions, ExplainType};
 
 use super::property::WatermarkGroupId;
@@ -100,9 +101,9 @@ pub struct OptimizerContext {
     /// Store the configs can be overwritten in with clause
     /// if not specified, use the value from session variable.
     overwrite_options: OverwriteOptions,
-    /// Mapping from iceberg table identifier to current snapshot id.
-    /// Used to keep same snapshot id when multiple scans from the same iceberg table exist in a query.
-    iceberg_snapshot_id_map: RefCell<HashMap<String, Option<i64>>>,
+    /// Mapping from Iceberg table identifier to the current snapshot and its RisingWave commit
+    /// boundary. Used to keep multiple scans of the same table consistent within one query.
+    iceberg_snapshot_info_map: RefCell<HashMap<SourceId, Option<IcebergSnapshotInfo>>>,
     /// Batch materialized view candidates for exact-match rewriting.
     batch_mview_candidates: RefCell<Vec<MaterializedViewCandidate>>,
 
@@ -128,6 +129,12 @@ pub struct OptimizerContext {
 pub struct MaterializedViewCandidate {
     pub plan: LogicalPlanRef,
     pub table: Arc<TableCatalog>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct IcebergSnapshotInfo {
+    pub(crate) snapshot_id: i64,
+    pub(crate) commit_epoch: Option<u64>,
 }
 
 pub(in crate::optimizer) struct LastAssignedIds {
@@ -163,7 +170,7 @@ impl OptimizerContext {
             session_timezone,
             total_rule_applied: RefCell::new(0),
             overwrite_options,
-            iceberg_snapshot_id_map: RefCell::new(HashMap::new()),
+            iceberg_snapshot_info_map: RefCell::new(HashMap::new()),
             batch_mview_candidates: RefCell::new(Vec::new()),
 
             last_plan_node_id: Cell::new(RESERVED_ID_NUM.into()),
@@ -192,7 +199,7 @@ impl OptimizerContext {
             session_timezone: RefCell::new(SessionTimezone::new("UTC".into())),
             total_rule_applied: RefCell::new(0),
             overwrite_options: OverwriteOptions::default(),
-            iceberg_snapshot_id_map: RefCell::new(HashMap::new()),
+            iceberg_snapshot_info_map: RefCell::new(HashMap::new()),
             batch_mview_candidates: RefCell::new(Vec::new()),
 
             last_plan_node_id: Cell::new(0),
@@ -448,8 +455,10 @@ impl OptimizerContext {
         self.session_timezone.borrow().timezone()
     }
 
-    pub fn iceberg_snapshot_id_map(&self) -> RefMut<'_, HashMap<String, Option<i64>>> {
-        self.iceberg_snapshot_id_map.borrow_mut()
+    pub(crate) fn iceberg_snapshot_info_map(
+        &self,
+    ) -> RefMut<'_, HashMap<SourceId, Option<IcebergSnapshotInfo>>> {
+        self.iceberg_snapshot_info_map.borrow_mut()
     }
 }
 

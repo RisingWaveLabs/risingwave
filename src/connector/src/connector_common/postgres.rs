@@ -656,6 +656,13 @@ pub async fn create_pg_client(
     Ok(client)
 }
 
+pub fn postgres_point_type() -> DataType {
+    DataType::Struct(StructType::new(vec![
+        ("x", DataType::Float64),
+        ("y", DataType::Float64),
+    ]))
+}
+
 // Used for both source and sink connector
 pub fn sea_type_to_rw_type(col_type: &SeaType) -> ConnectorResult<DataType> {
     let dtype = match col_type {
@@ -673,10 +680,7 @@ pub fn sea_type_to_rw_type(col_type: &SeaType) -> ConnectorResult<DataType> {
         SeaType::Time(_) | SeaType::TimeWithTimeZone(_) => DataType::Time,
         SeaType::Interval(_) => DataType::Interval,
         SeaType::Boolean => DataType::Boolean,
-        SeaType::Point => DataType::Struct(StructType::new(vec![
-            ("x", DataType::Float32),
-            ("y", DataType::Float32),
-        ])),
+        SeaType::Point => postgres_point_type(),
         SeaType::Uuid => DataType::Varchar,
         SeaType::Xml => DataType::Varchar,
         SeaType::Json => DataType::Jsonb,

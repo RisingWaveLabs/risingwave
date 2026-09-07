@@ -20,9 +20,114 @@ use std::task::Poll;
 use futures::FutureExt;
 use futures::future::join_all;
 use risingwave_common::util::epoch::{EpochExt, test_epoch};
+use risingwave_pb::stream_service::streaming_control_stream_request::{
+    CreatePartialGraphRequest, ResetPartialGraphsRequest,
+};
+use risingwave_pb::stream_service::{
+    StreamingControlStreamRequest, streaming_control_stream_request,
+};
 
 use super::*;
+use crate::task::TEST_PARTIAL_GRAPH_ID;
 use crate::task::barrier_test_utils::LocalBarrierTestEnv;
+
+#[tokio::test]
+async fn test_reject_exchange_request_with_stale_partial_graph_term() -> StreamResult<()> {
+    let test_env = LocalBarrierTestEnv::for_test().await;
+    let result = test_env
+        .actor_op_tx
+        .send_and_await(|result_sender| LocalActorOperation::TakeReceiver {
+            partial_graph_id: TEST_PARTIAL_GRAPH_ID,
+            term_id: "stale".to_owned(),
+            ids: (1.into(), 2.into()),
+            request: TakeReceiverRequest::Remote {
+                result_sender,
+                upstream_fragment_id: 1.into(),
+            },
+        })
+        .await?;
+
+    assert!(
+        result
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("unmatched partial graph term")
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_filter_buffered_exchange_requests_by_partial_graph_term() -> StreamResult<()> {
+    let mut test_env = LocalBarrierTestEnv::for_test().await;
+    test_env
+        .request_tx
+        .send(Ok(StreamingControlStreamRequest {
+            request: Some(
+                streaming_control_stream_request::Request::ResetPartialGraphs(
+                    ResetPartialGraphsRequest {
+                        partial_graph_ids: vec![TEST_PARTIAL_GRAPH_ID],
+                    },
+                ),
+            ),
+        }))
+        .unwrap();
+    assert!(matches!(
+        test_env
+            .response_rx
+            .recv()
+            .await
+            .unwrap()
+            .unwrap()
+            .response
+            .unwrap(),
+        streaming_control_stream_response::Response::ResetPartialGraph(_)
+    ));
+
+    let actor_op_tx = test_env.actor_op_tx.clone();
+    let take_receiver = move |term_id: &str, upstream_actor_id: ActorId| {
+        let actor_op_tx = actor_op_tx.clone();
+        let term_id = term_id.to_owned();
+        tokio::spawn(async move {
+            actor_op_tx
+                .send_and_await(|result_sender| LocalActorOperation::TakeReceiver {
+                    partial_graph_id: TEST_PARTIAL_GRAPH_ID,
+                    term_id,
+                    ids: (upstream_actor_id, 3.into()),
+                    request: TakeReceiverRequest::Remote {
+                        result_sender,
+                        upstream_fragment_id: 1.into(),
+                    },
+                })
+                .await
+                .unwrap()
+        })
+    };
+    let stale_request = take_receiver("for_test", 1.into());
+    let matching_request = take_receiver("next_term", 2.into());
+    LocalBarrierTestEnv::flush_all_events_impl(&test_env.actor_op_tx).await;
+
+    test_env
+        .request_tx
+        .send(Ok(StreamingControlStreamRequest {
+            request: Some(
+                streaming_control_stream_request::Request::CreatePartialGraph(
+                    CreatePartialGraphRequest {
+                        partial_graph_id: TEST_PARTIAL_GRAPH_ID,
+                        term_id: "next_term".to_owned(),
+                    },
+                ),
+            ),
+        }))
+        .unwrap();
+
+    assert!(stale_request.await.unwrap().is_err());
+    assert!(matching_request.await.unwrap().is_ok());
+    let pending = test_env.take_pending_new_output_requests(2.into()).await;
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].0, ActorId::from(3));
+    Ok(())
+}
 
 #[tokio::test]
 async fn test_managed_barrier_collection() -> StreamResult<()> {

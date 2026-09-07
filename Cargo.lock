@@ -787,9 +787,9 @@ dependencies = [
 
 [[package]]
 name = "arrow-udf-runtime"
-version = "0.9.0"
+version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "65b70cb374bc7f5d7f55b7db7ccdd37759d3c7a5471688069cd922ea45a5e062"
+checksum = "a5373955f41636c6bc8e7a508e31fb3f5c369a14496a000e6dc51708a31c271a"
 dependencies = [
  "anyhow",
  "arrow-array 58.4.0",
@@ -7592,7 +7592,7 @@ dependencies = [
 [[package]]
 name = "iceberg"
 version = "0.10.0"
-source = "git+https://github.com/risingwavelabs/iceberg-rust.git?rev=2768ccf8b1847a14162337d7ef7a76935881fbc8#2768ccf8b1847a14162337d7ef7a76935881fbc8"
+source = "git+https://github.com/risingwavelabs/iceberg-rust.git?rev=cd6e1e6acbfb2e41c9af5b6faedaca5eb83f361c#cd6e1e6acbfb2e41c9af5b6faedaca5eb83f361c"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -7651,7 +7651,7 @@ dependencies = [
 [[package]]
 name = "iceberg-catalog-glue"
 version = "0.10.0"
-source = "git+https://github.com/risingwavelabs/iceberg-rust.git?rev=2768ccf8b1847a14162337d7ef7a76935881fbc8#2768ccf8b1847a14162337d7ef7a76935881fbc8"
+source = "git+https://github.com/risingwavelabs/iceberg-rust.git?rev=cd6e1e6acbfb2e41c9af5b6faedaca5eb83f361c#cd6e1e6acbfb2e41c9af5b6faedaca5eb83f361c"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -7666,7 +7666,7 @@ dependencies = [
 [[package]]
 name = "iceberg-catalog-rest"
 version = "0.10.0"
-source = "git+https://github.com/risingwavelabs/iceberg-rust.git?rev=2768ccf8b1847a14162337d7ef7a76935881fbc8#2768ccf8b1847a14162337d7ef7a76935881fbc8"
+source = "git+https://github.com/risingwavelabs/iceberg-rust.git?rev=cd6e1e6acbfb2e41c9af5b6faedaca5eb83f361c#cd6e1e6acbfb2e41c9af5b6faedaca5eb83f361c"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -7687,7 +7687,7 @@ dependencies = [
 [[package]]
 name = "iceberg-compaction-core"
 version = "0.1.0"
-source = "git+https://github.com/nimtable/iceberg-compaction.git?rev=53410bea82ff2319196df43e7447ab2bb13da1d6#53410bea82ff2319196df43e7447ab2bb13da1d6"
+source = "git+https://github.com/nimtable/iceberg-compaction.git?rev=58a4c3c274111b7eeaada0a6f15314ddcf537279#58a4c3c274111b7eeaada0a6f15314ddcf537279"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -7716,7 +7716,7 @@ dependencies = [
 [[package]]
 name = "iceberg-datafusion"
 version = "0.10.0"
-source = "git+https://github.com/risingwavelabs/iceberg-rust.git?rev=2768ccf8b1847a14162337d7ef7a76935881fbc8#2768ccf8b1847a14162337d7ef7a76935881fbc8"
+source = "git+https://github.com/risingwavelabs/iceberg-rust.git?rev=cd6e1e6acbfb2e41c9af5b6faedaca5eb83f361c#cd6e1e6acbfb2e41c9af5b6faedaca5eb83f361c"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -7732,7 +7732,7 @@ dependencies = [
 [[package]]
 name = "iceberg-storage-opendal"
 version = "0.10.0"
-source = "git+https://github.com/risingwavelabs/iceberg-rust.git?rev=2768ccf8b1847a14162337d7ef7a76935881fbc8#2768ccf8b1847a14162337d7ef7a76935881fbc8"
+source = "git+https://github.com/risingwavelabs/iceberg-rust.git?rev=cd6e1e6acbfb2e41c9af5b6faedaca5eb83f361c#cd6e1e6acbfb2e41c9af5b6faedaca5eb83f361c"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11719,37 +11719,32 @@ dependencies = [
 
 [[package]]
 name = "pyo3"
-version = "0.24.2"
+version = "0.29.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e5203598f366b11a02b13aa20cab591229ff0a89fd121a308a5df751d5fc9219"
+checksum = "4688ddedf473e32662b9b067670129a8afb8c18e351482c70d62ba4a88171e8b"
 dependencies = [
- "cfg-if",
- "indoc",
  "libc",
- "memoffset",
  "once_cell",
  "portable-atomic",
  "pyo3-build-config",
  "pyo3-ffi",
  "pyo3-macros",
- "unindent",
 ]
 
 [[package]]
 name = "pyo3-build-config"
-version = "0.24.2"
+version = "0.29.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "99636d423fa2ca130fa5acde3059308006d46f98caac629418e53f7ebb1e9999"
+checksum = "f41027e41b4bd03f6e60f9f417fe24a6341a6bb744edd62b6f709f2a52ea30e9"
 dependencies = [
- "once_cell",
  "target-lexicon",
 ]
 
 [[package]]
 name = "pyo3-ffi"
-version = "0.24.2"
+version = "0.29.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "78f9cf92ba9c409279bc3305b5409d90db2d2c22392d443a87df3a1adad59e33"
+checksum = "e591a95526fead067432c3b3a33fc74770b87b1e04e73671090d9c2055a2b327"
 dependencies = [
  "libc",
  "pyo3-build-config",
@@ -11757,9 +11752,9 @@ dependencies = [
 
 [[package]]
 name = "pyo3-macros"
-version = "0.24.2"
+version = "0.29.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0b999cb1a6ce21f9a6b147dcf1be9ffedf02e0043aec74dc390f3007047cecd9"
+checksum = "73225868fc1cd84eef2c3c230ddb91273bf1de46aeb8a4248da76d32a0924a1c"
 dependencies = [
  "proc-macro2",
  "pyo3-macros-backend",
@@ -11769,13 +11764,12 @@ dependencies = [
 
 [[package]]
 name = "pyo3-macros-backend"
-version = "0.24.2"
+version = "0.29.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "822ece1c7e1012745607d5cf0bcb2874769f0f7cb34c4cde03b9358eb9ef911a"
+checksum = "571575aa3749fa6216757dd47d2a3e7ef360f329a40f0666a9fbd14889024952"
 dependencies = [
  "heck 0.5.0",
  "proc-macro2",
- "pyo3-build-config",
  "quote",
  "syn 2.0.117",
 ]
@@ -13337,6 +13331,7 @@ dependencies = [
  "jsonschema-transpiler",
  "madsim-tokio",
  "num-bigint",
+ "panic-message",
  "prost 0.14.3",
  "prost-build 0.14.3",
  "prost-reflect",
@@ -13991,6 +13986,7 @@ dependencies = [
  "risingwave_meta",
  "risingwave_meta_model",
  "risingwave_pb",
+ "risingwave_rpc_client",
  "sea-orm",
  "serde_json",
  "thiserror-ext",
@@ -14598,9 +14594,9 @@ dependencies = [
 
 [[package]]
 name = "rtrb"
-version = "0.3.1"
+version = "0.3.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f3f94e84c073f3b85d4012b44722fa8842b9986d741590d4f2636ad0a5b14143"
+checksum = "fae8ee26b0371a29a77d2b2d6b3ae13aa81def6f9bf1b1b92a32d279a5e709b7"
 
 [[package]]
 name = "rumqttc"
@@ -16615,9 +16611,9 @@ checksum = "55937e1799185b12863d447f42597ed69d9928686b8d88a1df17376a097d8369"
 
 [[package]]
 name = "target-lexicon"
-version = "0.13.2"
+version = "0.13.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e502f78cdbb8ba4718f566c418c52bc729126ffd16baee5baa718cf25dd5a69a"
+checksum = "adb6935a6f5c20170eeceb1a3835a49e12e19d792f6dd344ccc76a985ca5a6ca"
 
 [[package]]
 name = "task-local"
@@ -17726,12 +17722,6 @@ name = "unicode_categories"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39ec24b3121d976906ece63c9daad25b85969647682eee313cb5779fdd69e14e"
-
-[[package]]
-name = "unindent"
-version = "0.2.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c7de7d73e1754487cb58364ee906a499937a0dfabd86bcb980fa99ec8c8fa2ce"
 
 [[package]]
 name = "unit-prefix"

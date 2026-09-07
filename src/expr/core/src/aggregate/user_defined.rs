@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use risingwave_common::array::Op;
-use risingwave_common::array::arrow::arrow_array_udf::ArrayRef;
+use risingwave_common::array::arrow::arrow_array_udf::{Array as _, ArrayRef};
 use risingwave_common::array::arrow::arrow_schema_udf::{Field, Fields, Schema, SchemaRef};
 use risingwave_common::array::arrow::{UdfArrowConvert, UdfFromArrow, UdfToArrow};
 use risingwave_common::bitmap::Bitmap;
@@ -85,6 +85,7 @@ impl AggregateFunction for UserDefinedAggregateFunction {
     async fn get_result(&self, state: &AggregateState) -> Result<Datum> {
         let state = &state.downcast_ref::<State>().0;
         let arrow_output = self.runtime.call_agg_finish(state).await?;
+        ensure_single_row(&arrow_output, "output")?;
         let output = UdfArrowConvert::default().from_array(&self.return_field, &arrow_output)?;
         // The UDF runtime is external input: a server may drift from the signature it was
         // checked against at creation time. Surface a mistyped result instead of letting it
@@ -103,6 +104,7 @@ impl AggregateFunction for UserDefinedAggregateFunction {
     /// Encode the state into a datum that can be stored in state table.
     fn encode_state(&self, state: &AggregateState) -> Result<Datum> {
         let state = &state.downcast_ref::<State>().0;
+        ensure_single_row(state, "state")?;
         let state = UdfArrowConvert::default().from_array(&self.state_field, state)?;
         Ok(state.datum_at(0))
     }
@@ -117,6 +119,19 @@ impl AggregateFunction for UserDefinedAggregateFunction {
         let state = UdfArrowConvert::default().to_array(self.state_field.data_type(), &array)?;
         Ok(AggregateState::Any(Box::new(State(state))))
     }
+}
+
+/// The runtime is external input: reject an array of the wrong length so that `datum_at(0)` at
+/// the call sites is in bounds.
+fn ensure_single_row(array: &ArrayRef, what: &str) -> Result<()> {
+    if array.len() != 1 {
+        return Err(anyhow::anyhow!(
+            "UDF aggregate {what} has {} rows, but expected exactly 1",
+            array.len()
+        )
+        .into());
+    }
+    Ok(())
 }
 
 // In arrow-udf, aggregate state is represented as an `ArrayRef`.
@@ -192,7 +207,8 @@ mod tests {
     use anyhow::Result;
     use futures::stream::BoxStream;
     use risingwave_common::array::arrow::arrow_array_udf::{
-        Float64Array, Int32Array, Int64Array, MapArray, RecordBatch, StringArray, StructArray,
+        BinaryArray, Float64Array, Int32Array, Int64Array, MapArray, RecordBatch, StringArray,
+        StructArray,
     };
     use risingwave_common::array::arrow::arrow_buffer_udf::OffsetBuffer;
     use risingwave_common::array::arrow::arrow_schema_udf::DataType as ArrowDataType;
@@ -201,12 +217,12 @@ mod tests {
     use super::*;
     use crate::sig::UdfImpl;
 
-    /// Returns the given array from `finish`, regardless of the declared return type.
+    /// Returns the given array from `finish`, regardless of the declared signature.
     #[derive(Debug)]
-    struct MistypedRuntime(ArrayRef);
+    struct StubRuntime(ArrayRef);
 
     #[async_trait::async_trait]
-    impl UdfImpl for MistypedRuntime {
+    impl UdfImpl for StubRuntime {
         async fn call(&self, _input: &RecordBatch) -> Result<RecordBatch> {
             unimplemented!()
         }
@@ -223,20 +239,36 @@ mod tests {
         }
     }
 
-    /// Drives `get_result` with a runtime that returns `output` and yields the error message.
-    async fn get_result_err(return_type: DataType, output: ArrayRef) -> String {
+    fn build_agg(return_type: DataType, finish_output: ArrayRef) -> UserDefinedAggregateFunction {
         let convert = UdfArrowConvert::default();
-        let agg = UserDefinedAggregateFunction {
+        UserDefinedAggregateFunction {
             return_field: convert.to_arrow_field("", &return_type).unwrap(),
             state_field: Field::new("state", ArrowDataType::Binary, true),
             return_type,
             arg_schema: Arc::new(Schema::new(Vec::<Field>::new())),
-            runtime: Box::new(MistypedRuntime(output)),
-        };
+            runtime: Box::new(StubRuntime(finish_output)),
+        }
+    }
+
+    /// Drives `get_result` with a runtime that returns `output` and yields the error message.
+    async fn get_result_err(return_type: DataType, output: ArrayRef) -> String {
+        let agg = build_agg(return_type, output);
         let state = AggregateState::Any(Box::new(State(
             Arc::new(Int64Array::from(vec![0i64])) as ArrayRef
         )));
         let err = agg.get_result(&state).await.unwrap_err();
+        format!("{:?}", anyhow::anyhow!(err))
+    }
+
+    /// Drives `encode_state` with `state` and yields the error message.
+    fn encode_state_err(state: ArrayRef) -> String {
+        let agg = build_agg(
+            DataType::Int64,
+            Arc::new(Int64Array::from(vec![Some(1i64)])),
+        );
+        let err = agg
+            .encode_state(&AggregateState::Any(Box::new(State(state))))
+            .unwrap_err();
         format!("{:?}", anyhow::anyhow!(err))
     }
 
@@ -301,5 +333,35 @@ mod tests {
             msg.contains("invalid map key type"),
             "unexpected error: {msg}"
         );
+    }
+
+    #[tokio::test]
+    async fn misbehaving_runtime_miscounted_finish() {
+        let msg = get_result_err(
+            DataType::Int64,
+            Arc::new(Int64Array::from(Vec::<Option<i64>>::new())),
+        )
+        .await;
+        assert!(msg.contains("0 rows"), "unexpected error: {msg}");
+
+        // More than one row does not panic, but `datum_at(0)` would silently drop the rest.
+        let msg = get_result_err(
+            DataType::Int64,
+            Arc::new(Int64Array::from(vec![Some(1i64), Some(2i64)])),
+        )
+        .await;
+        assert!(msg.contains("2 rows"), "unexpected error: {msg}");
+    }
+
+    #[test]
+    fn misbehaving_runtime_miscounted_state() {
+        let msg = encode_state_err(Arc::new(BinaryArray::from(Vec::<Option<&[u8]>>::new())));
+        assert!(msg.contains("0 rows"), "unexpected error: {msg}");
+
+        let msg = encode_state_err(Arc::new(BinaryArray::from(vec![
+            Some(b"a".as_slice()),
+            Some(b"b".as_slice()),
+        ])));
+        assert!(msg.contains("2 rows"), "unexpected error: {msg}");
     }
 }

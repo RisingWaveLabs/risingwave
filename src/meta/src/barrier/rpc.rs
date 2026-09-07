@@ -194,11 +194,10 @@ impl ControlStreamManager {
         self.workers[&worker_id].0.host.clone().unwrap()
     }
 
-    pub(super) async fn add_worker(
+    pub(super) async fn add_worker<'a>(
         &mut self,
         node: WorkerNode,
-        partial_graphs: impl Iterator<Item = PartialGraphId>,
-        term_id: &String,
+        partial_graphs: impl Iterator<Item = (PartialGraphId, &'a str)>,
         context: Arc<impl GlobalBarrierWorkerContext>,
     ) {
         let node_id = node.id;
@@ -222,15 +221,7 @@ impl ControlStreamManager {
             exponential_backoff(Duration::from_millis(100), 5, Duration::from_secs(3));
         const MAX_RETRY: usize = 5;
         for i in 1..=MAX_RETRY {
-            match context
-                .new_control_stream(
-                    &node,
-                    &PbInitRequest {
-                        term_id: term_id.clone(),
-                    },
-                )
-                .await
-            {
+            match context.new_control_stream(&node).await {
                 Ok(mut handle) => {
                     WorkerNodeConnected {
                         handle: &mut handle,
@@ -281,9 +272,7 @@ impl ControlStreamManager {
                     (
                         node.clone(),
                         WorkerNodeState::Reconnecting(ControlStreamManager::retry_connect(
-                            node,
-                            term_id.to_owned(),
-                            context,
+                            node, context,
                         ))
                     )
                 )
@@ -309,7 +298,6 @@ impl ControlStreamManager {
 
     fn retry_connect(
         node: WorkerNode,
-        term_id: String,
         context: Arc<impl GlobalBarrierWorkerContext>,
     ) -> BoxFuture<'static, StreamingControlHandle> {
         async move {
@@ -319,11 +307,10 @@ impl ControlStreamManager {
                 5,
                 Duration::from_mins(1),
             );
-            let init_request = PbInitRequest { term_id };
             for delay in backoff {
                 attempt += 1;
                 sleep(delay).await;
-                match context.new_control_stream(&node, &init_request).await {
+                match context.new_control_stream(&node).await {
                     Ok(handle) => {
                         return handle;
                     }
@@ -339,16 +326,11 @@ impl ControlStreamManager {
     pub(super) async fn recover(
         env: MetaSrvEnv,
         nodes: &HashMap<WorkerId, WorkerNode>,
-        term_id: &str,
         context: Arc<impl GlobalBarrierWorkerContext>,
     ) -> Self {
         let reset_start_time = Instant::now();
-        let init_request = PbInitRequest {
-            term_id: term_id.to_owned(),
-        };
-        let init_request = &init_request;
         let nodes = join_all(nodes.iter().map(|(worker_id, node)| async {
-            let result = context.new_control_stream(node, init_request).await;
+            let result = context.new_control_stream(node).await;
             (*worker_id, node.clone(), result)
         }))
         .await;
@@ -393,7 +375,6 @@ impl ControlStreamManager {
                                     node.clone(),
                                     WorkerNodeState::Reconnecting(Self::retry_connect(
                                         node,
-                                        term_id.to_owned(),
                                         context.clone()
                                     ))
                                 )
@@ -421,12 +402,18 @@ pub(super) struct WorkerNodeConnected<'a> {
 }
 
 impl<'a> WorkerNodeConnected<'a> {
-    pub(super) fn initialize(self, partial_graphs: impl Iterator<Item = PartialGraphId>) {
-        for partial_graph_id in partial_graphs {
+    pub(super) fn initialize<'b>(
+        self,
+        partial_graphs: impl Iterator<Item = (PartialGraphId, &'b str)>,
+    ) {
+        for (partial_graph_id, term_id) in partial_graphs {
             if let Err(e) = self.handle.send_request(StreamingControlStreamRequest {
                 request: Some(
                     streaming_control_stream_request::Request::CreatePartialGraph(
-                        PbCreatePartialGraphRequest { partial_graph_id },
+                        PbCreatePartialGraphRequest {
+                            partial_graph_id,
+                            term_id: term_id.to_owned(),
+                        },
                     ),
                 ),
             }) {
@@ -445,7 +432,6 @@ impl ControlStreamManager {
     fn poll_next_event<'a>(
         this_opt: &mut Option<&'a mut Self>,
         cx: &mut Context<'_>,
-        term_id: &str,
         context: &Arc<impl GlobalBarrierWorkerContext>,
         poll_reconnect: bool,
     ) -> Poll<(WorkerId, WorkerNodeEvent<'a>)> {
@@ -536,7 +522,6 @@ impl ControlStreamManager {
                                         *worker_state = WorkerNodeState::Reconnecting(
                                             ControlStreamManager::retry_connect(
                                                 node.clone(),
-                                                term_id.to_owned(),
                                                 context.clone(),
                                             ),
                                         );
@@ -560,17 +545,15 @@ impl ControlStreamManager {
     #[await_tree::instrument("control_stream_next_event")]
     pub(super) async fn next_event<'a>(
         &'a mut self,
-        term_id: &str,
         context: &Arc<impl GlobalBarrierWorkerContext>,
     ) -> (WorkerId, WorkerNodeEvent<'a>) {
         let mut this = Some(self);
-        poll_fn(|cx| Self::poll_next_event(&mut this, cx, term_id, context, true)).await
+        poll_fn(|cx| Self::poll_next_event(&mut this, cx, context, true)).await
     }
 
     #[await_tree::instrument("control_stream_next_response")]
     pub(super) async fn next_response(
         &mut self,
-        term_id: &str,
         context: &Arc<impl GlobalBarrierWorkerContext>,
     ) -> (
         WorkerId,
@@ -578,7 +561,7 @@ impl ControlStreamManager {
     ) {
         let mut this = Some(self);
         let (worker_id, event) =
-            poll_fn(|cx| Self::poll_next_event(&mut this, cx, term_id, context, false)).await;
+            poll_fn(|cx| Self::poll_next_event(&mut this, cx, context, false)).await;
         match event {
             WorkerNodeEvent::Response(result) => (worker_id, result),
             WorkerNodeEvent::Connected(_) => {
@@ -652,6 +635,8 @@ impl PartialGraphRecoverer<'_> {
         cdc_table_snapshot_splits: &mut HashMap<JobId, CdcTableSnapshotSplits>,
         batch_refresh: HashMap<JobId, BatchRefreshRenderResult>,
     ) -> MetaResult<DatabaseCheckpointControl> {
+        let term_id = Uuid::new_v4().to_string();
+
         fn collect_source_splits(
             fragment_infos: impl Iterator<Item = &InflightFragmentInfo>,
             source_splits: &mut HashMap<ActorId, Vec<SplitImpl>>,
@@ -1046,6 +1031,7 @@ impl PartialGraphRecoverer<'_> {
             let partial_graph_id = to_partial_graph_id(database_id, None);
             self.recover_graph(
                 partial_graph_id,
+                &term_id,
                 mutation,
                 &barrier_info,
                 &nodes_actors,
@@ -1121,6 +1107,7 @@ impl PartialGraphRecoverer<'_> {
                 hummock_version_stats,
                 node_actors,
                 mutation.clone(),
+                &term_id,
                 self,
             )?;
             independent_checkpoint_job_controls.insert(
@@ -1195,6 +1182,7 @@ impl PartialGraphRecoverer<'_> {
                 hummock_version_stats,
                 mutation,
                 render_result,
+                &term_id,
                 self,
                 refresh_interval_sec,
             )?;
@@ -1238,6 +1226,7 @@ impl PartialGraphRecoverer<'_> {
         let database_state = BarrierWorkerState::recovery(new_epoch, is_paused);
         Ok(DatabaseCheckpointControl::recovery(
             database_id,
+            term_id,
             database_state,
             committed_epoch,
             database_info,
@@ -1396,7 +1385,7 @@ impl ControlStreamManager {
         Ok(node_need_collect)
     }
 
-    pub(super) fn add_partial_graph(&mut self, partial_graph_id: PartialGraphId) {
+    pub(super) fn add_partial_graph(&mut self, partial_graph_id: PartialGraphId, term_id: &str) {
         self.connected_workers().for_each(|(_, node)| {
             if node
                 .handle
@@ -1406,6 +1395,7 @@ impl ControlStreamManager {
                         streaming_control_stream_request::Request::CreatePartialGraph(
                             CreatePartialGraphRequest {
                                 partial_graph_id,
+                                term_id: term_id.to_owned(),
                             },
                         ),
                     ),
@@ -1470,14 +1460,13 @@ impl GlobalBarrierWorkerContextImpl {
     pub(super) async fn new_control_stream_impl(
         &self,
         node: &WorkerNode,
-        init_request: &PbInitRequest,
     ) -> MetaResult<StreamingControlHandle> {
         let handle = self
             .env
             .stream_client_pool()
             .get(node)
             .await?
-            .start_streaming_control(init_request.clone())
+            .start_streaming_control(PbInitRequest::default())
             .await?;
         Ok(handle)
     }

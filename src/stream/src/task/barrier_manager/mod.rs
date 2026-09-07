@@ -74,6 +74,7 @@ pub(super) enum LocalBarrierEvent {
         actor_id: ActorId,
         upstream_actor_id: ActorId,
         upstream_partial_graph_id: PartialGraphId,
+        term_id: String,
         tx: permit::Sender,
     },
     ReportCdcTableBackfillProgress {
@@ -188,6 +189,7 @@ impl LocalBarrierManager {
             actor_id,
             upstream_actor_id,
             upstream_partial_graph_id,
+            term_id: self.term_id.clone(),
             tx,
         });
         rx

@@ -1581,6 +1581,9 @@ pub async fn handle(
         Statement::AlterSystem { param, value } => {
             alter_system::handle_alter_system(handler_args, param, value).await
         }
+        Statement::AlterSystemClearFileCache { cache_type } => {
+            alter_system::handle_clear_file_cache(handler_args, cache_type).await
+        }
         Statement::AlterSecret { name, operation } => match operation {
             AlterSecretOperation::ChangeCredential {
                 with_options,

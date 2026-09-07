@@ -228,3 +228,45 @@ async fn test_json_schema_parse() {
     "#]]
     .assert_debug_eq(&column_display);
 }
+
+#[tokio::test]
+async fn test_invalid_json_schema_returns_error() {
+    for (schema, cause) in [
+        (r#"{"type":"nonsense"}"#, "unknown variant `nonsense`"),
+        (r#"{"type":[]}"#, "empty union is not allowed"),
+        (r#"{"type":"array"}"#, "array missing item"),
+    ] {
+        let mut json_schema = JsonSchema::parse_str(schema).unwrap();
+
+        let error = json_schema
+            .json_schema_to_columns(Url::parse("http://test_schema_uri.test").unwrap())
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(
+            error.starts_with("failed to convert JSON schema to Avro schema: "),
+            "{schema}: {error}"
+        );
+        assert!(error.contains(cause), "{schema}: {error}");
+    }
+}
+
+#[tokio::test]
+async fn test_json_schema_valid_object() {
+    let mut json_schema =
+        JsonSchema::parse_str(r#"{"type":"object","properties":{"id":{"type":"integer"}}}"#)
+            .unwrap();
+
+    let columns = json_schema
+        .json_schema_to_columns(Url::parse("http://test_schema_uri.test").unwrap())
+        .await
+        .unwrap();
+
+    expect![[r#"
+        [
+            id: Int64,
+        ]
+    "#]]
+    .assert_debug_eq(&columns.iter().map(FieldTestDisplay).collect_vec());
+}

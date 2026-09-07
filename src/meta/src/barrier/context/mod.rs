@@ -28,7 +28,6 @@ use risingwave_pb::stream_service::barrier_complete_response::{
     IcebergPkIndexSinkMetadata as PbIcebergPkIndexSinkMetadata, PbListFinishedSource,
     PbLoadFinishedSource,
 };
-use risingwave_pb::stream_service::streaming_control_stream_request::PbInitRequest;
 use risingwave_rpc_client::StreamingControlHandle;
 
 use crate::MetaResult;
@@ -131,7 +130,6 @@ pub(super) trait GlobalBarrierWorkerContext: Send + Sync + 'static {
     fn new_control_stream<'a>(
         &'a self,
         node: &'a WorkerNode,
-        init_request: &'a PbInitRequest,
     ) -> impl Future<Output = MetaResult<StreamingControlHandle>> + Send + 'a;
 
     fn reload_runtime_info(

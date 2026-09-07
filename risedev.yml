@@ -348,6 +348,25 @@ profile:
       - use: compute-node
       - use: frontend
 
+  ci-iceberg-compaction-round:
+    config-path: src/config/ci-iceberg-compaction-round.toml
+    steps:
+      - use: minio
+      - use: meta-node
+        id: meta-node-iceberg-round
+      - use: compute-node
+        id: compute-node-iceberg-round
+      - use: frontend
+        id: frontend-iceberg-round
+      - use: compactor
+        id: compactor-hummock-round
+      - use: compactor
+        id: compactor-iceberg-round
+        compactor-mode: "dedicated-iceberg"
+        compaction-worker-threads-number: 1
+        port: 6661
+        exporter-port: 1261
+
   ci-iceberg-test:
     config-path: src/config/ci.toml
     steps:

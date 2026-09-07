@@ -44,6 +44,13 @@ impl InfallibleRule<Logical> for IcebergEngineStorageSelectionRule {
         let source_catalog = scan.source_catalog()?;
         let table = get_table_from_iceberg_source(session, source_catalog)?;
 
+        // Append-only Iceberg engine tables do not materialize rows in their Hummock table. Their
+        // batch plan combines Iceberg with the sink log store, so rewriting the Iceberg side to
+        // the dummy Hummock table would silently drop committed rows.
+        if table.append_only {
+            return None;
+        }
+
         let prefer_rowstore = check_point_lookup(scan, &table);
         if !prefer_rowstore {
             return None;
