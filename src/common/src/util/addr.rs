@@ -49,11 +49,20 @@ impl TryFrom<&str> for HostAddr {
     type Error = anyhow::Error;
 
     fn try_from(s: &str) -> Result<Self, Self::Error> {
-        let s = format!("http://{s}");
-        let addr = url::Url::parse(&s).with_context(|| format!("failed to parse address: {s}"))?;
+        let url = url::Url::parse(&format!("http://{s}"))
+            .with_context(|| format!("failed to parse address: {s}"))?;
+        let port = match url.port() {
+            Some(port) => port,
+            // The parser normalizes a port equal to the scheme's default (`:80` for `http`)
+            // to `None`. Re-parse with `https` to recover it; a bare host is `None` under both.
+            None => url::Url::parse(&format!("https://{s}"))
+                .with_context(|| format!("failed to parse address: {s}"))?
+                .port()
+                .context("invalid port")?,
+        };
         Ok(HostAddr {
-            host: addr.host().context("invalid host")?.to_string(),
-            port: addr.port().context("invalid port")?,
+            host: url.host().context("invalid host")?.to_string(),
+            port,
         })
     }
 }
@@ -161,6 +170,31 @@ mod tests {
             HostAddr {
                 host: String::from("test.test"),
                 port: 12345
+            }
+        );
+        // An explicit port equal to a scheme's default must not be normalized away.
+        let addr = "test.test:80";
+        assert_eq!(
+            addr.parse::<HostAddr>().unwrap(),
+            HostAddr {
+                host: String::from("test.test"),
+                port: 80
+            }
+        );
+        let addr = "test.test:443";
+        assert_eq!(
+            addr.parse::<HostAddr>().unwrap(),
+            HostAddr {
+                host: String::from("test.test"),
+                port: 443
+            }
+        );
+        let addr = "[::1]:80";
+        assert_eq!(
+            addr.parse::<HostAddr>().unwrap(),
+            HostAddr {
+                host: String::from("[::1]"),
+                port: 80
             }
         );
         let addr = "test.test";
