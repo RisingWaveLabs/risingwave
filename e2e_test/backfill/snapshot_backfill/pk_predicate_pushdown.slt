@@ -322,3 +322,237 @@ SELECT * FROM t_in WHERE a IN (2, 5, 8) EXCEPT SELECT * FROM mv_in;
 
 statement ok
 DROP TABLE t_in cascade;
+
+# ============================================================
+# Multi-range OR predicate tests (generalized UNION of scans)
+# ============================================================
+
+statement ok
+CREATE TABLE t_or(a INT, b INT, c INT, PRIMARY KEY(a, b));
+
+statement ok
+INSERT INTO t_or SELECT
+  i / 10 AS a,
+  i % 10 AS b,
+  i * 10 AS c
+FROM generate_series(0, 99) AS s(i);
+
+statement ok
+flush;
+
+# ---- Test 12: OR of eq + range on different PK prefixes ----
+# (a = 1 AND b > 5) OR (a = 3 AND b < 3)
+# Should produce 2 UNION branches with range bounds
+
+statement ok
+CREATE MATERIALIZED VIEW mv_or_range AS SELECT * FROM t_or WHERE (a = 1 AND b > 5) OR (a = 3 AND b < 3);
+
+query III rowsort
+SELECT * FROM mv_or_range;
+----
+1 6 160
+1 7 170
+1 8 180
+1 9 190
+3 0 300
+3 1 310
+3 2 320
+
+query T
+SELECT * FROM mv_or_range EXCEPT SELECT * FROM t_or WHERE (a = 1 AND b > 5) OR (a = 3 AND b < 3);
+----
+
+query T
+SELECT * FROM t_or WHERE (a = 1 AND b > 5) OR (a = 3 AND b < 3) EXCEPT SELECT * FROM mv_or_range;
+----
+
+# ---- Test 13: OR of equality-only arms (equivalent to IN) ----
+# (a = 2 AND b = 5) OR (a = 7 AND b = 3)
+
+statement ok
+CREATE MATERIALIZED VIEW mv_or_eq AS SELECT * FROM t_or WHERE (a = 2 AND b = 5) OR (a = 7 AND b = 3);
+
+query III rowsort
+SELECT * FROM mv_or_eq;
+----
+2 5 250
+7 3 730
+
+query T
+SELECT * FROM mv_or_eq EXCEPT SELECT * FROM t_or WHERE (a = 2 AND b = 5) OR (a = 7 AND b = 3);
+----
+
+query T
+SELECT * FROM t_or WHERE (a = 2 AND b = 5) OR (a = 7 AND b = 3) EXCEPT SELECT * FROM mv_or_eq;
+----
+
+# ---- Test 14: Verify post-backfill correctness with OR ----
+# New rows matching the predicate should appear; non-matching should not
+
+statement ok
+INSERT INTO t_or VALUES (1, 7, 999), (3, 1, 888), (5, 5, 777);
+
+statement ok
+flush;
+
+# (1,7,999) replaces (1,7,170) — matches first arm
+# (3,1,888) replaces (3,1,310) — matches second arm
+# (5,5,777) should NOT appear — doesn't match predicate
+query T
+SELECT * FROM mv_or_range EXCEPT SELECT * FROM t_or WHERE (a = 1 AND b > 5) OR (a = 3 AND b < 3);
+----
+
+query T
+SELECT * FROM t_or WHERE (a = 1 AND b > 5) OR (a = 3 AND b < 3) EXCEPT SELECT * FROM mv_or_range;
+----
+
+query T
+SELECT * FROM mv_or_eq EXCEPT SELECT * FROM t_or WHERE (a = 2 AND b = 5) OR (a = 7 AND b = 3);
+----
+
+query T
+SELECT * FROM t_or WHERE (a = 2 AND b = 5) OR (a = 7 AND b = 3) EXCEPT SELECT * FROM mv_or_eq;
+----
+
+statement ok
+DROP TABLE t_or cascade;
+
+# ============================================================
+# Range merge tests
+# When OR arms produce overlapping scan ranges with the same
+# eq_conds prefix, split_to_scan_ranges merges them into a
+# single wider range. This tests that merged ranges still
+# produce correct results.
+# ============================================================
+
+statement ok
+CREATE TABLE t_merge(a INT, b INT, c INT, PRIMARY KEY(a, b));
+
+statement ok
+INSERT INTO t_merge SELECT
+  i / 10 AS a,
+  i % 10 AS b,
+  i * 10 AS c
+FROM generate_series(0, 99) AS s(i);
+
+statement ok
+flush;
+
+# ---- Test 15: Overlapping ranges with same eq_conds prefix ----
+# (a = 1 AND b >= 1 AND b <= 5) OR (a = 1 AND b >= 3 AND b <= 8)
+# These overlap on b in [3,5], so they merge into a single range:
+# a = 1 AND b >= 1 AND b <= 8 (single scan, not UNION)
+
+statement ok
+CREATE MATERIALIZED VIEW mv_merge AS SELECT * FROM t_merge
+  WHERE (a = 1 AND b >= 1 AND b <= 5) OR (a = 1 AND b >= 3 AND b <= 8);
+
+query III rowsort
+SELECT * FROM mv_merge;
+----
+1 1 110
+1 2 120
+1 3 130
+1 4 140
+1 5 150
+1 6 160
+1 7 170
+1 8 180
+
+query T
+SELECT * FROM mv_merge EXCEPT SELECT * FROM t_merge WHERE (a = 1 AND b >= 1 AND b <= 5) OR (a = 1 AND b >= 3 AND b <= 8);
+----
+
+query T
+SELECT * FROM t_merge WHERE (a = 1 AND b >= 1 AND b <= 5) OR (a = 1 AND b >= 3 AND b <= 8) EXCEPT SELECT * FROM mv_merge;
+----
+
+# ---- Test 16: Non-overlapping ranges with same eq_conds (no merge) ----
+# (a = 2 AND b >= 0 AND b <= 2) OR (a = 2 AND b >= 7 AND b <= 9)
+# These do NOT overlap, so they remain as 2 separate scan ranges (UNION)
+
+statement ok
+CREATE MATERIALIZED VIEW mv_no_merge AS SELECT * FROM t_merge
+  WHERE (a = 2 AND b >= 0 AND b <= 2) OR (a = 2 AND b >= 7 AND b <= 9);
+
+query III rowsort
+SELECT * FROM mv_no_merge;
+----
+2 0 200
+2 1 210
+2 2 220
+2 7 270
+2 8 280
+2 9 290
+
+query T
+SELECT * FROM mv_no_merge EXCEPT SELECT * FROM t_merge WHERE (a = 2 AND b >= 0 AND b <= 2) OR (a = 2 AND b >= 7 AND b <= 9);
+----
+
+query T
+SELECT * FROM t_merge WHERE (a = 2 AND b >= 0 AND b <= 2) OR (a = 2 AND b >= 7 AND b <= 9) EXCEPT SELECT * FROM mv_no_merge;
+----
+
+# ---- Test 17: Merged range + separate range (partial merge) ----
+# (a = 3 AND b >= 0 AND b <= 4) OR (a = 3 AND b >= 2 AND b <= 6) OR (a = 5 AND b = 5)
+# First two arms merge into a = 3 AND b >= 0 AND b <= 6
+# Third arm has different eq_conds (a = 5), stays separate → UNION of 2
+
+statement ok
+CREATE MATERIALIZED VIEW mv_partial_merge AS SELECT * FROM t_merge
+  WHERE (a = 3 AND b >= 0 AND b <= 4) OR (a = 3 AND b >= 2 AND b <= 6) OR (a = 5 AND b = 5);
+
+query III rowsort
+SELECT * FROM mv_partial_merge;
+----
+3 0 300
+3 1 310
+3 2 320
+3 3 330
+3 4 340
+3 5 350
+3 6 360
+5 5 550
+
+query T
+SELECT * FROM mv_partial_merge EXCEPT SELECT * FROM t_merge WHERE (a = 3 AND b >= 0 AND b <= 4) OR (a = 3 AND b >= 2 AND b <= 6) OR (a = 5 AND b = 5);
+----
+
+query T
+SELECT * FROM t_merge WHERE (a = 3 AND b >= 0 AND b <= 4) OR (a = 3 AND b >= 2 AND b <= 6) OR (a = 5 AND b = 5) EXCEPT SELECT * FROM mv_partial_merge;
+----
+
+# ---- Test 18: Verify post-backfill correctness with merged ranges ----
+
+statement ok
+INSERT INTO t_merge VALUES (1, 4, 999), (2, 8, 888), (3, 3, 777), (5, 5, 666);
+
+statement ok
+flush;
+
+query T
+SELECT * FROM mv_merge EXCEPT SELECT * FROM t_merge WHERE (a = 1 AND b >= 1 AND b <= 5) OR (a = 1 AND b >= 3 AND b <= 8);
+----
+
+query T
+SELECT * FROM t_merge WHERE (a = 1 AND b >= 1 AND b <= 5) OR (a = 1 AND b >= 3 AND b <= 8) EXCEPT SELECT * FROM mv_merge;
+----
+
+query T
+SELECT * FROM mv_no_merge EXCEPT SELECT * FROM t_merge WHERE (a = 2 AND b >= 0 AND b <= 2) OR (a = 2 AND b >= 7 AND b <= 9);
+----
+
+query T
+SELECT * FROM t_merge WHERE (a = 2 AND b >= 0 AND b <= 2) OR (a = 2 AND b >= 7 AND b <= 9) EXCEPT SELECT * FROM mv_no_merge;
+----
+
+query T
+SELECT * FROM mv_partial_merge EXCEPT SELECT * FROM t_merge WHERE (a = 3 AND b >= 0 AND b <= 4) OR (a = 3 AND b >= 2 AND b <= 6) OR (a = 5 AND b = 5);
+----
+
+query T
+SELECT * FROM t_merge WHERE (a = 3 AND b >= 0 AND b <= 4) OR (a = 3 AND b >= 2 AND b <= 6) OR (a = 5 AND b = 5) EXCEPT SELECT * FROM mv_partial_merge;
+----
+
+statement ok
+DROP TABLE t_merge cascade;

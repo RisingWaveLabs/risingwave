@@ -188,6 +188,29 @@
     select * from t where b IN (1, 2, 3);
   expected_outputs:
     - stream_plan
+- name: snapshot backfill multi-range OR predicate produces UNION of scans
+  sql: |
+    create table t(a int, b int, c int, primary key(a, b));
+    select * from t where (a = 1 AND b > 10) OR (a = 2 AND b < 5);
+  expected_outputs:
+    - stream_plan
+- name: |
+    snapshot backfill overlapping ranges merge into single scan.
+    TODO: scan range should be `a = 1 AND b >= 1 AND b <= 8` after merge, but currently
+    only pushes `a = 1`. Root cause: expression simplification factors out `a = 1` before
+    split_to_scan_ranges, leaving an OR on b that analyze_group cannot extract as a range.
+    Fix: teach analyze_group in condition.rs to handle OR-of-ranges on a single PK column.
+  sql: |
+    create table t(a int, b int, c int, primary key(a, b));
+    select * from t where (a = 1 AND b >= 1 AND b <= 5) OR (a = 1 AND b >= 3 AND b <= 8);
+  expected_outputs:
+    - stream_plan
+- name: snapshot backfill partial merge with separate range produces UNION
+  sql: |
+    create table t(a int, b int, c int, primary key(a, b));
+    select * from t where (a = 3 AND b >= 0 AND b <= 4) OR (a = 3 AND b >= 2 AND b <= 6) OR (a = 5 AND b = 5);
+  expected_outputs:
+    - stream_plan
 - name: snapshot backfill index selection without explicit include
   sql: |
     create table t(a int, b int, c int, primary key(a));
