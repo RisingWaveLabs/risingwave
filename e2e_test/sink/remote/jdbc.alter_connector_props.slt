@@ -17,7 +17,8 @@ CREATE SINK s_jdbc_alter_props FROM t_jdbc_alter_src WITH (
     primary_key = 'id'
 );
 
-statement ok
+# See https://github.com/risingwavelabs/risingwave/issues/26159.
+statement ok retry 3 backoff 5s
 ALTER SINK s_jdbc_alter_props CONNECTOR WITH (
     jdbc.url = 'jdbc:postgresql://db:5432/test',
     user = 'test',
