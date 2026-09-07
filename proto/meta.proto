@@ -395,6 +395,7 @@ message AlterConnectorPropsRequest {
     SINK = 2;
     CONNECTION = 3;
     ICEBERG_TABLE = 4;
+    CDC_TABLE = 5;
   }
 
   uint32 object_id = 1;

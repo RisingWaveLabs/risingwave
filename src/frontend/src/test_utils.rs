@@ -1428,6 +1428,14 @@ impl FrontendMetaClient for MockFrontendMetaClient {
         unimplemented!()
     }
 
+    async fn alter_cdc_table_snapshot_options(
+        &self,
+        _table_id: TableId,
+        _changed_props: BTreeMap<String, String>,
+    ) -> RpcResult<()> {
+        unimplemented!()
+    }
+
     async fn alter_source_connector_props(
         &self,
         _source_id: SourceId,

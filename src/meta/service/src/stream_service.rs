@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use chrono::DateTime;
 use itertools::Itertools;
@@ -750,6 +750,30 @@ impl StreamManagerService for StreamServiceImpl {
                 (prop, sink_id.as_object_id())
             }
 
+            Ok(AlterConnectorPropsObject::CdcTable) => {
+                if !request.changed_secret_refs.is_empty()
+                    || request.connector_conn_ref.is_some()
+                    || request.extra_options.is_some()
+                {
+                    return Err(Status::invalid_argument(
+                        "CDC table snapshot options do not support secrets, connections, or extra options",
+                    ));
+                }
+                let props = request
+                    .changed_props
+                    .clone()
+                    .into_iter()
+                    .collect::<BTreeMap<_, _>>();
+                self.metadata_manager
+                    .catalog_controller
+                    .update_cdc_table_snapshot_options_by_table_id(
+                        request.object_id.into(),
+                        props.clone(),
+                    )
+                    .await?;
+                (props.into_iter().collect(), request.object_id.into())
+            }
+
             Ok(AlterConnectorPropsObject::Source) => {
                 // alter source and table's associated source
                 if request.connector_conn_ref.is_some() {
@@ -856,11 +880,15 @@ impl StreamManagerService for StreamServiceImpl {
             .catalog_controller
             .get_object_database_id(object_id)
             .await?;
-        // Connection updates are broadcast to dependent sources/sinks inside the `Connection` branch above.
+        // Connection updates are broadcast to dependent sources/sinks inside the `Connection`
+        // branch above. CDC table snapshot options intentionally stay metadata-only until recovery.
         // For sources/sinks/iceberg-table updates, broadcast the change to the object itself.
-        if AlterConnectorPropsObject::try_from(request.object_type)
-            .is_ok_and(|t| t != AlterConnectorPropsObject::Connection)
-        {
+        if AlterConnectorPropsObject::try_from(request.object_type).is_ok_and(|t| {
+            !matches!(
+                t,
+                AlterConnectorPropsObject::Connection | AlterConnectorPropsObject::CdcTable
+            )
+        }) {
             let mut mutation = HashMap::default();
             mutation.insert(object_id, new_props_plaintext);
             let _version = self

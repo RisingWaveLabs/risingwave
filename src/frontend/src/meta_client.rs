@@ -196,6 +196,12 @@ pub trait FrontendMetaClient: Send + Sync {
         connector_conn_ref: Option<ConnectionId>,
     ) -> Result<()>;
 
+    async fn alter_cdc_table_snapshot_options(
+        &self,
+        table_id: TableId,
+        changed_props: BTreeMap<String, String>,
+    ) -> Result<()>;
+
     async fn alter_source_connector_props(
         &self,
         source_id: SourceId,
@@ -525,6 +531,16 @@ impl FrontendMetaClient for FrontendMetaClientImpl {
                 changed_secret_refs,
                 connector_conn_ref,
             )
+            .await
+    }
+
+    async fn alter_cdc_table_snapshot_options(
+        &self,
+        table_id: TableId,
+        changed_props: BTreeMap<String, String>,
+    ) -> Result<()> {
+        self.0
+            .alter_cdc_table_snapshot_options(table_id, changed_props)
             .await
     }
 

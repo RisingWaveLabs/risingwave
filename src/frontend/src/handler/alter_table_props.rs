@@ -13,6 +13,9 @@
 // limitations under the License.
 
 use pgwire::pg_response::{PgResponse, StatementType};
+use risingwave_connector::source::cdc::{
+    CDC_BACKFILL_SNAPSHOT_BATCH_SIZE_KEY, CDC_BACKFILL_SNAPSHOT_INTERVAL_KEY,
+};
 use risingwave_expr::bail;
 use risingwave_sqlparser::ast::{Ident, ObjectName, SqlOption};
 
@@ -24,6 +27,9 @@ use crate::handler::alter_source_props::handle_alter_table_connector_props;
 use crate::utils::resolve_connection_ref_and_secret_ref;
 use crate::{Binder, WithOptions};
 
+const ALTER_CDC_SNAPSHOT_OPTIONS_RECOVER_NOTICE: &str =
+    "The new CDC snapshot options will take effect after a RECOVER.";
+
 pub async fn handle_alter_table_props(
     handler_args: HandlerArgs,
     table_name: ObjectName,
@@ -31,6 +37,36 @@ pub async fn handle_alter_table_props(
 ) -> Result<RwPgResponse> {
     let session = handler_args.session.clone();
     let (original_table, _) = fetch_table_catalog_for_alter(session.as_ref(), &table_name)?;
+    if original_table.cdc_table_id.is_some()
+        && !changed_props.is_empty()
+        && changed_props.iter().all(|prop| {
+            matches!(
+                prop.name.real_value().as_str(),
+                CDC_BACKFILL_SNAPSHOT_BATCH_SIZE_KEY | CDC_BACKFILL_SNAPSHOT_INTERVAL_KEY
+            )
+        })
+    {
+        let (resolved_with_options, _, connector_conn_ref) = resolve_connection_ref_and_secret_ref(
+            WithOptions::try_from(changed_props.as_ref() as &[SqlOption])?,
+            &session,
+            None,
+        )?;
+        let (changed_props, changed_secret_refs) = resolved_with_options.into_parts();
+        if !changed_secret_refs.is_empty() || connector_conn_ref.is_some() {
+            bail!("CDC snapshot options do not support SECRET or CONNECTION")
+        }
+
+        session
+            .env()
+            .meta_client()
+            .alter_cdc_table_snapshot_options(original_table.id, changed_props)
+            .await?;
+
+        return Ok(RwPgResponse::builder(StatementType::ALTER_TABLE)
+            .notice(ALTER_CDC_SNAPSHOT_OPTIONS_RECOVER_NOTICE)
+            .into());
+    }
+
     match original_table.engine() {
         risingwave_common::catalog::Engine::Hummock => {
             handle_alter_table_connector_props(handler_args, table_name, changed_props).await

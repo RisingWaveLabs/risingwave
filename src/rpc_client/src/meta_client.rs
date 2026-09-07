@@ -1586,6 +1586,23 @@ impl MetaClient {
         Ok(())
     }
 
+    pub async fn alter_cdc_table_snapshot_options(
+        &self,
+        table_id: TableId,
+        changed_props: BTreeMap<String, String>,
+    ) -> Result<()> {
+        let req = AlterConnectorPropsRequest {
+            object_id: table_id.as_raw_id(),
+            changed_props: changed_props.into_iter().collect(),
+            changed_secret_refs: Default::default(),
+            connector_conn_ref: None,
+            object_type: AlterConnectorPropsObject::CdcTable as i32,
+            extra_options: None,
+        };
+        let _resp = self.inner.alter_connector_props(req).await?;
+        Ok(())
+    }
+
     pub async fn alter_source_connector_props(
         &self,
         source_id: SourceId,

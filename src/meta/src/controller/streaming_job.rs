@@ -38,6 +38,9 @@ use risingwave_connector::connector_common::validate_connection;
 use risingwave_connector::error::ConnectorError;
 use risingwave_connector::sink::file_sink::fs::FsSink;
 use risingwave_connector::sink::{CONNECTOR_TYPE_KEY, SinkError};
+use risingwave_connector::source::cdc::{
+    CDC_BACKFILL_SNAPSHOT_BATCH_SIZE_KEY, CDC_BACKFILL_SNAPSHOT_INTERVAL_KEY, CdcScanOptions,
+};
 use risingwave_connector::source::{
     ConnectorProperties, UPSTREAM_SOURCE_KEY, pb_connection_type_to_connection_type,
 };
@@ -1546,6 +1549,33 @@ impl CatalogController {
         Ok(Some(old_state_table_ids))
     }
 
+    async fn ensure_job_not_being_altered_or_referenced(
+        txn: &DatabaseTransaction,
+        job_id: JobId,
+        object_type: ObjectType,
+    ) -> MetaResult<()> {
+        let referring_objects =
+            get_referring_objects(job_id.as_object_id(), object_type, txn).await?;
+        let referring_job_ids = referring_objects
+            .iter()
+            .map(|object| object.oid.as_job_id())
+            .collect_vec();
+        let non_created_referring_job_count = StreamingJobModel::find()
+            .filter(
+                streaming_job::Column::JobId
+                    .is_in(referring_job_ids)
+                    .and(streaming_job::Column::JobStatus.ne(JobStatus::Created)),
+            )
+            .count(txn)
+            .await?;
+        if non_created_referring_job_count != 0 {
+            return Err(MetaError::permission_denied(
+                "job is being altered or referenced by some creating jobs",
+            ));
+        }
+        Ok(())
+    }
+
     pub async fn create_job_catalog_for_replace(
         &self,
         streaming_job: &StreamingJob,
@@ -1560,25 +1590,8 @@ impl CatalogController {
         // 1. check version.
         streaming_job.verify_version_for_replace(&txn).await?;
         // 2. check concurrent replace.
-        let referring_objects =
-            get_referring_objects(id.as_object_id(), streaming_job.object_type(), &txn).await?;
-        let referring_job_ids = referring_objects
-            .iter()
-            .map(|object| object.oid.as_job_id())
-            .collect_vec();
-        let non_created_referring_job_count = StreamingJobModel::find()
-            .filter(
-                streaming_job::Column::JobId
-                    .is_in(referring_job_ids)
-                    .and(streaming_job::Column::JobStatus.ne(JobStatus::Created)),
-            )
-            .count(&txn)
+        Self::ensure_job_not_being_altered_or_referenced(&txn, id, streaming_job.object_type())
             .await?;
-        if non_created_referring_job_count != 0 {
-            return Err(MetaError::permission_denied(
-                "job is being altered or referenced by some creating jobs",
-            ));
-        }
 
         // Check if any dependent job is a batch refresh job.
         // Replace table is not supported when a batch refresh MV depends on it.
@@ -3182,6 +3195,109 @@ impl CatalogController {
         Ok(props.into_iter().collect())
     }
 
+    /// Persists CDC snapshot options in the table definition and stream plan.
+    /// Running actors pick up the updated plan after recovery.
+    pub async fn update_cdc_table_snapshot_options_by_table_id(
+        &self,
+        table_id: TableId,
+        props: BTreeMap<String, String>,
+    ) -> MetaResult<()> {
+        let snapshot_options_update = CdcSnapshotOptionsUpdate::try_from(&props)?;
+        let inner = self.inner.write().await;
+        let txn = inner.db.begin().await?;
+
+        let table = Table::find_by_id(table_id)
+            .one(&txn)
+            .await?
+            .ok_or_else(|| MetaError::catalog_id_not_found(ObjectType::Table.as_str(), table_id))?;
+        if table.cdc_table_id.is_none() {
+            return Err(MetaError::invalid_parameter(format!(
+                "table {table_id} is not a CDC table"
+            )));
+        }
+
+        // Serialize with streaming job replacement. If a replacement has already started, its
+        // temporary job depends on this table and must finish before the options can be changed.
+        Self::ensure_job_not_being_altered_or_referenced(&txn, table.job_id(), ObjectType::Table)
+            .await?;
+
+        let [mut stmt]: [_; 1] = Parser::parse_sql(&table.definition)
+            .map_err(|e| MetaError::invalid_parameter(e.to_report_string()))?
+            .try_into()
+            .unwrap();
+        if let Statement::CreateTable { with_options, .. } = &mut stmt {
+            update_stmt_with_props(with_options, &props)?;
+        } else {
+            return Err(MetaError::invalid_parameter(format!(
+                "table {table_id} has an invalid CDC table definition"
+            )));
+        }
+
+        let fragments: Vec<(FragmentId, StreamNode)> = Fragment::find()
+            .select_only()
+            .columns([fragment::Column::FragmentId, fragment::Column::StreamNode])
+            .filter(fragment::Column::JobId.eq(table.job_id()))
+            .into_tuple()
+            .all(&txn)
+            .await?;
+        let mut updated_fragments = Vec::new();
+        for (fragment_id, stream_node) in fragments {
+            let mut stream_node = stream_node.to_protobuf();
+            if apply_cdc_snapshot_options_to_stream_node(&mut stream_node, &snapshot_options_update)
+            {
+                updated_fragments.push((fragment_id, stream_node));
+            }
+        }
+        if updated_fragments.is_empty() {
+            return Err(MetaError::invalid_parameter(format!(
+                "table {table_id} has no CDC scan node"
+            )));
+        }
+
+        Table::update(table::ActiveModel {
+            table_id: Set(table_id),
+            definition: Set(stmt.to_string()),
+            ..Default::default()
+        })
+        .exec(&txn)
+        .await?;
+        for (fragment_id, stream_node) in updated_fragments {
+            Fragment::update(fragment::ActiveModel {
+                fragment_id: Set(fragment_id),
+                stream_node: Set(StreamNode::from(&stream_node)),
+                ..Default::default()
+            })
+            .exec(&txn)
+            .await?;
+        }
+
+        let (table, obj) = Table::find_by_id(table_id)
+            .find_also_related(Object)
+            .one(&txn)
+            .await?
+            .ok_or_else(|| MetaError::catalog_id_not_found(ObjectType::Table.as_str(), table_id))?;
+        let streaming_job = StreamingJobModel::find_by_id(table.job_id())
+            .one(&txn)
+            .await?;
+        txn.commit().await?;
+        drop(inner);
+
+        self.notify_frontend(
+            NotificationOperation::Update,
+            NotificationInfo::ObjectGroup(PbObjectGroup {
+                objects: vec![PbObject {
+                    object_info: Some(PbObjectInfo::Table(
+                        ObjectModel(table, obj.unwrap(), streaming_job).into(),
+                    )),
+                }],
+                dependencies: vec![],
+            }),
+        )
+        .await;
+
+        Ok(())
+    }
+
     pub async fn update_iceberg_table_props_by_table_id(
         &self,
         table_id: TableId,
@@ -3975,7 +4091,7 @@ fn update_stmt_with_props(
 ) -> MetaResult<()> {
     let mut new_sql_options = with_properties
         .iter()
-        .map(|sql_option| (&sql_option.name, sql_option))
+        .map(|sql_option| (sql_option.name.real_value(), sql_option))
         .collect::<IndexMap<_, _>>();
     let add_sql_options = props
         .iter()
@@ -3985,10 +4101,98 @@ fn update_stmt_with_props(
     new_sql_options.extend(
         add_sql_options
             .iter()
-            .map(|sql_option| (&sql_option.name, sql_option)),
+            .map(|sql_option| (sql_option.name.real_value(), sql_option)),
     );
     *with_properties = new_sql_options.into_values().cloned().collect();
     Ok(())
+}
+
+#[derive(Debug, PartialEq)]
+struct CdcSnapshotOptionsUpdate {
+    snapshot_barrier_interval: Option<u32>,
+    snapshot_batch_size: Option<u32>,
+}
+
+impl TryFrom<&BTreeMap<String, String>> for CdcSnapshotOptionsUpdate {
+    type Error = MetaError;
+
+    fn try_from(props: &BTreeMap<String, String>) -> Result<Self, Self::Error> {
+        let mut update = Self {
+            snapshot_barrier_interval: None,
+            snapshot_batch_size: None,
+        };
+        for (key, value) in props {
+            match key.as_str() {
+                CDC_BACKFILL_SNAPSHOT_INTERVAL_KEY => {
+                    let parsed = value.parse::<u32>().map_err(|_| {
+                        MetaError::invalid_parameter(format!("Invalid value for {key}: {value}"))
+                    })?;
+                    if parsed == 0 {
+                        return Err(MetaError::invalid_parameter(format!(
+                            "{CDC_BACKFILL_SNAPSHOT_INTERVAL_KEY} must be greater than 0"
+                        )));
+                    }
+                    update.snapshot_barrier_interval = Some(parsed);
+                }
+                CDC_BACKFILL_SNAPSHOT_BATCH_SIZE_KEY => {
+                    let parsed = value.parse::<u32>().map_err(|_| {
+                        MetaError::invalid_parameter(format!("Invalid value for {key}: {value}"))
+                    })?;
+                    if parsed == 0 {
+                        return Err(MetaError::invalid_parameter(format!(
+                            "{CDC_BACKFILL_SNAPSHOT_BATCH_SIZE_KEY} must be greater than 0"
+                        )));
+                    }
+                    update.snapshot_batch_size = Some(parsed);
+                }
+                _ => {
+                    return Err(MetaError::invalid_parameter(format!(
+                        "CDC table snapshot option '{key}' cannot be altered"
+                    )));
+                }
+            }
+        }
+        if props.is_empty() {
+            return Err(MetaError::invalid_parameter(
+                "no CDC table snapshot option was specified",
+            ));
+        }
+        Ok(update)
+    }
+}
+
+impl CdcSnapshotOptionsUpdate {
+    fn apply(&self, options: &mut CdcScanOptions) {
+        if let Some(snapshot_barrier_interval) = self.snapshot_barrier_interval {
+            options.snapshot_barrier_interval = snapshot_barrier_interval;
+        }
+        if let Some(snapshot_batch_size) = self.snapshot_batch_size {
+            options.snapshot_batch_size = snapshot_batch_size;
+        }
+    }
+}
+
+fn apply_cdc_snapshot_options_to_stream_node(
+    stream_node: &mut PbStreamNode,
+    update: &CdcSnapshotOptionsUpdate,
+) -> bool {
+    let mut found = false;
+    visit_stream_node_mut(stream_node, |node| {
+        if let PbNodeBody::StreamCdcScan(node) = node {
+            let mut options = node
+                .options
+                .as_ref()
+                .map(CdcScanOptions::from_proto)
+                .unwrap_or(CdcScanOptions {
+                    disable_backfill: node.disable_backfill,
+                    ..Default::default()
+                });
+            update.apply(&mut options);
+            node.options = Some(options.to_proto());
+            found = true;
+        }
+    });
+    found
 }
 
 async fn update_sink_fragment_props(
@@ -4111,4 +4315,108 @@ where
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use maplit::btreemap;
+    use risingwave_pb::stream_plan::StreamCdcScanNode;
+
+    use super::*;
+
+    #[test]
+    fn test_apply_cdc_snapshot_options_to_stream_node() {
+        let update = CdcSnapshotOptionsUpdate::try_from(&btreemap! {
+            CDC_BACKFILL_SNAPSHOT_INTERVAL_KEY.to_owned() => "7".to_owned(),
+            CDC_BACKFILL_SNAPSHOT_BATCH_SIZE_KEY.to_owned() => "2048".to_owned(),
+        })
+        .unwrap();
+        let original_options = CdcScanOptions {
+            backfill_parallelism: 4,
+            ..Default::default()
+        };
+        let mut stream_node = PbStreamNode {
+            node_body: Some(PbNodeBody::StreamCdcScan(Box::new(StreamCdcScanNode {
+                options: Some(original_options.to_proto()),
+                ..Default::default()
+            }))),
+            ..Default::default()
+        };
+
+        assert!(apply_cdc_snapshot_options_to_stream_node(
+            &mut stream_node,
+            &update
+        ));
+        let PbNodeBody::StreamCdcScan(cdc_scan) = stream_node.node_body.unwrap() else {
+            unreachable!()
+        };
+        let options = CdcScanOptions::from_proto(cdc_scan.options.as_ref().unwrap());
+        assert_eq!(options.snapshot_barrier_interval, 7);
+        assert_eq!(options.snapshot_batch_size, 2048);
+        assert_eq!(options.backfill_parallelism, 4);
+    }
+
+    #[test]
+    fn test_reject_invalid_cdc_snapshot_options_update() {
+        let invalid_value = btreemap! {
+            CDC_BACKFILL_SNAPSHOT_BATCH_SIZE_KEY.to_owned() => "invalid".to_owned(),
+        };
+        assert!(CdcSnapshotOptionsUpdate::try_from(&invalid_value).is_err());
+
+        let zero_batch_size = btreemap! {
+            CDC_BACKFILL_SNAPSHOT_BATCH_SIZE_KEY.to_owned() => "0".to_owned(),
+        };
+        assert!(CdcSnapshotOptionsUpdate::try_from(&zero_batch_size).is_err());
+
+        let zero_interval = btreemap! {
+            CDC_BACKFILL_SNAPSHOT_INTERVAL_KEY.to_owned() => "0".to_owned(),
+        };
+        assert!(CdcSnapshotOptionsUpdate::try_from(&zero_interval).is_err());
+
+        let unsupported_option = btreemap! {
+            "snapshot.unsupported".to_owned() => "1".to_owned(),
+        };
+        assert!(CdcSnapshotOptionsUpdate::try_from(&unsupported_option).is_err());
+    }
+
+    #[test]
+    fn test_update_stmt_with_quoted_cdc_snapshot_options() {
+        let [
+            Statement::CreateTable {
+                mut with_options, ..
+            },
+        ]: [_; 1] = Parser::parse_sql(
+            r#"CREATE TABLE t (v INT) WITH (
+                "snapshot.batch_size" = '1',
+                "snapshot"."interval" = '1'
+            )"#,
+        )
+        .unwrap()
+        .try_into()
+        .unwrap()
+        else {
+            unreachable!()
+        };
+
+        update_stmt_with_props(
+            &mut with_options,
+            &btreemap! {
+                CDC_BACKFILL_SNAPSHOT_BATCH_SIZE_KEY.to_owned() => "2048".to_owned(),
+                CDC_BACKFILL_SNAPSHOT_INTERVAL_KEY.to_owned() => "7".to_owned(),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(with_options.len(), 2);
+        assert_eq!(
+            with_options
+                .iter()
+                .map(|option| (option.name.real_value(), option.value.to_string()))
+                .collect_vec(),
+            vec![
+                ("snapshot.batch_size".to_owned(), "'2048'".to_owned()),
+                ("snapshot.interval".to_owned(), "'7'".to_owned())
+            ]
+        );
+    }
 }
