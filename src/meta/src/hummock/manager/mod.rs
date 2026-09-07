@@ -497,10 +497,10 @@ impl HummockManager {
                 .default_compaction_config();
             let checkpoint_version = HummockVersion::create_init_version(default_compaction_config);
             tracing::info!("init hummock version checkpoint");
-            versioning_guard.checkpoint = HummockVersionCheckpoint {
-                version: Arc::new(checkpoint_version.clone()),
-                stale_objects: Default::default(),
-            };
+            versioning_guard.checkpoint = HummockVersionCheckpoint::new(
+                Arc::new(checkpoint_version.clone()),
+                Default::default(),
+            );
             self.write_checkpoint(&versioning_guard.checkpoint).await?;
             checkpoint_version
         };

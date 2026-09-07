@@ -587,11 +587,12 @@ impl<T> HummockVersionDeltaCommon<T>
 where
     T: SstableIdReader + ObjectIdReader,
 {
-    /// Get the newly added object ids from the version delta.
+    /// Iterate over the newly added object ids in the version delta.
     ///
-    /// Note: the result can be false positive because we only collect the set of sst object ids in the `inserted_table_infos`,
-    /// but it is possible that the object is moved or split from other compaction groups or levels.
-    pub fn newly_added_object_ids(&self) -> HashSet<HummockObjectId> {
+    /// Note: the result can be false positive because we only collect the set of sst object ids in
+    /// the `inserted_table_infos`, but it is possible that the object is moved or split from other
+    /// compaction groups or levels.
+    pub fn newly_added_object_ids_iter(&self) -> impl Iterator<Item = HummockObjectId> + '_ {
         // DO NOT REMOVE THIS LINE
         // This is to ensure that when adding new variant to `HummockObjectId`,
         // the compiler will warn us if we forget to handle it here.
@@ -611,7 +612,11 @@ where
                             .map(|(object_id, _)| object_id)
                     }),
             )
-            .collect()
+    }
+
+    /// Collect the object ids from [`Self::newly_added_object_ids_iter`] into a set.
+    pub fn newly_added_object_ids(&self) -> HashSet<HummockObjectId> {
+        self.newly_added_object_ids_iter().collect()
     }
 
     pub fn newly_added_sst_ids(&self) -> HashSet<HummockSstableId> {

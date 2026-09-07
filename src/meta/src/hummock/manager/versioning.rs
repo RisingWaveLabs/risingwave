@@ -91,37 +91,59 @@ impl Versioning {
         self.time_travel_snapshot_interval_counter = u64::MAX;
     }
 
-    pub fn get_tracked_object_ids(
+    pub fn remove_tracked_object_ids(
         &self,
+        object_ids: &mut HashSet<HummockObjectId>,
         min_pinned_version_id: HummockVersionId,
-    ) -> HashSet<HummockObjectId> {
-        // object ids in checkpoint version
-        let mut tracked_object_ids = self
-            .checkpoint
-            .version
-            .get_object_ids()
-            .chain(
-                self.table_change_log
-                    .values()
-                    .flat_map(|c| c.get_object_ids()),
-            )
-            .collect::<HashSet<_>>();
-        // add object ids added between checkpoint version and current version
+    ) {
+        // Filter object ids in the checkpoint version using the index built during checkpoint
+        // creation. The candidate set is typically much smaller than the checkpoint version.
+        object_ids.retain(|object_id| !self.checkpoint.object_ids.contains(object_id));
+        if object_ids.is_empty() {
+            return;
+        }
+
+        // Table change logs are managed separately from the checkpoint version on main. Iterate
+        // over them directly so GC does not have to allocate a second large set.
+        for object_id in self
+            .table_change_log
+            .values()
+            .flat_map(|change_log| change_log.get_object_ids())
+        {
+            object_ids.remove(&object_id);
+            if object_ids.is_empty() {
+                return;
+            }
+        }
+
+        // Filter object ids added between checkpoint version and current version. Iterate directly
+        // to avoid allocating and re-hashing a temporary set for each delta.
         for (_, delta) in self.hummock_version_deltas.range((
             Excluded(self.checkpoint.version.id),
             Included(self.current_version.id),
         )) {
-            tracked_object_ids.extend(delta.newly_added_object_ids());
+            for object_id in delta.newly_added_object_ids_iter() {
+                object_ids.remove(&object_id);
+            }
+            if object_ids.is_empty() {
+                return;
+            }
         }
-        // add stale object ids before the checkpoint version
-        tracked_object_ids.extend(
-            self.checkpoint
-                .stale_objects
-                .iter()
-                .filter(|(version_id, _)| **version_id >= min_pinned_version_id)
-                .flat_map(|(_, objects)| get_stale_object_ids(objects)),
-        );
-        tracked_object_ids
+
+        // Filter stale object ids before the checkpoint version that are still pinned.
+        for (_, objects) in self
+            .checkpoint
+            .stale_objects
+            .iter()
+            .filter(|(version_id, _)| **version_id >= min_pinned_version_id)
+        {
+            for object_id in get_stale_object_ids(objects) {
+                object_ids.remove(&object_id);
+            }
+            if object_ids.is_empty() {
+                return;
+            }
+        }
     }
 }
 

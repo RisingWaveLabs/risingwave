@@ -1565,6 +1565,73 @@ async fn test_extend_objects_to_delete() {
         hummock_manager.create_version_checkpoint(1).await.unwrap(),
         6
     );
+    {
+        let versioning = hummock_manager
+            .versioning
+            .read_with_process_name("test_extend_objects_to_delete")
+            .await;
+        let checkpoint = &versioning.checkpoint;
+        let expected_version_object_ids: HashSet<_> = checkpoint.version.get_object_ids().collect();
+        assert_eq!(checkpoint.object_ids, expected_version_object_ids);
+
+        let restored_checkpoint =
+            HummockVersionCheckpoint::from_protobuf(&checkpoint.to_protobuf());
+        assert_eq!(restored_checkpoint.object_ids, expected_version_object_ids);
+    }
+
+    // A table-change-log-only object is protected while the log is live, but must not be retained
+    // by the immutable checkpoint index after the log is removed.
+    let change_log_object_id = 10_000;
+    let change_log_object = HummockObjectId::Sstable(change_log_object_id.into());
+    let change_log_table_id = TableId::new(u32::MAX);
+    {
+        let mut versioning = hummock_manager
+            .versioning
+            .write_with_process_name("test_extend_objects_to_delete")
+            .await;
+        let checkpoint_version = versioning.checkpoint.version.clone();
+        let stale_objects = versioning.checkpoint.stale_objects.clone();
+        versioning.table_change_log.insert(
+            change_log_table_id,
+            TableChangeLog::new([EpochNewChangeLog {
+                new_value: vec![gen_sstable_info(
+                    change_log_object_id,
+                    vec![change_log_table_id.as_raw_id()],
+                    test_epoch(1),
+                )],
+                old_value: vec![],
+                non_checkpoint_epochs: vec![],
+                checkpoint_epoch: test_epoch(1),
+            }]),
+        );
+        versioning.checkpoint = HummockVersionCheckpoint::new(checkpoint_version, stale_objects);
+        assert!(
+            !versioning
+                .checkpoint
+                .object_ids
+                .contains(&change_log_object)
+        );
+    }
+    assert!(
+        hummock_manager
+            .finalize_objects_to_delete([change_log_object].into_iter())
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    hummock_manager
+        .versioning
+        .write_with_process_name("test_extend_objects_to_delete")
+        .await
+        .table_change_log
+        .remove(&change_log_table_id);
+    assert_eq!(
+        hummock_manager
+            .finalize_objects_to_delete([change_log_object].into_iter())
+            .await
+            .unwrap(),
+        vec![change_log_object]
+    );
     // since version1 is still pinned, the sst removed in compaction can not be reclaimed.
     assert_eq!(
         hummock_manager
@@ -3232,10 +3299,10 @@ async fn test_old_version_dropped_table_sst_does_not_make_new_compaction_fail() 
     // in SST metadata and remove SSTs whose `table_ids` become empty. Otherwise the new compactor
     // will pass the stale read set to catalog acquire and fail before compaction can run.
     initial_manager
-        .write_checkpoint(&HummockVersionCheckpoint {
-            version: Arc::new(dirty_version),
-            stale_objects: Default::default(),
-        })
+        .write_checkpoint(&HummockVersionCheckpoint::new(
+            Arc::new(dirty_version),
+            Default::default(),
+        ))
         .await
         .unwrap();
 

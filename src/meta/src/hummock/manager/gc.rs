@@ -224,20 +224,19 @@ impl HummockManager {
         &self,
         object_ids: impl Iterator<Item = HummockObjectId>,
     ) -> Result<Vec<HummockObjectId>> {
+        let mut object_ids = object_ids.collect::<HashSet<_>>();
         // This lock ensures `commit_epoch` and `report_compat_task` can see the latest GC history during sanity check.
         let versioning = self
             .versioning
             .read_with_process_name("finalize_objects_to_delete")
             .await;
-        let tracked_object_ids: HashSet<HummockObjectId> = versioning.get_tracked_object_ids(
-            self.context_info
-                .read_with_process_name("finalize_objects_to_delete")
-                .await
-                .min_pinned_version_id(),
-        );
-        let to_delete = object_ids
-            .filter(|object_id| !tracked_object_ids.contains(object_id))
-            .collect_vec();
+        let min_pinned_version_id = self
+            .context_info
+            .read_with_process_name("finalize_objects_to_delete")
+            .await
+            .min_pinned_version_id();
+        versioning.remove_tracked_object_ids(&mut object_ids, min_pinned_version_id);
+        let to_delete = object_ids.into_iter().collect_vec();
         self.write_gc_history(to_delete.iter().copied()).await?;
         Ok(to_delete)
     }
@@ -526,7 +525,7 @@ impl HummockManager {
     /// Minor GC attempts to delete objects that were part of Hummock version but are no longer in use.
     pub async fn try_start_minor_gc(&self, backup_manager: BackupManagerRef) -> Result<()> {
         const MIN_MINOR_GC_OBJECT_COUNT: usize = 1000;
-        let Some(object_ids) = self
+        let Some(mut object_ids) = self
             .gc_manager
             .try_take_may_delete_object_ids(MIN_MINOR_GC_OBJECT_COUNT)
         else {
@@ -534,22 +533,23 @@ impl HummockManager {
         };
         // Objects pinned by either meta backup or time travel should be filtered out.
         let backup_pinned: HashSet<_> = backup_manager.list_pinned_object_ids().await;
-        // The version_pinned is obtained after the candidate object_ids for deletion, which is new enough for filtering purpose.
-        let version_pinned = {
+        // Read version state after taking the deletion candidates so the snapshot is new enough for
+        // filtering purposes.
+        {
             let versioning = self
                 .versioning
                 .read_with_process_name("try_start_minor_gc")
                 .await;
-            versioning.get_tracked_object_ids(
-                self.context_info
-                    .read_with_process_name("try_start_minor_gc")
-                    .await
-                    .min_pinned_version_id(),
-            )
-        };
+            let min_pinned_version_id = self
+                .context_info
+                .read_with_process_name("try_start_minor_gc")
+                .await
+                .min_pinned_version_id();
+            versioning.remove_tracked_object_ids(&mut object_ids, min_pinned_version_id);
+        }
         let object_ids = object_ids
             .into_iter()
-            .filter(|s| !version_pinned.contains(s) && !backup_pinned.contains(&s.as_raw()));
+            .filter(|s| !backup_pinned.contains(&s.as_raw()));
         let filter_by_time_travel_start_time = Instant::now();
         let object_ids = self.filter_out_objects_by_time_travel(object_ids).await?;
         tracing::info!(elapsed = ?filter_by_time_travel_start_time.elapsed(), "filter out objects by time travel in minor GC");
