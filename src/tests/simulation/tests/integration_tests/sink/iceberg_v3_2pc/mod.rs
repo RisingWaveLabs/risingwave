@@ -318,7 +318,6 @@ mod failpoint_limited {
         tokio::time::timeout(Duration::from_secs(30), handle.mock.wait_for_event('I'))
             .await
             .map_err(|_| anyhow::anyhow!("baseline 'I' never observed"))??;
-        let baseline_i_count = handle.mock.count_events('I');
 
         // Inject iceberg-side commit conflict via the mock catalog. Pin the
         // rate at 100% until one failure has landed so the fault window is
@@ -338,6 +337,7 @@ mod failpoint_limited {
         handle.mock.set_err_rate_txn_commit(0.3);
         tokio::time::sleep(Duration::from_secs(10)).await;
         handle.mock.set_err_rate_txn_commit(0.0);
+        let post_fault_i_count = handle.mock.count_events('I');
 
         // Sink resumes committing once the fault clears. F11 pinned at 100%
         // guarantees at least one retry-exhausted commit, which fails the
@@ -349,13 +349,15 @@ mod failpoint_limited {
         // Budget 120s (~4x) so it cannot recur.
         tokio::time::timeout(
             Duration::from_secs(120),
-            handle.mock.wait_for_event_count('I', baseline_i_count + 1),
+            handle
+                .mock
+                .wait_for_event_count('I', post_fault_i_count + 1),
         )
         .await
         .map_err(|_| {
             anyhow::anyhow!(
                 "no new 'I' commits after fault cleared; baseline={}, current={}, trace = {:?}",
-                baseline_i_count,
+                post_fault_i_count,
                 handle.mock.count_events('I'),
                 handle.mock.get_event_trace()
             )

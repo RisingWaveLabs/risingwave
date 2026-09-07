@@ -16,7 +16,6 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use fail::fail_point;
-use futures::{StreamExt, stream};
 use itertools::Itertools;
 use risingwave_common::catalog::TableId;
 use risingwave_hummock_sdk::version::HummockVersion;
@@ -26,7 +25,7 @@ use risingwave_hummock_sdk::{
 };
 use risingwave_meta_model::hummock_gc_history;
 use risingwave_pb::hummock::{HummockPinnedVersion, ValidationTask};
-use sea_orm::{DatabaseConnection, EntityTrait};
+use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter};
 
 use crate::controller::SqlMetaStore;
 use crate::hummock::HummockManager;
@@ -37,6 +36,8 @@ use crate::hummock::metrics_utils::trigger_pin_unpin_version_state;
 use crate::manager::{META_NODE_ID, MetadataManager};
 use crate::model::BTreeMapTransaction;
 use crate::rpc::metrics::MetaMetrics;
+
+const GC_HISTORY_QUERY_BATCH_SIZE: usize = 1000;
 
 /// `HummockVersionSafePoint` prevents hummock versions GE than it from being GC.
 /// It's used by meta node itself to temporarily pin versions.
@@ -112,11 +113,12 @@ impl HummockManager {
 
     /// Checks whether `context_id` is valid.
     pub async fn check_context(&self, context_id: HummockContextId) -> Result<bool> {
-        self.context_info
+        Ok(self
+            .context_info
             .read()
             .await
             .check_context(context_id, &self.metadata_manager)
-            .await
+            .await)
     }
 
     async fn check_context_with_meta_node(
@@ -128,7 +130,7 @@ impl HummockManager {
             // Using the preserved meta id is allowed.
         } else if !context_info
             .check_context(context_id, &self.metadata_manager)
-            .await?
+            .await
         {
             // The worker is not found in cluster.
             return Err(Error::InvalidContext(context_id));
@@ -150,12 +152,13 @@ impl ContextInfo {
         &self,
         context_id: HummockContextId,
         metadata_manager: &MetadataManager,
-    ) -> Result<bool> {
-        Ok(metadata_manager
-            .get_worker_by_id(context_id)
+    ) -> bool {
+        // Worker existence is kept in memory and updated under the cluster controller lock, so
+        // checking it does not need a meta store query.
+        metadata_manager
+            .get_worker_info_by_id(context_id)
             .await
-            .map_err(|err| Error::MetaStore(err.into()))?
-            .is_some())
+            .is_some()
     }
 }
 
@@ -183,7 +186,7 @@ impl HummockManager {
         for active_context_id in &active_context_ids {
             if !context_info
                 .check_context(*active_context_id, &self.metadata_manager)
-                .await?
+                .await
             {
                 invalid_context_ids.push(*active_context_id);
             }
@@ -205,23 +208,29 @@ impl HummockManager {
     ) -> Result<()> {
         use risingwave_pb::hummock::subscribe_compaction_event_response::Event as ResponseEvent;
 
+        let context_info = self
+            .context_info
+            .read_with_process_name("commit_epoch_sanity_check")
+            .await;
+        let mut checked_contexts = HashSet::new();
         for (sst_id, context_id) in sst_to_context {
+            if !checked_contexts.insert(*context_id) {
+                continue;
+            }
             #[cfg(test)]
             {
                 if *context_id == crate::manager::META_NODE_ID {
                     continue;
                 }
             }
-            if !self
-                .context_info
-                .read()
-                .await
+            if !context_info
                 .check_context(*context_id, &self.metadata_manager)
-                .await?
+                .await
             {
                 return Err(Error::InvalidSst(*sst_id));
             }
         }
+        drop(context_info);
 
         // sanity check on monotonically increasing table committed epoch
         for (table_id, committed_epoch) in tables_to_commit {
@@ -335,22 +344,21 @@ fn check_sst_retention(
 
 async fn check_gc_history(
     db: &DatabaseConnection,
-    // need IntoIterator to work around stream's "implementation of `std::iter::Iterator` is not general enough" error.
     object_ids: impl IntoIterator<Item = HummockSstableObjectId>,
 ) -> Result<()> {
-    let futures = object_ids.into_iter().map(|id| async move {
-        hummock_gc_history::Entity::find_by_id(id)
-            .one(db)
-            .await
-            .map_err(Error::from)
-    });
-    let res: Vec<_> = stream::iter(futures).buffer_unordered(10).collect().await;
-    let res: Result<Vec<_>> = res.into_iter().collect();
-    let mut expired_object_ids = res?.into_iter().flatten().peekable();
-    if expired_object_ids.peek().is_none() {
+    let object_ids = object_ids.into_iter().collect_vec();
+    let mut expired_object_ids = Vec::new();
+    for object_ids in object_ids.chunks(GC_HISTORY_QUERY_BATCH_SIZE) {
+        expired_object_ids.extend(
+            hummock_gc_history::Entity::find()
+                .filter(hummock_gc_history::Column::ObjectId.is_in(object_ids.iter().copied()))
+                .all(db)
+                .await?,
+        );
+    }
+    if expired_object_ids.is_empty() {
         return Ok(());
     }
-    let expired_object_ids: Vec<_> = expired_object_ids.collect();
     tracing::error!(
         ?expired_object_ids,
         "new SSTs are rejected because they have already been GCed"
@@ -475,5 +483,35 @@ fn trigger_safepoint_stat(metrics: &MetaMetrics, safepoints: &[HummockVersionId]
         metrics.min_safepoint_version_id.set(sp.as_i64_id());
     } else {
         metrics.min_safepoint_version_id.set(u64::MAX as _);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use sea_orm::ActiveModelTrait;
+    use sea_orm::ActiveValue::Set;
+
+    use super::*;
+    use crate::hummock::test_utils::setup_compute_env;
+
+    #[tokio::test]
+    async fn test_check_gc_history_in_batches() {
+        let (env, ..) = setup_compute_env(80).await;
+        let object_ids = (1..=GC_HISTORY_QUERY_BATCH_SIZE as u64 + 1)
+            .map(Into::into)
+            .collect_vec();
+        let expired_object_id = *object_ids.last().unwrap();
+        hummock_gc_history::ActiveModel {
+            object_id: Set(expired_object_id),
+            mark_delete_at: Set(Default::default()),
+        }
+        .insert(&env.meta_store_ref().conn)
+        .await
+        .unwrap();
+
+        let error = check_gc_history(&env.meta_store_ref().conn, object_ids)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, Error::InvalidSst(id) if id == expired_object_id));
     }
 }
