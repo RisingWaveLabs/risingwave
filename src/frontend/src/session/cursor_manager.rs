@@ -16,17 +16,20 @@ use core::mem;
 use core::time::Duration;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::{Display, Formatter};
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use std::time::Instant;
 
 use anyhow::anyhow;
 use bytes::Bytes;
-use futures::StreamExt;
+use futures::{Stream, StreamExt};
 use itertools::Itertools;
 use pgwire::pg_field_descriptor::PgFieldDescriptor;
 use pgwire::pg_response::StatementType;
 use pgwire::types::{Format, Row};
 use risingwave_batch::task::{ShutdownSender, ShutdownToken};
+use risingwave_common::array::DataChunk;
 use risingwave_common::catalog::{ColumnCatalog, Field};
 use risingwave_common::error::BoxedError;
 use risingwave_common::session_config::QueryMode;
@@ -50,13 +53,115 @@ use crate::monitor::{CursorMetrics, PeriodicCursorMetrics};
 use crate::optimizer::PlanRoot;
 use crate::optimizer::plan_node::{BatchFilter, BatchLogSeqScan, BatchSeqScan, generic};
 use crate::optimizer::property::{Order, RequiredDist};
-use crate::scheduler::{DistributedQueryStream, LocalQueryStream, ReadSnapshot, SchedulerError};
+use crate::scheduler::plan_fragmenter::QueryId;
+use crate::scheduler::{
+    DistributedQueryStream, LocalQueryStream, QueryManager, ReadSnapshot, SchedulerError,
+};
 use crate::utils::Condition;
 use crate::{OptimizerContext, OptimizerContextRef, PgResponseStream, TableCatalog};
 
+/// The local or distributed query stream owned by a cursor.
+enum CursorQueryStreamInner {
+    /// A query executed by the frontend's local batch executor.
+    Local {
+        /// Data chunks produced by the local batch executor.
+        stream: LocalQueryStream,
+        /// Sender used to cancel the local executor if this stream is dropped before EOF.
+        shutdown_tx: ShutdownSender,
+    },
+    /// A query scheduled through the distributed query manager.
+    ///
+    /// The cursor takes ownership of the query lifecycle only after scheduling finishes and
+    /// returns a [`DistributedQueryStream`]. From that point, the cursor ensures the query is
+    /// cleaned up. While scheduling is still awaiting the stream, the query may already be
+    /// registered but not yet owned by the cursor. `DistributedQueryRegistrationAtomicGuard`
+    /// makes this intermediate state cancellation-safe and ensures cleanup unless the completed
+    /// stream is handed off to the cursor.
+    Distributed {
+        /// Data chunks produced by the distributed query execution.
+        stream: DistributedQueryStream,
+        /// Manager used to cancel the distributed query if this stream is dropped before EOF.
+        query_manager: QueryManager,
+        /// Identifier passed to [`QueryManager`] when cancelling the distributed query.
+        query_id: QueryId,
+    },
+}
+
+/// A cursor-owned query stream that cancels unfinished execution when dropped.
+pub struct CursorQueryStream {
+    /// Concrete local or distributed query stream and its cancellation resources.
+    inner: CursorQueryStreamInner,
+    /// Whether the concrete stream has reached EOF and therefore no longer needs cancellation.
+    finished: bool,
+}
+
+impl CursorQueryStream {
+    /// Wraps a local query stream and the sender that cancels its execution.
+    ///
+    /// The local executor observes the token paired with `shutdown_tx`, allowing the cursor to
+    /// stop unfinished execution when it is closed.
+    pub fn local(stream: LocalQueryStream, shutdown_tx: ShutdownSender) -> Self {
+        Self {
+            inner: CursorQueryStreamInner::Local {
+                stream,
+                shutdown_tx,
+            },
+            finished: false,
+        }
+    }
+
+    /// Wraps a distributed query stream and remembers some metadata needed to cancel it when the
+    /// cursor closes.
+    pub fn distributed(stream: DistributedQueryStream, query_manager: QueryManager) -> Self {
+        let query_id = stream.query_id().clone();
+        Self {
+            inner: CursorQueryStreamInner::Distributed {
+                stream,
+                query_manager,
+                query_id,
+            },
+            finished: false,
+        }
+    }
+}
+
+impl Stream for CursorQueryStream {
+    type Item = std::result::Result<DataChunk, BoxedError>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        let result = match &mut this.inner {
+            CursorQueryStreamInner::Local { stream, .. } => stream.poll_next_unpin(cx),
+            CursorQueryStreamInner::Distributed { stream, .. } => stream.poll_next_unpin(cx),
+        };
+        if matches!(&result, Poll::Ready(None)) {
+            this.finished = true;
+        }
+        result
+    }
+}
+
+impl Drop for CursorQueryStream {
+    fn drop(&mut self) {
+        if self.finished {
+            return;
+        }
+        match &self.inner {
+            CursorQueryStreamInner::Local { shutdown_tx, .. } => {
+                shutdown_tx.cancel();
+            }
+            CursorQueryStreamInner::Distributed {
+                query_manager,
+                query_id,
+                ..
+            } => query_manager.cancel_cursor_query(query_id, "cursor closed"),
+        }
+    }
+}
+
 pub enum CursorDataChunkStream {
-    LocalDataChunk(Option<LocalQueryStream>),
-    DistributedDataChunk(Option<DistributedQueryStream>),
+    LocalDataChunk(Option<CursorQueryStream>),
+    DistributedDataChunk(Option<CursorQueryStream>),
     PgResponse(PgResponseStream),
 }
 
@@ -96,24 +201,18 @@ impl CursorDataChunkStream {
     ) {
         let columns_type = fields.iter().map(|f| f.data_type()).collect();
         match self {
-            CursorDataChunkStream::LocalDataChunk(data_chunk) => {
+            CursorDataChunkStream::LocalDataChunk(data_chunk)
+            | CursorDataChunkStream::DistributedDataChunk(data_chunk) => {
                 let data_chunk = mem::take(data_chunk).unwrap();
-                let row_stream = PgResponseStream::LocalQuery(DataChunkToRowSetAdapter::new(
-                    data_chunk,
-                    columns_type,
-                    formats.clone(),
-                    session,
-                ));
-                *self = CursorDataChunkStream::PgResponse(row_stream);
-            }
-            CursorDataChunkStream::DistributedDataChunk(data_chunk) => {
-                let data_chunk = mem::take(data_chunk).unwrap();
-                let row_stream = PgResponseStream::DistributedQuery(DataChunkToRowSetAdapter::new(
-                    data_chunk,
-                    columns_type,
-                    formats.clone(),
-                    session,
-                ));
+                let row_stream = PgResponseStream::Rows(
+                    DataChunkToRowSetAdapter::new(
+                        data_chunk,
+                        columns_type,
+                        formats.clone(),
+                        session,
+                    )
+                    .boxed(),
+                );
                 *self = CursorDataChunkStream::PgResponse(row_stream);
             }
             _ => {}
@@ -130,6 +229,7 @@ impl CursorDataChunkStream {
         }
     }
 }
+
 pub enum Cursor {
     Subscription(SubscriptionCursor),
     Query(QueryCursor),
@@ -1272,5 +1372,31 @@ impl CursorManager {
             },
             Cursor::Query(_) => Err(ErrorCode::InternalError("The plan of the cursor is the same as the query statement of the as when it was created.".to_owned()).into()),
         }
+    }
+}
+
+#[cfg(test)]
+mod cursor_lifecycle_tests {
+    use risingwave_common::array::DataChunkTestExt;
+    use tokio::sync::mpsc;
+
+    use super::*;
+
+    /// Verifies that dropping an unfinished local stream owned by a query cursor signals its
+    /// executor-shutdown token instead of leaving background work alive.
+    #[tokio::test]
+    async fn test_dropping_unfinished_local_cursor_queries_cancels_executors() {
+        let (query_shutdown_tx, query_shutdown_rx) = ShutdownToken::new();
+        let (query_chunk_tx, query_chunk_rx) = mpsc::channel(1);
+        query_chunk_tx
+            .try_send(Ok(DataChunk::from_pretty("i\n1")))
+            .unwrap();
+        let query_stream = CursorQueryStream::local(
+            tokio_stream::wrappers::ReceiverStream::new(query_chunk_rx),
+            query_shutdown_tx,
+        );
+        drop(query_stream);
+        // Dropping an ordinary query cursor stream must terminate its still-open executor.
+        assert!(query_shutdown_rx.is_cancelled());
     }
 }

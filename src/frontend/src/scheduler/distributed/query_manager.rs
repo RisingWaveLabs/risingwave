@@ -29,12 +29,13 @@ use risingwave_pb::batch_plan::TaskOutputId;
 use risingwave_pb::common::HostAddress;
 use risingwave_rpc_client::ComputeClientPoolRef;
 use tokio::sync::OwnedSemaphorePermit;
+use tracing::warn;
 
 use super::QueryExecution;
 use super::stats::DistributedQueryMetrics;
 use crate::catalog::catalog_service::CatalogReader;
 use crate::scheduler::plan_fragmenter::{Query, QueryId};
-use crate::scheduler::{ExecutionContextRef, SchedulerResult};
+use crate::scheduler::{ExecutionContextRef, ReadSnapshot, SchedulerResult};
 
 pub struct DistributedQueryStream {
     chunk_rx: tokio::sync::mpsc::Receiver<SchedulerResult<DataChunk>>,
@@ -106,6 +107,57 @@ impl QueryExecutionInfo {
 
 pub type QueryExecutionInfoRef = Arc<RwLock<QueryExecutionInfo>>;
 
+/// Guards the atomic handoff of a distributed query registration to [`DistributedQueryStream`].
+///
+/// If scheduling fails or is cancelled before the stream takes ownership, dropping this guard
+/// removes the query from the execution map and aborts it. Once the stream is created,
+/// [`Self::disarm`] transfers cleanup responsibility to the stream.
+struct DistributedQueryRegistrationAtomicGuard {
+    query_id: QueryId,
+    query_execution: Arc<QueryExecution>,
+    query_execution_info: QueryExecutionInfoRef,
+    armed: bool,
+}
+
+impl DistributedQueryRegistrationAtomicGuard {
+    /// Arms cleanup for a query that has been inserted into the execution map.
+    fn new(
+        query_id: QueryId,
+        query_execution: Arc<QueryExecution>,
+        query_execution_info: QueryExecutionInfoRef,
+    ) -> Self {
+        Self {
+            query_id,
+            query_execution,
+            query_execution_info,
+            armed: true,
+        }
+    }
+
+    /// Transfers cleanup responsibility to the returned [`DistributedQueryStream`].
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for DistributedQueryRegistrationAtomicGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        self.query_execution_info
+            .write()
+            .unwrap()
+            .delete_query(&self.query_id);
+        let query_execution = self.query_execution.clone();
+        tokio::spawn(async move {
+            query_execution
+                .abort("query scheduling was cancelled".to_owned())
+                .await;
+        });
+    }
+}
+
 impl QueryExecutionInfo {
     pub fn add_query(&mut self, query_id: QueryId, query_execution: Arc<QueryExecution>) {
         self.query_execution_map.insert(query_id, query_execution);
@@ -133,6 +185,7 @@ pub struct QueryManager {
 }
 
 impl QueryManager {
+    /// Creates a distributed query manager with optional per-session and global limits.
     pub fn new(
         worker_node_manager: WorkerNodeManagerRef,
         compute_client_pool: ComputeClientPoolRef,
@@ -176,14 +229,18 @@ impl QueryManager {
     }
 
     /// Schedules a distributed query and transfers cleanup ownership to its returned stream.
+    ///
+    /// `snapshot` supplies a caller-owned storage view. When it is `None`, the query uses the
+    /// snapshot pinned by the current session transaction.
     pub async fn schedule(
         &self,
         context: ExecutionContextRef,
         mut query: Query,
         can_session_cancel: bool,
+        snapshot: Option<ReadSnapshot>,
     ) -> SchedulerResult<DistributedQueryStream> {
         // TODO: if there's no table scan, we don't need to acquire snapshot.
-        let pinned_snapshot = context.session().pinned_snapshot();
+        let pinned_snapshot = snapshot.unwrap_or_else(|| context.session().pinned_snapshot());
         pinned_snapshot.fill_batch_query_epoch(&mut query)?;
 
         if let Some(query_limit) = self.distributed_query_limit
@@ -217,6 +274,11 @@ impl QueryManager {
         );
 
         // Starts the execution of the query.
+        let mut registration = DistributedQueryRegistrationAtomicGuard::new(
+            query_id.clone(),
+            query_execution.clone(),
+            self.query_execution_info.clone(),
+        );
         let query_result_fetcher = query_execution
             .start(
                 context.clone(),
@@ -226,15 +288,8 @@ impl QueryManager {
                 self.query_execution_info.clone(),
                 self.query_metrics.clone(),
             )
-            .await
-            .inspect_err(|_| {
-                // Clean up query execution on error.
-                context
-                    .session()
-                    .env()
-                    .query_manager()
-                    .delete_query(&query_id);
-            })?;
+            .await?;
+        registration.disarm();
         Ok(query_result_fetcher.stream_from_channel())
     }
 
@@ -251,6 +306,30 @@ impl QueryManager {
                 // Spawn a task to abort. Avoid await point in this function.
                 tokio::spawn(async move { query.abort("cancelled by user".to_owned()).await });
             }
+        }
+    }
+
+    /// Cancels one cursor-owned distributed query without blocking its caller on teardown.
+    ///
+    /// Ordinary queries are deliberately rejected so their cancellation remains session-scoped.
+    pub fn cancel_cursor_query(&self, query_id: &QueryId, reason: impl Into<String>) {
+        let query_execution = self
+            .query_execution_info
+            .read()
+            .unwrap()
+            .query_execution_map
+            .get(query_id)
+            .cloned();
+        if let Some(query_execution) = query_execution {
+            if query_execution.can_session_cancel() {
+                warn!(
+                    ?query_id,
+                    "Ignoring cursor cancellation for an ordinary query"
+                );
+                return;
+            }
+            let reason = reason.into();
+            tokio::spawn(async move { query_execution.abort(reason).await });
         }
     }
 
@@ -297,5 +376,68 @@ impl Debug for QueryResultFetcher {
             .field("task_output_id", &self.task_output_id)
             .field("task_host", &self.task_host)
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod cursor_lifecycle_tests {
+    use super::*;
+    use crate::scheduler::distributed::query::tests::create_query;
+
+    /// Verifies the query-registration handoff from scheduling to the result stream: dropping an
+    /// armed guard cleans up an interrupted query, while disarming it preserves the registration
+    /// for stream-owned cleanup.
+    #[tokio::test]
+    async fn test_distributed_query_registration_guard_handoff() {
+        let query = create_query().await;
+        let query_id = query.query_id().clone();
+        let query_execution = Arc::new(QueryExecution::new(query, (0, 0), None, false));
+        let query_execution_info = Arc::new(RwLock::new(QueryExecutionInfo::default()));
+        query_execution_info
+            .write()
+            .unwrap()
+            .add_query(query_id.clone(), query_execution.clone());
+
+        drop(DistributedQueryRegistrationAtomicGuard::new(
+            query_id.clone(),
+            query_execution.clone(),
+            query_execution_info.clone(),
+        ));
+
+        assert!(
+            !query_execution_info
+                .read()
+                .unwrap()
+                .query_execution_map
+                .contains_key(&query_id),
+            "dropping an armed registration guard must remove the query"
+        );
+        let query = create_query().await;
+        let query_id = query.query_id().clone();
+        let query_execution = Arc::new(QueryExecution::new(query, (0, 0), None, false));
+        query_execution_info
+            .write()
+            .unwrap()
+            .add_query(query_id.clone(), query_execution.clone());
+        let mut registration = DistributedQueryRegistrationAtomicGuard::new(
+            query_id.clone(),
+            query_execution,
+            query_execution_info.clone(),
+        );
+        registration.disarm();
+        drop(registration);
+
+        assert!(
+            query_execution_info
+                .read()
+                .unwrap()
+                .query_execution_map
+                .contains_key(&query_id),
+            "disarming must preserve the registration for stream ownership"
+        );
+        query_execution_info
+            .write()
+            .unwrap()
+            .delete_query(&query_id);
     }
 }

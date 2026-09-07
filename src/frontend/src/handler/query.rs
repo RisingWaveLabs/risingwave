@@ -14,12 +14,13 @@
 
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use itertools::Itertools;
 use pgwire::pg_field_descriptor::PgFieldDescriptor;
 use pgwire::pg_response::{PgResponse, StatementType};
 use pgwire::types::Format;
+use risingwave_batch::task::ShutdownToken;
 use risingwave_batch::worker_manager::worker_node_manager::WorkerNodeSelector;
 use risingwave_common::bail_not_implemented;
 use risingwave_common::catalog::{FunctionId, Schema, SecretId};
@@ -45,7 +46,7 @@ use crate::planner::Planner;
 use crate::scheduler::plan_fragmenter::Query;
 use crate::scheduler::{
     BatchPlanFragmenter, DistributedQueryStream, ExecutionContext, ExecutionContextRef,
-    LocalQueryExecution, LocalQueryStream,
+    LocalQueryExecution, LocalQueryStream, ReadSnapshot,
 };
 use crate::session::SessionImpl;
 
@@ -513,7 +514,7 @@ pub async fn create_stream(
     let row_stream = match query_mode {
         QueryMode::Auto => unreachable!(),
         QueryMode::Local => PgResponseStream::LocalQuery(DataChunkToRowSetAdapter::new(
-            local_execute(session.clone(), query, can_timeout_cancel).await?,
+            local_execute(session.clone(), query, can_timeout_cancel)?,
             column_types,
             formats,
             session.clone(),
@@ -615,14 +616,35 @@ pub async fn distribute_execute(
     let query_manager = session.env().query_manager().clone();
 
     query_manager
-        .schedule(execution_context, query, true)
+        .schedule(execution_context, query, true, None)
         .await
         .map_err(|err| err.into())
 }
 
-pub async fn local_execute(
+/// Schedules a cursor-owned distributed query with an explicit snapshot and no per-statement
+/// `CancelRequest` registration. Cursor query is different from regular query, it has longer
+/// lifecycle and should keep running while the cursor is alive.
+pub async fn distribute_execute_for_cursor(
     session: Arc<SessionImpl>,
-    mut query: Query,
+    query: Query,
+    snapshot: ReadSnapshot,
+) -> Result<DistributedQueryStream> {
+    // Here the query should not be able to be canceled by session-defined timeout, since the query
+    // for cursor should live as long as the cursor itself.
+    let execution_context: ExecutionContextRef =
+        ExecutionContext::new(session.clone(), None).into();
+    session
+        .env()
+        .query_manager()
+        .schedule(execution_context, query, false, Some(snapshot))
+        .await
+        .map_err(Into::into)
+}
+
+/// Starts a local query using normal statement timeout and cancellation behavior.
+pub fn local_execute(
+    session: Arc<SessionImpl>,
+    query: Query,
     can_timeout_cancel: bool,
 ) -> Result<LocalQueryStream> {
     let timeout = if cfg!(madsim) {
@@ -632,9 +654,43 @@ pub async fn local_execute(
     } else {
         None
     };
-    let front_env = session.env();
+    local_execute_inner(session, query, timeout, None, None)
+}
 
-    let snapshot = session.pinned_snapshot();
+/// Starts a cursor-owned local query using a cursor-scoped shutdown token and snapshot.
+pub fn local_execute_for_cursor(
+    session: Arc<SessionImpl>,
+    query: Query,
+    query_shutdown_rx: ShutdownToken,
+    snapshot: ReadSnapshot,
+) -> Result<LocalQueryStream> {
+    local_execute_inner(
+        session,
+        query,
+        None,
+        Some(query_shutdown_rx),
+        Some(snapshot),
+    )
+}
+
+/// Builds a local query stream with caller-selected cancellation and snapshot ownership.
+///
+/// `shutdown_rx` supplies a caller-owned cancellation token. When it is `None`, normal statement
+/// execution resets and uses the session-scoped `CancelRequest` token. Resolving that fallback
+/// here lets [`LocalQueryExecution::new`] always receive a concrete token.
+///
+/// `snapshot` supplies a caller-owned storage view. When it is `None`, the query uses the snapshot
+/// pinned by the current session transaction.
+fn local_execute_inner(
+    session: Arc<SessionImpl>,
+    mut query: Query,
+    timeout: Option<Duration>,
+    shutdown_rx: Option<ShutdownToken>,
+    snapshot: Option<ReadSnapshot>,
+) -> Result<LocalQueryStream> {
+    let front_env = session.env();
+    let shutdown_rx = shutdown_rx.unwrap_or_else(|| session.reset_cancel_query_flag());
+    let snapshot = snapshot.unwrap_or_else(|| session.pinned_snapshot());
 
     snapshot.fill_batch_query_epoch(&mut query)?;
 
@@ -644,6 +700,7 @@ pub async fn local_execute(
         snapshot.support_barrier_read(),
         session,
         timeout,
+        shutdown_rx,
     );
 
     Ok(execution.stream_rows())

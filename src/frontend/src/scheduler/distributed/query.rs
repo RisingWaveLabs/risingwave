@@ -526,14 +526,17 @@ pub(crate) mod tests {
         (query_execution, shutdown_rx)
     }
 
-    async fn assert_receive_query_cancellation_message(msg_receiver: &mut Receiver<QueryMessage>) {
+    async fn assert_receive_query_cancellation_message(
+        msg_receiver: &mut Receiver<QueryMessage>,
+        expected_reason: &str,
+    ) {
         let message = tokio::time::timeout(Duration::from_secs(1), msg_receiver.recv())
             .await
             .expect("query cancellation message must arrive")
             .expect("query control channel must remain open");
         assert!(matches!(
             message,
-            QueryMessage::CancelQuery(reason) if reason == "cancelled by user"
+            QueryMessage::CancelQuery(reason) if reason == expected_reason
         ));
     }
 
@@ -547,7 +550,7 @@ pub(crate) mod tests {
     }
 
     /// Verifies that session cancellation targets only ordinary queries in that session, while
-    /// cursor-owned queries and queries in other sessions remain untouched.
+    /// cursor cancellation rejects ordinary queries and targets only the selected cursor query.
     #[tokio::test]
     async fn test_distributed_query_cancellation_filters_by_session_and_cursor_ownership() {
         let query_manager = SessionImpl::mock().env().query_manager().clone();
@@ -572,9 +575,20 @@ pub(crate) mod tests {
         query_manager.add_query(other_session_query_id.clone(), other_session_query.clone());
 
         query_manager.cancel_non_cursor_queries_in_session(target_session);
-        assert_receive_query_cancellation_message(&mut cancellable_query_rx).await;
+        assert_receive_query_cancellation_message(&mut cancellable_query_rx, "cancelled by user")
+            .await;
         assert_no_query_message(&mut cursor_query_rx).await;
         assert_no_query_message(&mut other_session_query_rx).await;
+
+        query_manager.cancel_cursor_query(&cancellable_query_id, "cursor closed");
+        assert_no_query_message(&mut cancellable_query_rx).await;
+
+        query_manager.cancel_cursor_query(&cursor_query_id, "cursor closed");
+        assert_receive_query_cancellation_message(&mut cursor_query_rx, "cursor closed").await;
+
+        query_manager.delete_query(&cursor_query_id);
+        query_manager.cancel_cursor_query(&cursor_query_id, "cursor already closed");
+        assert_no_query_message(&mut cursor_query_rx).await;
     }
 
     #[tokio::test]

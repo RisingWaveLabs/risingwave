@@ -15,6 +15,7 @@
 use std::sync::Arc;
 
 use pgwire::pg_response::{PgResponse, StatementType};
+use risingwave_batch::task::{ShutdownSender, ShutdownToken};
 use risingwave_common::catalog::Field;
 use risingwave_common::session_config::QueryMode;
 use risingwave_common::util::epoch::Epoch;
@@ -29,9 +30,10 @@ use super::query::{
 use super::util::convert_unix_millis_to_logstore_u64;
 use crate::error::{ErrorCode, Result};
 use crate::handler::HandlerArgs;
-use crate::handler::query::{distribute_execute, local_execute};
+use crate::handler::query::{distribute_execute_for_cursor, local_execute_for_cursor};
+use crate::scheduler::ReadSnapshot;
 use crate::session::SessionImpl;
-use crate::session::cursor_manager::CursorDataChunkStream;
+use crate::session::cursor_manager::{CursorDataChunkStream, CursorQueryStream};
 use crate::{Binder, OptimizerContext};
 
 pub async fn handle_declare_cursor(
@@ -172,6 +174,39 @@ pub async fn create_chunk_stream_for_cursor(
     session: Arc<SessionImpl>,
     plan_fragmenter_result: BatchPlanFragmenterResult,
 ) -> Result<(CursorDataChunkStream, Vec<Field>)> {
+    let query_mode = plan_fragmenter_result.query_mode;
+    let snapshot = session.pinned_snapshot();
+    let (query_shutdown_tx, query_shutdown_rx) = ShutdownToken::new();
+    let (query_stream, fields) = create_cursor_query_stream(
+        session,
+        plan_fragmenter_result,
+        query_shutdown_tx,
+        query_shutdown_rx,
+        snapshot,
+    )
+    .await?;
+
+    Ok((
+        match query_mode {
+            QueryMode::Auto => unreachable!(),
+            QueryMode::Local => CursorDataChunkStream::LocalDataChunk(Some(query_stream)),
+            QueryMode::Distributed => {
+                CursorDataChunkStream::DistributedDataChunk(Some(query_stream))
+            }
+        },
+        fields,
+    ))
+}
+
+/// Creates a cursor-owned local or distributed query stream using an explicit snapshot and
+/// cursor-scoped shutdown handle.
+pub async fn create_cursor_query_stream(
+    session: Arc<SessionImpl>,
+    plan_fragmenter_result: BatchPlanFragmenterResult,
+    query_shutdown_tx: ShutdownSender,
+    query_shutdown_rx: ShutdownToken,
+    snapshot: ReadSnapshot,
+) -> Result<(CursorQueryStream, Vec<Field>)> {
     let BatchPlanFragmenterResult {
         plan_fragmenter,
         query_mode,
@@ -179,20 +214,20 @@ pub async fn create_chunk_stream_for_cursor(
         ..
     } = plan_fragmenter_result;
 
-    let can_timeout_cancel = true;
-
     let query = plan_fragmenter.generate_complete_query().await?;
     tracing::trace!("Generated query after plan fragmenter: {:?}", &query);
 
     Ok((
         match query_mode {
             QueryMode::Auto => unreachable!(),
-            QueryMode::Local => CursorDataChunkStream::LocalDataChunk(Some(
-                local_execute(session.clone(), query, can_timeout_cancel).await?,
-            )),
-            QueryMode::Distributed => CursorDataChunkStream::DistributedDataChunk(Some(
-                distribute_execute(session.clone(), query, can_timeout_cancel).await?,
-            )),
+            QueryMode::Local => CursorQueryStream::local(
+                local_execute_for_cursor(session.clone(), query, query_shutdown_rx, snapshot)?,
+                query_shutdown_tx,
+            ),
+            QueryMode::Distributed => CursorQueryStream::distributed(
+                distribute_execute_for_cursor(session.clone(), query, snapshot).await?,
+                session.env().query_manager().clone(),
+            ),
         },
         schema.fields.clone(),
     ))
