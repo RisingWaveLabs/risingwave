@@ -43,6 +43,7 @@ use risingwave_common::util::value_encoding::{DatumFromProtoExt, DatumToProtoExt
 use risingwave_common_estimate_size::EstimateSize;
 use risingwave_connector::source::SplitImpl;
 use risingwave_expr::expr::NonStrictExpression;
+use risingwave_pb::common::ThrottleType;
 use risingwave_pb::data::PbEpoch;
 use risingwave_pb::expr::PbInputRef;
 use risingwave_pb::stream_plan::add_mutation::PbNewUpstreamSink;
@@ -770,6 +771,17 @@ impl Mutation {
     pub fn is_stop(&self, actor_id: ActorId) -> bool {
         self.all_stop_actors()
             .is_some_and(|actors| actors.contains(&actor_id))
+    }
+
+    /// Return the backfill throttle configuration for `fragment_id`.
+    pub fn backfill_throttle_config(&self, fragment_id: FragmentId) -> Option<&ThrottleConfig> {
+        if let Mutation::Throttle(fragment_throttles) = self {
+            fragment_throttles
+                .get(&fragment_id)
+                .filter(|config| config.throttle_type() == ThrottleType::Backfill)
+        } else {
+            None
+        }
     }
 
     /// Return true if the mutation is stop.

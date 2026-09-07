@@ -515,8 +515,10 @@ impl ExternalTableReader for MySqlExternalTableReader {
     fn split_snapshot_read(
         &self,
         _table_name: SchemaTableName,
-        _left: OwnedRow,
-        _right: OwnedRow,
+        _start_pk: Option<OwnedRow>,
+        _primary_keys: Vec<String>,
+        _left: Option<OwnedRow>,
+        _right: Option<OwnedRow>,
         _split_columns: Vec<Field>,
     ) -> BoxStream<'_, ConnectorResult<OwnedRow>> {
         todo!("implement MySQL CDC parallelized backfill")

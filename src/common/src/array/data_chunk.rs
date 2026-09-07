@@ -145,6 +145,11 @@ impl DataChunk {
         self.visibility.count_ones()
     }
 
+    /// Returns whether this chunk contains at least one visible row.
+    pub fn has_visible_rows(&self) -> bool {
+        self.visibility.any()
+    }
+
     // Compute the required permits of this chunk for rate limiting.
     pub fn rate_limit_permits(&self) -> u64 {
         self.cardinality() as _

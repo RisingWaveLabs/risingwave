@@ -142,6 +142,13 @@ impl ExternalStorageTable {
         &self.pk_indices
     }
 
+    pub fn pk_names(&self) -> Vec<String> {
+        self.pk_indices
+            .iter()
+            .map(|&idx| self.schema.fields[idx].name.clone())
+            .collect()
+    }
+
     pub fn schema_table_name(&self) -> SchemaTableName {
         SchemaTableName {
             schema_name: self.schema_name.clone(),

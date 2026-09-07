@@ -221,12 +221,21 @@ impl ExternalTableReader for PostgresExternalTableReader {
     fn split_snapshot_read(
         &self,
         table_name: SchemaTableName,
-        left: OwnedRow,
-        right: OwnedRow,
+        start_pk: Option<OwnedRow>,
+        primary_keys: Vec<String>,
+        left: Option<OwnedRow>,
+        right: Option<OwnedRow>,
         split_columns: Vec<Field>,
     ) -> BoxStream<'_, ConnectorResult<OwnedRow>> {
         assert_eq!(table_name, self.schema_table_name);
-        self.split_snapshot_read_inner(table_name, left, right, split_columns)
+        self.split_snapshot_read_inner(
+            table_name,
+            start_pk,
+            primary_keys,
+            left,
+            right,
+            split_columns,
+        )
     }
 }
 
@@ -608,63 +617,106 @@ impl PostgresExternalTableReader {
     async fn split_snapshot_read_inner(
         &self,
         table_name: SchemaTableName,
-        left: OwnedRow,
-        right: OwnedRow,
+        start_pk: Option<OwnedRow>,
+        primary_keys: Vec<String>,
+        left: Option<OwnedRow>,
+        right: Option<OwnedRow>,
         split_columns: Vec<Field>,
     ) {
+        // Build and execute the split snapshot query in two phases. Conceptually, the complete
+        // SQL is (`[...]` marks an optional clause):
+        //
+        // SELECT <selected_columns>
+        // FROM <upstream_table>
+        // WHERE <split_filter>
+        // [AND (<primary_key_columns>) > (<resume_pk_params>)]
+        // ORDER BY <primary_key_columns>
+        //
+        // `<split_filter>` is exactly one of:
+        // - `1 = 1` when both bounds are absent;
+        // - `(<split_columns>) < (<right_bound_params>)` for the first split;
+        // - `(<split_columns>) >= (<left_bound_params>)` for the last split;
+        // - `(<split_columns>) >= (<left_bound_params>) AND
+        //    (<split_columns>) < (<right_bound_params>)` for a middle split.
+        //
+        // First prepare this template with PostgreSQL's positional placeholders (`$1`, `$2`,
+        // ...), then bind values in placeholder order:
+        // [left_bound_values..., right_bound_values..., resume_pk_values...].
+
         assert_eq!(
             split_columns.len(),
             1,
             "multiple split columns is not supported yet"
         );
-        assert_eq!(left.len(), 1, "multiple split columns is not supported yet");
-        assert_eq!(
-            right.len(),
-            1,
+        assert!(
+            left.as_ref().is_none_or(|left| left.len() == 1),
             "multiple split columns is not supported yet"
         );
-        let is_first_split = left[0].is_none();
-        let is_last_split = right[0].is_none();
+        assert!(
+            right.as_ref().is_none_or(|right| right.len() == 1),
+            "multiple split columns is not supported yet"
+        );
+        let is_first_split = left.is_none();
+        let is_last_split = right.is_none();
         let split_column_names = split_columns.iter().map(|c| c.name.clone()).collect_vec();
         let client = self.client.lock().await;
         client.execute("set time zone '+00:00'", &[]).await?;
         // prepare the scan statement, since we may need to convert the RW data type to postgres data type
         // e.g. varchar to uuid
         let prepared_scan_stmt = {
+            let split_filter =
+                Self::split_filter_expression(&split_column_names, is_first_split, is_last_split);
+            let split_param_count =
+                (!is_first_split as usize + !is_last_split as usize) * split_columns.len();
+            let resume_filter = start_pk.is_some().then(|| {
+                let columns = primary_keys
+                    .iter()
+                    .map(|column| Self::quote_column(column))
+                    .join(", ");
+                let params = (1..=primary_keys.len())
+                    .map(|idx| format!("${}", split_param_count + idx))
+                    .join(", ");
+
+                format!("({columns}) > ({params})")
+            });
+
+            let filter = match resume_filter {
+                Some(resume_filter) => format!("({split_filter}) AND ({resume_filter})"),
+                None => split_filter,
+            };
+            let order_key = Self::get_order_key(&primary_keys);
             let scan_sql = format!(
-                "SELECT {} FROM {} WHERE {}",
+                "SELECT {} FROM {} WHERE {} ORDER BY {}",
                 self.field_names,
                 Self::get_normalized_table_name(&table_name),
-                Self::split_filter_expression(&split_column_names, is_first_split, is_last_split),
+                filter,
+                order_key,
             );
+
             client.prepare(&scan_sql).await?
         };
 
-        let mut params: Vec<Option<ScalarAdapter>> = vec![];
-        if !is_first_split {
-            let left_params: Vec<Option<ScalarAdapter>> = left
-                .iter()
-                .zip_eq_fast(prepared_scan_stmt.params().iter().take(left.len()))
-                .map(|(datum, ty)| {
-                    datum
-                        .map(|scalar| ScalarAdapter::from_scalar(scalar, ty))
-                        .transpose()
-                })
-                .try_collect()?;
-            params.extend(left_params);
-        }
-        if !is_last_split {
-            let right_params: Vec<Option<ScalarAdapter>> = right
-                .iter()
-                .zip_eq_fast(prepared_scan_stmt.params().iter().skip(params.len()))
-                .map(|(datum, ty)| {
-                    datum
-                        .map(|scalar| ScalarAdapter::from_scalar(scalar, ty))
-                        .transpose()
-                })
-                .try_collect()?;
-            params.extend(right_params);
-        }
+        let param_values = [left.as_ref(), right.as_ref(), start_pk.as_ref()]
+            .into_iter()
+            .flatten()
+            .flat_map(|row| row.iter())
+            .collect_vec();
+
+        assert_eq!(
+            param_values.len(),
+            prepared_scan_stmt.params().len(),
+            "split snapshot query parameter count must match its bound value count",
+        );
+
+        let params: Vec<Option<ScalarAdapter>> = param_values
+            .into_iter()
+            .zip_eq_fast(prepared_scan_stmt.params())
+            .map(|(datum, ty)| {
+                datum
+                    .map(|scalar| ScalarAdapter::from_scalar(scalar, ty))
+                    .transpose()
+            })
+            .try_collect()?;
 
         let stream = client.query_raw(&prepared_scan_stmt, &params).await?;
         let row_stream = stream.map(|row| {
