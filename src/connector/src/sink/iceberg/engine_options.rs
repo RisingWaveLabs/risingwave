@@ -31,6 +31,8 @@ pub const ICEBERG_ENGINE_OPTION_KEYS: &[&str] = &[
     "enable_manifest_rewrite",
     "manifest_rewrite_target_size_bytes",
     "manifest_rewrite_min_count_to_merge",
+    "enable_orphan_file_cleanup",
+    "orphan_file_cleanup_min_age_millis",
     "compaction.max_snapshots_num",
     "compaction.small_files_threshold_mb",
     "compaction.delete_files_count_threshold",

@@ -222,6 +222,16 @@ mod tests {
             .assert_eq(&generate_iceberg_engine_fields());
     }
 
+    #[test]
+    fn test_orphan_file_cleanup_options_supported_by_iceberg_engine() {
+        use crate::sink::iceberg::is_iceberg_engine_option;
+
+        assert!(is_iceberg_engine_option("enable_orphan_file_cleanup"));
+        assert!(is_iceberg_engine_option(
+            "orphan_file_cleanup_min_age_millis"
+        ));
+    }
+
     /// Test some serde behavior we rely on.
     mod serde {
         #![expect(dead_code)]

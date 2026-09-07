@@ -799,6 +799,7 @@ IcebergConfig:
     required: false
     default: Default::default
     allow_alter_on_fly: true
+    iceberg_engine: true
   - name: orphan_file_cleanup_min_age_millis
     field_type: u64
     comments: |-
@@ -807,6 +808,7 @@ IcebergConfig:
     required: false
     default: Default::default
     allow_alter_on_fly: true
+    iceberg_engine: true
   - name: compaction.max_snapshots_num
     field_type: usize
     comments: |-

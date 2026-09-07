@@ -444,14 +444,14 @@ pub struct IcebergConfig {
         default,
         deserialize_with = "deserialize_bool_from_string"
     )]
-    #[with_option(allow_alter_on_fly)]
+    #[with_option(allow_alter_on_fly, iceberg_engine)]
     pub enable_orphan_file_cleanup: bool,
 
     /// Minimum file age in milliseconds before an unreachable file may be removed.
     /// Defaults to 7 days and must be at least 24 hours.
     #[serde(rename = "orphan_file_cleanup_min_age_millis", default)]
     #[serde_as(as = "Option<DisplayFromStr>")]
-    #[with_option(allow_alter_on_fly)]
+    #[with_option(allow_alter_on_fly, iceberg_engine)]
     pub orphan_file_cleanup_min_age_millis: Option<u64>,
 
     /// The maximum number of snapshots allowed since the last rewrite operation
