@@ -1,4 +1,4 @@
-// Copyright 2023 RisingWave Labs
+// Copyright 2026 RisingWave Labs
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -28,25 +28,53 @@ use crate::optimizer::property::{Monotonicity, MonotonicityMap, WatermarkColumns
 use crate::stream_fragmenter::BuildFragmentGraphState;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct StreamEowcSort {
+pub struct StreamWatermarkSort {
     pub base: PlanBase<Stream>,
 
     input: PlanRef,
     sort_column_index: usize,
+    /// See [`Self::with_secondary_order`]. Empty for plain watermark sorting.
+    secondary_order_columns: Vec<usize>,
 }
 
-impl Distill for StreamEowcSort {
+impl Distill for StreamWatermarkSort {
     fn distill<'a>(&self) -> XmlNode<'a> {
-        let fields = vec![(
+        let mut fields = vec![(
             "sort_column",
             Pretty::display(&FieldDisplay(&self.input.schema()[self.sort_column_index])),
         )];
-        childless_record("StreamEowcSort", fields)
+        // EXPLAIN must show the full order the sort actually enforces, not just the leading
+        // watermark column.
+        if !self.secondary_order_columns.is_empty() {
+            fields.push((
+                "secondary_order_columns",
+                Pretty::Array(
+                    self.secondary_order_columns
+                        .iter()
+                        .map(|&i| Pretty::display(&FieldDisplay(&self.input.schema()[i])))
+                        .collect(),
+                ),
+            ));
+        }
+        childless_record("StreamWatermarkSort", fields)
     }
 }
 
-impl StreamEowcSort {
+impl StreamWatermarkSort {
     pub fn new(input: PlanRef, sort_column_index: usize) -> Self {
+        Self::with_secondary_order(input, sort_column_index, vec![])
+    }
+
+    /// Like [`Self::new`], with additional order columns appended to the buffer table's key right
+    /// after the sort column. The executor emits rows in `(sort_column, buffer-table key)` order,
+    /// so this makes the emission order `(sort_column, secondary columns, ...)` — what an
+    /// order-sensitive consumer with a multi-column ORDER BY (e.g. `MATCH_RECOGNIZE`) requires.
+    /// No executor or proto change: the order is carried entirely by the inferred table key.
+    pub fn with_secondary_order(
+        input: PlanRef,
+        sort_column_index: usize,
+        secondary_order_columns: Vec<usize>,
+    ) -> Self {
         assert!(input.watermark_columns().contains(sort_column_index));
 
         let schema = input.schema().clone();
@@ -65,7 +93,7 @@ impl StreamEowcSort {
                 .unwrap(),
         );
 
-        // StreamEowcSort makes the sorting watermark column non-decreasing
+        // StreamWatermarkSort makes the sorting watermark column non-decreasing
         let mut columns_monotonicity = MonotonicityMap::new();
         columns_monotonicity.insert(sort_column_index, Monotonicity::NonDecreasing);
 
@@ -84,6 +112,7 @@ impl StreamEowcSort {
             base,
             input,
             sort_column_index,
+            secondary_order_columns,
         }
     }
 
@@ -99,6 +128,16 @@ impl StreamEowcSort {
         let mut order_cols = HashSet::new();
         tbl_builder.add_order_column(self.sort_column_index, OrderType::ascending());
         order_cols.insert(self.sort_column_index);
+
+        // Secondary order columns go right after the sort column and before the distribution and
+        // stream keys: the executor emits in `(sort_column, table key)` order, so this is what
+        // makes the emission order the caller's full ORDER BY (see `with_secondary_order`).
+        for idx in &self.secondary_order_columns {
+            if !order_cols.contains(idx) {
+                tbl_builder.add_order_column(*idx, OrderType::ascending());
+                order_cols.insert(*idx);
+            }
+        }
 
         let dist_key = self.base.distribution().dist_column_indices().to_vec();
         for idx in &dist_key {
@@ -120,19 +159,23 @@ impl StreamEowcSort {
     }
 }
 
-impl PlanTreeNodeUnary<Stream> for StreamEowcSort {
+impl PlanTreeNodeUnary<Stream> for StreamWatermarkSort {
     fn input(&self) -> PlanRef {
         self.input.clone()
     }
 
     fn clone_with_input(&self, input: PlanRef) -> Self {
-        Self::new(input, self.sort_column_index)
+        Self::with_secondary_order(
+            input,
+            self.sort_column_index,
+            self.secondary_order_columns.clone(),
+        )
     }
 }
 
-impl_plan_tree_node_for_unary! { Stream, StreamEowcSort }
+impl_plan_tree_node_for_unary! { Stream, StreamWatermarkSort }
 
-impl StreamNode for StreamEowcSort {
+impl StreamNode for StreamWatermarkSort {
     fn to_stream_prost_body(&self, state: &mut BuildFragmentGraphState) -> PbNodeBody {
         use risingwave_pb::stream_plan::*;
         PbNodeBody::Sort(Box::new(SortNode {
@@ -146,6 +189,6 @@ impl StreamNode for StreamEowcSort {
     }
 }
 
-impl ExprRewritable<Stream> for StreamEowcSort {}
+impl ExprRewritable<Stream> for StreamWatermarkSort {}
 
-impl ExprVisitable for StreamEowcSort {}
+impl ExprVisitable for StreamWatermarkSort {}

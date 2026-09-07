@@ -1,0 +1,86 @@
+# Streaming MATCH_RECOGNIZE across a rescale. The per-partition buffer is distributed by the partition
+# key, so when the actor's vnode ownership changes (ALTER ... SET PARALLELISM), the in-memory buffer
+# must be reloaded from the state table: partitions whose vnode moved away are dropped and newly-owned
+# ones are picked up. This checks that partial matches buffered before the rescale still complete after.
+
+statement ok
+set rw_implicit_flush to true;
+
+statement ok
+set streaming_parallelism = 1;
+
+statement ok
+create table ts (id int, t int, v int, watermark for t as t - 10) append only;
+
+statement ok
+create materialized view mv_rescale as
+select * from ts match_recognize (
+  partition by id
+  order by t
+  measures b.v as dip
+  one row per match
+  after match skip past last row
+  pattern (a b)
+  define a as a.v > 0, b as b.v < 0
+);
+
+# Buffer the leading `a` row of each partition's match while parallelism is 1, and RELEASE it
+# into the matcher with a watermark sentinel (watermark 5 > t 1): the partial must be retained by
+# the MATCHER'S state table at the rescale, or the reshuffle only exercises the upstream sort's
+# buffer reload and the matcher rebuilds from empty state.
+statement ok
+insert into ts values (1, 1, 5), (2, 1, 5), (3, 1, 5), (4, 1, 5), (5, 1, 5), (0, 15, 0);
+
+# Rescale: the partitions' vnodes reassign across actors; each actor re-feeds its partitions'
+# retained rows into fresh matchers.
+statement ok
+alter materialized view mv_rescale set parallelism = 4;
+
+# Complete each match after the reshuffle (t 6 sits above the watermark 5, so nothing is dropped
+# as late), plus a sentinel to release the completing rows.
+statement ok
+insert into ts values (1, 6, -1), (2, 6, -1), (3, 6, -1), (4, 6, -1), (5, 6, -1), (0, 1000, 0);
+
+query II rowsort
+select * from mv_rescale;
+----
+1 -1
+2 -1
+3 -1
+4 -1
+5 -1
+
+# Second cycle, scaling DOWN this time: buffer a fresh partial per partition at parallelism 4,
+# release it into the matchers (watermark 1005 > t 1010? no — 1015 - 10 = 1005 < 1010, so a second
+# sentinel at 1025 pushes the watermark to 1015, past the partials), shrink to 2 (vnodes
+# consolidate onto fewer actors — the reverse migration: actors GAIN foreign vnodes and must
+# re-feed their rows), then complete. The first cycle's sentinel advanced the watermark to 990, so
+# this cycle's timestamps sit above it — earlier values would be dropped upstream as late rows.
+statement ok
+insert into ts values (1, 1010, 7), (2, 1010, 7), (3, 1010, 7), (4, 1010, 7), (5, 1010, 7), (0, 1025, 0);
+
+statement ok
+alter materialized view mv_rescale set parallelism = 2;
+
+statement ok
+insert into ts values (1, 1020, -2), (2, 1020, -2), (3, 1020, -2), (4, 1020, -2), (5, 1020, -2), (0, 2000, 0);
+
+query II rowsort
+select * from mv_rescale;
+----
+1 -1
+1 -2
+2 -1
+2 -2
+3 -1
+3 -2
+4 -1
+4 -2
+5 -1
+5 -2
+
+statement ok
+drop materialized view mv_rescale;
+
+statement ok
+drop table ts;

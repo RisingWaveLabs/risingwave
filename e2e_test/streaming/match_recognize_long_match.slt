@@ -1,0 +1,46 @@
+# A single match spanning hundreds of rows. The NFA walkers used to recurse once per consumed row
+# and once per ε-edge under a hard depth cap of 512 frames, so a valid `a{600}` — well inside the
+# binder's repetition limit of 1000 — hit the cap on every refresh: unlike the scan budget the cap
+# did not reset between visits, so the match stayed permanently incomplete and its rows were never
+# released. The walk is iterative now; only the budget bounds it.
+
+statement ok
+set streaming_parallelism = 1;
+
+statement ok
+set rw_implicit_flush to true;
+
+statement ok
+create table t (id int, ts int, v int, watermark for ts as ts - 1) append only;
+
+statement ok
+create materialized view mv_long as
+select * from t match_recognize (
+  partition by id
+  order by ts
+  measures a.ts as t_last, count(*) as n
+  one row per match
+  after match skip past last row
+  pattern (a{600})
+  define a as a.v > 0
+);
+
+# 1300 qualifying rows: two complete matches of exactly 600 rows, and a 100-row tail that cannot
+# complete a third. The sentinel in another partition advances the watermark past every row.
+statement ok
+insert into t select 1, g, 1 from generate_series(1, 1300) g;
+
+statement ok
+insert into t values (0, 100000, 0);
+
+query III rowsort
+select * from mv_long;
+----
+1 1200 600
+1 600 600
+
+statement ok
+drop materialized view mv_long;
+
+statement ok
+drop table t;

@@ -1,0 +1,51 @@
+# Streaming MATCH_RECOGNIZE WITHIN at the top of the ORDER BY type's range: the per-row deadline
+# `first + bound` overflows for starts near the maximum. An overflowed deadline is a window that
+# never closes — every representable order key lies inside the span — and must not become a false
+# non-match. Under non-strict evaluation the overflow became NULL, the span check read NULL as
+# "outside the window", and a zero-span match at 32766 was silently dropped.
+
+statement ok
+set streaming_parallelism = 1;
+
+statement ok
+set rw_implicit_flush to true;
+
+statement ok
+create table t (id int, ts smallint, v int, watermark for ts as ts) append only;
+
+statement ok
+create materialized view mv_edge as
+select * from t match_recognize (
+  partition by id
+  order by ts
+  measures a.ts as t0, b.v as dip
+  one row per match
+  after match skip past last row
+  pattern (a b)
+  within 2::smallint
+  define a as a.v > 0, b as b.v < 0
+);
+
+# id=1: a@32766, b@32766 -> span 0 <= 2; the deadline 32766 + 2 overflows int2. Must match.
+# id=2: a@32765, b@32766 -> span 1 <= 2; the deadline 32767 is exactly the type's maximum. Must match.
+# id=3: a@32763, b@32766 -> span 3 > 2; the deadline 32765 is representable. Must be rejected.
+# The sentinel at 32767 (the largest possible watermark) releases every row below it from the sort;
+# `(a b)` is terminal after `b`, so each match is final without a follower.
+statement ok
+insert into t values
+  (1, 32766, 5), (1, 32766, -1),
+  (2, 32765, 5), (2, 32766, -1),
+  (3, 32763, 5), (3, 32766, -1),
+  (0, 32767, 0);
+
+query III rowsort
+select * from mv_edge;
+----
+1 32766 -1
+2 32765 -1
+
+statement ok
+drop materialized view mv_edge;
+
+statement ok
+drop table t;

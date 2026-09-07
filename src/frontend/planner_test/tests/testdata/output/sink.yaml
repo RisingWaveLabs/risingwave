@@ -230,7 +230,7 @@
     explain create sink sk1 from t2 emit on window close with (connector='blackhole');
   explain_output: |
     StreamSink { type: append-only, columns: [a, b, t2._row_id(hidden)] }
-    └─StreamEowcSort { sort_column: t2.b }
+    └─StreamWatermarkSort { sort_column: t2.b }
       └─StreamTableScan { table: t2, columns: [a, b, _row_id] }
 - id: create_mock_iceberg_sink_append_only_with_sparse_partition
   sql: |

@@ -38,6 +38,7 @@
 - [Streaming Engine](./design/streaming-overview.md)
     - [Checkpoint](./design/checkpoint.md)
     - [Aggregation](./design/aggregation.md)
+    - [Row Pattern Recognition (MATCH_RECOGNIZE)](./design/match-recognize.md)
     - [MView on Top of MView](./design/mv-on-mv.md)
     - [Backfill](./design/backfill.md)
     - [Streaming Parallelism Configuration](./design/streaming-parallelism.md)

@@ -54,9 +54,10 @@ pub use insert::BoundInsert;
 use pgwire::pg_server::{Session, SessionId};
 pub use query::BoundQuery;
 pub use relation::{
-    BoundBaseTable, BoundGapFill, BoundIcebergMetadataTable, BoundJoin, BoundShare,
-    BoundShareInput, BoundSource, BoundSystemTable, BoundWatermark, BoundWindowTableFunction,
-    Relation, ResolveQualifiedNameError, WindowTableFunctionKind,
+    BoundBaseTable, BoundGapFill, BoundIcebergMetadataTable, BoundJoin, BoundMatchRecognize,
+    BoundMeasure, BoundShare, BoundShareInput, BoundSource, BoundSymbolDefinition,
+    BoundSystemTable, BoundWatermark, BoundWindowTableFunction, MeasureSlotKind, Relation,
+    ResolveQualifiedNameError, WindowTableFunctionKind,
 };
 // Re-export common types
 pub use risingwave_common::gap_fill::FillStrategy;

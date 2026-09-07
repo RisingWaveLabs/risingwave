@@ -1,0 +1,75 @@
+# WITHIN held-then-emitted across watermarks (frontier wakeup).
+#
+# A complete match ending at the safe boundary is held (not emitted) while a future row could still
+# extend it -- the pattern's open `b+` genuinely can grow, which is what makes the hold correct (a
+# terminal pattern like a fixed `(a b)` is emitted at the boundary instead, see
+# match_recognize_terminal_finality.slt) -- then emitted once the watermark reaches its WITHIN
+# deadline, with NO new row arriving in its partition in between. This exercises the wakeup-frontier's WITHIN branch: the partition is
+# scheduled to be revisited at the deadline (there is no future row to wake it), and the now-final
+# match is emitted on that later watermark. The single-step boundary case is covered by
+# match_recognize_within_boundary.slt; this one specifically covers the *idle, multi-watermark* path.
+
+statement ok
+set streaming_parallelism = 1;
+
+statement ok
+set rw_implicit_flush to true;
+
+statement ok
+drop materialized view if exists mv_held;
+
+statement ok
+drop table if exists t;
+
+statement ok
+create table t (id int, ts int, v int, watermark for ts as ts - 1) append only;
+
+statement ok
+create materialized view mv_held as
+select * from t match_recognize (
+  partition by id
+  order by ts
+  measures a.ts as a_ts, b.v as b_v
+  one row per match
+  after match skip past last row
+  pattern (a b+)
+  within 5
+  define a as a.v > 0, b as b.v < 0
+);
+
+# Partition 1: a@10 (v>0), b@11 (v<0) -> span 1 <= 5, a valid match. It ends at partition 1's last
+# row (no trailing row), and its WITHIN deadline is 10 + 5 = 15.
+statement ok
+insert into t values (1, 10, 5);
+
+statement ok
+insert into t values (1, 11, -1);
+
+# Advance the watermark to 12 (sentinel ts 13, lateness 1): past both of partition 1's rows but BEFORE
+# the match's deadline (15). The match is complete but must be HELD -- another `b` in (11, 15] would
+# extend the greedy `b+`, so it is not yet final. Nothing is emitted, and the partition's frontier is
+# re-scheduled to 15 (its WITHIN deadline).
+statement ok
+insert into t values (2, 13, 0);
+
+query III rowsort
+select * from mv_held;
+----
+
+# Advance the watermark to 16, strictly past the match's deadline of 15 (sentinel ts 17, lateness 1).
+# No new row arrives in partition 1: it is revisited purely via its wakeup-frontier entry (scheduled at
+# 15, the deadline), and the now-final match is emitted. The watermark must clear the deadline strictly
+# -- at watermark 15 a completing row at ts 15 is still admissible, so the match could still grow.
+statement ok
+insert into t values (2, 17, 0);
+
+query III rowsort
+select * from mv_held;
+----
+1 10 -1
+
+statement ok
+drop materialized view mv_held;
+
+statement ok
+drop table t;

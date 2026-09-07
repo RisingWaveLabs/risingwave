@@ -1,0 +1,89 @@
+# AFTER MATCH SKIP TO FIRST/LAST <var>, combined with WITHIN.
+#
+# The executor's emit + eviction + wakeup-frontier paths all run with `within_deadline` present here,
+# under the two variable-targeted skip modes (which resolve the resume position from the match's
+# per-row labels, not from its start/end). Mirrors the nfa-level `skip_to_first_last_var` test at the
+# executor level: pattern (a b b) over rows that each satisfy both `a` and `b`, so matches overlap and
+# the skip mode decides where each next match starts.
+#
+#   SKIP TO LAST b  -> matches [0,3), [2,5)         -> a.ts = 10, 12
+#   SKIP TO FIRST b -> matches [0,3), [1,4), [2,5)  -> a.ts = 10, 11, 12
+#
+# WITHIN 2 keeps every match (each spans exactly 2), while still forcing the emit/eviction to consult
+# the WITHIN deadline. The last match ends at the safe boundary and is emitted once the watermark
+# passes its deadline (12 + 2 = 14).
+
+statement ok
+set streaming_parallelism = 1;
+
+statement ok
+set rw_implicit_flush to true;
+
+statement ok
+drop materialized view if exists mv_last;
+
+statement ok
+drop materialized view if exists mv_first;
+
+statement ok
+drop table if exists t;
+
+statement ok
+create table t (id int, ts int, v int, watermark for ts as ts - 1) append only;
+
+statement ok
+create materialized view mv_last as
+select * from t match_recognize (
+  partition by id
+  order by ts
+  measures a.ts as a_ts
+  one row per match
+  after match skip to last b
+  pattern (a b b)
+  within 2
+  define a as a.v > 0, b as b.v > 0
+);
+
+statement ok
+create materialized view mv_first as
+select * from t match_recognize (
+  partition by id
+  order by ts
+  measures a.ts as a_ts
+  one row per match
+  after match skip to first b
+  pattern (a b b)
+  within 2
+  define a as a.v > 0, b as b.v > 0
+);
+
+# Partition 1: five rows ts 10..14, each v>0 so each satisfies both `a` and `b`.
+statement ok
+insert into t values (1, 10, 1), (1, 11, 1), (1, 12, 1), (1, 13, 1), (1, 14, 1);
+
+# Advance the watermark to 15 (sentinel ts 16, v=0 so it matches nothing): past every deadline, so all
+# matches finalize.
+statement ok
+insert into t values (2, 16, 0);
+
+query II rowsort
+select * from mv_last;
+----
+1 10
+1 12
+
+query II rowsort
+select * from mv_first;
+----
+1 10
+1 11
+1 12
+
+statement ok
+drop materialized view mv_last;
+
+statement ok
+drop materialized view mv_first;
+
+statement ok
+drop table t;

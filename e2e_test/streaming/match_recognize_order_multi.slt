@@ -1,0 +1,44 @@
+# Streaming MATCH_RECOGNIZE with a multi-column ORDER BY. Rows that tie on the leading (watermark)
+# column must still be ordered deterministically by the secondary column, so the buffer is totally
+# sorted before matching. The rows below are inserted in reverse secondary order; only a total sort
+# over (ts, k) places `a` before `b` and lets the pattern match.
+
+statement ok
+set streaming_parallelism = 1;
+
+statement ok
+set rw_implicit_flush to true;
+
+statement ok
+create table t (id int, ts int, k int, v int, watermark for ts as ts - 10) append only;
+
+statement ok
+create materialized view mv_order_multi as
+select * from t match_recognize (
+  partition by id
+  order by ts, k
+  measures a.v as av, b.v as bv
+  one row per match
+  after match skip past last row
+  pattern (a b)
+  define a as a.v > 0, b as b.v < 0
+);
+
+# id=1 has two rows at the same ts=1: k=2 (the `b`, v=-1) and k=1 (the `a`, v=5), inserted b-first.
+# Ordering by (ts, k) puts k=1 before k=2, so (a b) matches; ts=20 finalizes it and the sentinel
+# advances the watermark.
+statement ok
+insert into t values
+  (1, 1, 2, -1), (1, 1, 1, 5), (1, 20, 9, 0),
+  (0, 1000, 0, 0);
+
+query III rowsort
+select * from mv_order_multi;
+----
+1 5 -1
+
+statement ok
+drop materialized view mv_order_multi;
+
+statement ok
+drop table t;

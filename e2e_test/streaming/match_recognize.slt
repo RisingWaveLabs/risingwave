@@ -1,0 +1,72 @@
+# Streaming MATCH_RECOGNIZE (v1, event-time): append-only input with a watermark on the ORDER BY
+# column. Matching is driven by the watermark; out-of-order rows within the lateness are buffered
+# and sorted. A high-ts sentinel row advances the watermark so all real matches finalize.
+
+statement ok
+set streaming_parallelism = 1;
+
+statement ok
+set rw_implicit_flush to true;
+
+statement ok
+create table t (id int, ts int, v int, watermark for ts as ts - 10) append only;
+
+# MV1: AFTER MATCH SKIP PAST LAST ROW, multiple matches per partition (up `a` then down `b`).
+statement ok
+create materialized view mv_past as
+select * from t match_recognize (
+  partition by id
+  order by ts
+  measures b.v as dip
+  one row per match
+  after match skip past last row
+  pattern (a b)
+  define a as a.v > 0, b as b.v < 0
+);
+
+# MV2: AFTER MATCH SKIP TO NEXT ROW, overlapping (a a) matches.
+statement ok
+create materialized view mv_next as
+select * from t match_recognize (
+  partition by id
+  order by ts
+  measures a.v as v2
+  one row per match
+  after match skip to next row
+  pattern (a a)
+  define a as a.v > 0
+);
+
+# id=1 inserted OUT OF ORDER (ts 1,3,2,4,5) to exercise event-time sorting -> up(10) down(-5) up(8)
+#   down(-3) up(2): two (a b) matches dip -5 and -3.
+# id=2 in order: 5 6 7 (all a) then -1 -> the (a b) match (7, -1) with dip -1, ending at the
+#   partition's LAST row: the fixed pattern is terminal there, so it is final without any trailing
+#   row (see match_recognize_terminal_finality.slt). For TO NEXT ROW, (a a) gives v2 = 6 and 7.
+# id=0 ts=100: sentinel that pushes the watermark to 90 so all id=1/id=2 rows become final.
+statement ok
+insert into t values
+  (1, 1, 10), (1, 3, 8), (1, 2, -5), (1, 4, -3), (1, 5, 2),
+  (2, 1, 5),  (2, 2, 6),  (2, 3, 7), (2, 4, -1),
+  (0, 100, 0);
+
+query II rowsort
+select * from mv_past;
+----
+1 -3
+1 -5
+2 -1
+
+query II rowsort
+select * from mv_next;
+----
+2 6
+2 7
+
+statement ok
+drop materialized view mv_past;
+
+statement ok
+drop materialized view mv_next;
+
+statement ok
+drop table t;

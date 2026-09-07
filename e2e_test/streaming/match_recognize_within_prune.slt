@@ -1,0 +1,103 @@
+# Streaming MATCH_RECOGNIZE WITHIN with a variable-length pattern. The bound is enforced *during*
+# matching: a greedy `a+` is not allowed to extend past the span bound, so it yields the longest run
+# that fits the window instead of overshooting and being rejected wholesale. This is the difference
+# between pruning during traversal and a post-hoc span check.
+
+statement ok
+set streaming_parallelism = 1;
+
+statement ok
+set rw_implicit_flush to true;
+
+statement ok
+create table t (id int, ts int, v int, watermark for ts as ts - 10) append only;
+
+# Greedy `a+` must stay WITHIN a span of 2 in the ORDER BY column.
+statement ok
+create materialized view mv_within_prune as
+select * from t match_recognize (
+  partition by id
+  order by ts
+  measures count(*) as n, min(a.ts) as t0, max(a.ts) as t1
+  one row per match
+  after match skip past last row
+  pattern (a+)
+  within 2
+  define a as a.v > 0
+);
+
+# id=1 has two runs of `a` rows (v > 0): ts {0,1,2} and ts {5,6}. ts 100 has v = 0 (not `a`) and
+# terminates the second run. Without pruning, greedy `a+` from ts 0 would grab {0,1,2,5,6}, a span
+# of 6 > 2, and the whole match would be rejected. With pruning it stops at ts 2 (span 2), emits
+# {0,1,2}, then a fresh match {5,6} (span 1) starts after the skip.
+statement ok
+insert into t values
+  (1, 0, 1), (1, 1, 1), (1, 2, 1), (1, 5, 1), (1, 6, 1), (1, 100, 0),
+  (0, 1000, 0);
+
+query IIII rowsort
+select * from mv_within_prune;
+----
+1 2 5 6
+1 3 0 2
+
+statement ok
+drop materialized view mv_within_prune;
+
+statement ok
+drop table t;
+
+# The deadline prune skips a window-closed row WITHOUT consulting the matcher, while the emission
+# gate can hold a match because a *gap* position before its start is still alive at the boundary. A
+# held match's own start row can then be dead at the boundary (a path from it accepts before the
+# buffer end), so the prune marches straight past it. Deleting that row loses the match AND lets the
+# rebuild emit one a batch evaluation never produces. No budget exhaustion is involved.
+statement ok
+create table t_gap (id int, ts int, v int, watermark for ts as ts - 1) append only;
+
+statement ok
+create materialized view mv_gap as
+select * from t_gap match_recognize (
+  partition by id
+  order by ts
+  measures count(*) as len, first(b.ts) as b0
+  one row per match
+  after match skip past last row
+  pattern (a b b b b | b b)
+  within 4
+  define a as a.v = 7, b as b.v = 8
+) as m;
+
+# Buffer [ts10 v7, ts11 v8, ts12 v8, ts13 v8]; deadlines 14,15,16,17. The only match is `b b` over
+# ts11..ts12, held because `a b b b` from ts10 is still alive at the boundary.
+statement ok
+insert into t_gap values (1,10,7),(1,11,8),(1,12,8),(1,13,8);
+
+# Advance the watermark to 15 from another partition: ts10's window (14) has closed while ts11's (15)
+# has not, which is exactly the state where the prune would step over the held match's start row.
+statement ok
+insert into t_gap values (9,16,0);
+
+statement ok
+flush;
+
+# Release everything so the held match finalises.
+statement ok
+insert into t_gap values (9,40,0);
+
+statement ok
+flush;
+
+# Exactly the batch answer: one match, `b b` over ts11..ts12. Verified to catch the regression: with
+# the prune's clamp to the first still-held match removed, ts11 is evicted and this returns `2 12` —
+# a different span that batch semantics never produces.
+query II
+select len, b0 from mv_gap where partition_0 = 1;
+----
+2 11
+
+statement ok
+drop materialized view mv_gap;
+
+statement ok
+drop table t_gap;

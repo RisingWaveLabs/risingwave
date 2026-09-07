@@ -1,0 +1,96 @@
+# Idle-partition WITHIN eviction.
+#
+# A partition that holds a live partial match and then receives NO further input must still have
+# that partial evicted once its WITHIN window closes — driven purely by the watermark advancing,
+# not by a new row arriving. The match *output* is identical whether or not the stale partial is
+# evicted (WITHIN rejects a late completion regardless), so this asserts on the state tables
+# directly: the timed-out row must be gone from the matcher's retained-rows table, not left to
+# linger forever. Under the ordered-input split there are two tables to distinguish: the
+# WatermarkSort's buffer holds rows not yet released by the watermark, and the matcher's table
+# holds only rows a live partial still references.
+#
+# The partial must be retained-live at one watermark and only expire at a later one — a row that is
+# dead on arrival would be pruned at the first watermark, which would not exercise the idle path.
+
+control substitution on
+
+statement ok
+set streaming_parallelism = 1;
+
+statement ok
+set rw_implicit_flush to true;
+
+statement ok
+drop materialized view if exists mv_idle;
+
+statement ok
+drop table if exists t;
+
+statement ok
+create table t (id int, ts int, v int, watermark for ts as ts - 1) append only;
+
+statement ok
+create materialized view mv_idle as
+select * from t match_recognize (
+  partition by id
+  order by ts
+  measures b.v as dip
+  one row per match
+  after match skip past last row
+  pattern (a b)
+  within 3
+  define a as a.v > 0, b as b.v < 0
+);
+
+# Partition 1 gets a lone `a` (v = 5) at ts = 10 and never a `b`.
+statement ok
+insert into t values (1, 10, 5);
+
+# Advance the watermark to 11 (sentinel ts 12, lateness 1). `a`@10 is now safe, but its WITHIN window
+# [10, 13] still extends past the watermark, so a completing `b` could still arrive: the partial is
+# retained LIVE. With no future row in partition 1, only the WITHIN deadline (10 + 3 = 13) schedules
+# its next wakeup.
+statement ok
+insert into t values (8, 12, 0);
+
+# Advance the watermark to 14 (sentinel ts 15), past the deadline 13. No `b` arrived in (10, 13], so
+# `a`@10 can no longer complete within the bound and must be evicted — even though partition 1 got no
+# new input. Without the WITHIN-expiry wakeup the partition would never be revisited and `a` would
+# leak.
+statement ok
+insert into t values (9, 15, 0);
+
+# No match ever completes (there is no `b`).
+query II rowsort
+select * from mv_idle;
+----
+
+# After the deadline watermark the matcher retains NOTHING: the timed-out `a`@10 (partition 1) is
+# pruned by the deadline, and the sentinel `0`@12 (partition 8) was dead on arrival (matches no
+# variable). Were the WITHIN pruning missing, `a`@10 would leak here forever and the count would
+# be 1. (Asserting on row counts avoids depending on internal column names.)
+let matcher_table
+SELECT name FROM rw_catalog.rw_internal_table_info
+WHERE job_name = 'mv_idle' AND name LIKE '%matchrecognize%'
+
+query I
+select count(*) from ${matcher_table};
+----
+0
+
+# The still-unreleased sentinel `0`@15 (partition 9, ts 15 >= watermark 14) sits where it now
+# belongs: in the WatermarkSort's buffer, not the matcher's.
+let sort_table
+SELECT name FROM rw_catalog.rw_internal_table_info
+WHERE job_name = 'mv_idle' AND name LIKE '%sort%'
+
+query I
+select count(*) from ${sort_table};
+----
+1
+
+statement ok
+drop materialized view mv_idle;
+
+statement ok
+drop table t;

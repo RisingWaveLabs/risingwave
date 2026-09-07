@@ -1,0 +1,53 @@
+# Streaming MATCH_RECOGNIZE MEASURES aggregates over the matched rows: COUNT(*), COUNT(var.col),
+# MIN(var.col), MAX(var.col). Aggregates resolve over the rows of the match (per variable, except
+# COUNT(*) which is the whole match).
+
+statement ok
+set streaming_parallelism = 1;
+
+statement ok
+set rw_implicit_flush to true;
+
+statement ok
+create table t (id int, ts int, v int, watermark for ts as ts - 10) append only;
+
+# pattern (a+ b): rising run then a fall.
+#   n = COUNT(*) (all match rows), a_cnt = COUNT(a.v) (rows labeled a with non-null v),
+#   lo = MIN(a.v), hi = MAX(a.v), total = SUM(a.v), mean = AVG(a.v), dip = b.v.
+statement ok
+create materialized view mv_agg as
+select * from t match_recognize (
+  partition by id
+  order by ts
+  measures
+    count(*) as n,
+    count(a.v) as a_cnt,
+    min(a.v) as lo,
+    max(a.v) as hi,
+    sum(a.v) as total,
+    avg(a.v) as mean,
+    b.v as dip
+  one row per match
+  after match skip past last row
+  pattern (a+ b)
+  define a as a.v > 0, b as b.v < 0
+);
+
+# id=1: up(10) up(20) up(30) down(-3) then trailing up(1) to finalize; sentinel advances watermark.
+# match rows = [10, 20, 30, -3]: COUNT(*) = 4, COUNT(a.v) = 3, MIN = 10, MAX = 30, SUM = 60,
+#   AVG = 20, dip = -3.
+statement ok
+insert into t values
+  (1, 1, 10), (1, 2, 20), (1, 3, 30), (1, 4, -3), (1, 5, 1),
+  (0, 100, 0);
+
+query IIIIIIRI rowsort
+select * from mv_agg;
+----
+1 4 3 10 30 60 20 -3
+
+statement ok
+drop materialized view mv_agg;
+
+statement ok
+drop table t;

@@ -34,6 +34,7 @@ use crate::expr::{ExprImpl, InputRef};
 
 mod gap_fill;
 mod join;
+mod match_recognize;
 mod share;
 mod subquery;
 mod table_function;
@@ -43,6 +44,9 @@ mod window_table_function;
 
 pub use gap_fill::BoundGapFill;
 pub use join::BoundJoin;
+pub use match_recognize::{
+    BoundMatchRecognize, BoundMeasure, BoundSymbolDefinition, MeasureSlotKind,
+};
 pub use share::{BoundShare, BoundShareInput};
 pub use subquery::BoundSubquery;
 pub use table_or_source::{
@@ -73,6 +77,7 @@ pub enum Relation {
     Watermark(Box<BoundWatermark>),
     Share(Box<BoundShare>),
     GapFill(Box<BoundGapFill>),
+    MatchRecognize(Box<BoundMatchRecognize>),
 }
 
 impl RewriteExprsRecursive for Relation {
@@ -86,6 +91,12 @@ impl RewriteExprsRecursive for Relation {
             Relation::Share(inner) => inner.rewrite_exprs_recursive(rewriter),
             Relation::TableFunction { expr: inner, .. } => {
                 *inner = rewriter.rewrite_expr(inner.take())
+            }
+            Relation::MatchRecognize(inner) => {
+                inner.input.rewrite_exprs_recursive(rewriter);
+                for e in inner.exprs_mut() {
+                    *e = rewriter.rewrite_expr(e.take());
+                }
             }
             _ => {}
         }
@@ -116,6 +127,12 @@ impl Relation {
                 BoundShareInput::Query(query) => query.is_correlated_by_depth(depth),
                 BoundShareInput::ChangeLog(change_log) => change_log.is_correlated_by_depth(depth),
             },
+            Relation::MatchRecognize(inner) => {
+                inner.input.is_correlated_by_depth(depth)
+                    || inner
+                        .exprs()
+                        .any(|e| e.has_correlated_input_ref_by_depth(depth))
+            }
             _ => false,
         }
     }
@@ -143,6 +160,12 @@ impl Relation {
                     change_log.is_correlated_by_correlated_id(correlated_id)
                 }
             },
+            Relation::MatchRecognize(inner) => {
+                inner.input.is_correlated_by_correlated_id(correlated_id)
+                    || inner
+                        .exprs()
+                        .any(|e| e.has_correlated_input_ref_by_correlated_id(correlated_id))
+            }
             _ => false,
         }
     }
@@ -203,6 +226,17 @@ impl Relation {
                 BoundShareInput::ChangeLog(change_log) => change_log
                     .collect_correlated_indices_by_depth_and_assign_id(depth, correlated_id),
             },
+            Relation::MatchRecognize(inner) => {
+                let mut indices = inner
+                    .input
+                    .collect_correlated_indices_by_depth_and_assign_id(depth, correlated_id);
+                for e in inner.exprs_mut() {
+                    indices.extend(
+                        e.collect_correlated_indices_by_depth_and_assign_id(depth, correlated_id),
+                    );
+                }
+                indices
+            }
             _ => vec![],
         }
     }
@@ -669,6 +703,33 @@ impl Binder {
                 self.pop_and_merge_lateral_context()?;
                 Ok(bound_join)
             }
+            TableFactor::MatchRecognize {
+                table,
+                partition_by,
+                order_by,
+                measures,
+                rows_per_match,
+                after_match_skip,
+                pattern,
+                within,
+                subsets,
+                symbols,
+                alias,
+            } => Ok(Relation::MatchRecognize(Box::new(
+                self.bind_match_recognize(
+                    table,
+                    partition_by,
+                    order_by,
+                    measures,
+                    rows_per_match,
+                    after_match_skip,
+                    pattern,
+                    within,
+                    subsets,
+                    symbols,
+                    alias.as_ref(),
+                )?,
+            ))),
         }
     }
 }

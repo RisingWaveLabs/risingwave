@@ -105,7 +105,7 @@ pub fn stream_enforce_eowc_requirement(
                     FieldDisplay(&plan.schema()[watermark_col_idx])
                 ));
             }
-            Ok(StreamEowcSort::new(plan, watermark_col_idx).into())
+            Ok(StreamWatermarkSort::new(plan, watermark_col_idx).into())
         }
     } else {
         Ok(plan)

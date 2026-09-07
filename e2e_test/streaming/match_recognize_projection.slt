@@ -1,0 +1,71 @@
+# Streaming MATCH_RECOGNIZE under column projection / aggregation. Selecting a subset of the output
+# (or aggregating it) prunes measure columns, but the hidden per-match id must be preserved as the
+# unique key so distinct matches are not collapsed — even when the projected columns are identical.
+
+statement ok
+set streaming_parallelism = 1;
+
+statement ok
+set rw_implicit_flush to true;
+
+# Self-cleaning: a mid-file failure aborts before the drops at the end, so guard re-runs.
+statement ok
+drop materialized view if exists mv_cnt;
+
+statement ok
+drop materialized view if exists mv_proj;
+
+statement ok
+drop table if exists tp;
+
+statement ok
+create table tp (id int, ts int, v int, watermark for ts as ts - 10) append only;
+
+# Projection that keeps only the partition column (the measure is pruned). Partition 1 has two
+# matches, so it must yield two (identical) rows; the hidden match id keeps them distinct.
+statement ok
+create materialized view mv_proj as
+select partition_0 from tp match_recognize (
+  partition by id
+  order by ts
+  measures b.v as dip
+  one row per match
+  after match skip past last row
+  pattern (a b)
+  define a as a.v > 0, b as b.v < 0
+);
+
+# Aggregation over the match output: the MATCH_RECOGNIZE view is append-only, and a plain view
+# aggregates it downstream (the operator emits no watermark, so windowed aggregation over it
+# would need its own time column).
+statement ok
+create materialized view mv_cnt as
+select count(*) as n from mv_proj;
+
+# Partition 1: two (up, down) matches; partition 2: one. Sentinel advances the watermark.
+statement ok
+insert into tp values
+  (1, 1, 5), (1, 2, -1), (1, 3, 5), (1, 4, -1), (1, 5, 0),
+  (2, 1, 9), (2, 2, -2), (2, 3, 0),
+  (0, 1000, 0);
+
+query I rowsort
+select * from mv_proj;
+----
+1
+1
+2
+
+query I
+select * from mv_cnt;
+----
+3
+
+statement ok
+drop materialized view mv_cnt;
+
+statement ok
+drop materialized view mv_proj;
+
+statement ok
+drop table tp;

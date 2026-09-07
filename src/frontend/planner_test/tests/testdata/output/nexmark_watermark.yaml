@@ -62,7 +62,7 @@
 
   eowc_stream_plan: |-
     StreamMaterialize { columns: [auction, bidder, price, date_time, _row_id(hidden)], stream_key: [_row_id], pk_columns: [_row_id], pk_conflict: NoCheck, watermark_columns: [date_time] }
-    └─StreamEowcSort { sort_column: $expr1 }
+    └─StreamWatermarkSort { sort_column: $expr1 }
       └─StreamProject { exprs: [Field(bid, 0:Int32) as $expr2, Field(bid, 1:Int32) as $expr3, (0.908:Decimal * Field(bid, 2:Int32)::Decimal) as $expr4, $expr1, _row_id], output_watermarks: [[$expr1]] }
         └─StreamFilter { predicate: (event_type = 2:Int32) }
           └─StreamWatermarkFilter { watermark_descs: [Desc { column: $expr1, expr: ($expr1 - '00:00:04':Interval) }], output_watermarks: [[$expr1]] }
@@ -472,7 +472,7 @@
 
   eowc_stream_plan: |-
     StreamMaterialize { columns: [auction, num, window_start(hidden), window_start#1(hidden)], stream_key: [auction, window_start], pk_columns: [auction, window_start], pk_conflict: NoCheck, watermark_columns: [window_start(hidden)] }
-    └─StreamEowcSort { sort_column: window_start }
+    └─StreamWatermarkSort { sort_column: window_start }
       └─StreamProject { exprs: [$expr2, count, window_start, window_start], output_watermarks: [[window_start, window_start]] }
         └─StreamFilter { predicate: (count >= max(count)) }
           └─StreamHashJoin [window, append_only] { type: Inner, predicate: window_start = window_start, conditions_to_clean_state_in_join_key: [(window_start = window_start)], output_watermarks: [[window_start, window_start]], output: all }
@@ -725,7 +725,7 @@
 
   eowc_stream_plan: |-
     StreamMaterialize { columns: [auction, price, bidder, date_time, _row_id(hidden), $expr5(hidden)], stream_key: [_row_id, $expr5, price], pk_columns: [_row_id, $expr5, price], pk_conflict: NoCheck, watermark_columns: [date_time] }
-    └─StreamEowcSort { sort_column: $expr1 }
+    └─StreamWatermarkSort { sort_column: $expr1 }
       └─StreamHashJoin [interval, append_only] { type: Inner, predicate: $expr4 = max($expr4) AND ($expr1 >= $expr6) AND ($expr1 <= $expr5), conditions_to_clean_left_state_table: ($expr1 >= $expr6), conditions_to_clean_right_state_table: ($expr1 <= $expr5), output_watermarks: [[$expr1], [$expr5]], output: [$expr2, $expr4, $expr3, $expr1, _row_id, $expr5] }
         ├─StreamExchange { dist: HashShard($expr4) }
         │ └─StreamShare { id: 6 }
@@ -890,7 +890,7 @@
 
   eowc_stream_plan: |-
     StreamMaterialize { columns: [id, name, starttime, $expr5(hidden), $expr7(hidden), $expr6(hidden), $expr8(hidden)], stream_key: [id, name, starttime, $expr5], pk_columns: [id, name, starttime, $expr5], pk_conflict: NoCheck, watermark_columns: [starttime] }
-    └─StreamEowcSort { sort_column: $expr2 }
+    └─StreamWatermarkSort { sort_column: $expr2 }
       └─StreamHashJoin [window, append_only] { type: Inner, predicate: $expr2 = $expr6 AND $expr5 = $expr8 AND $expr3 = $expr7, conditions_to_clean_state_in_join_key: [($expr2 = $expr6)], output_watermarks: [[$expr2, $expr5, $expr6, $expr8]], output: all }
         ├─StreamExchange { dist: HashShard($expr3, $expr2, $expr5) }
         │ └─StreamProject { exprs: [$expr3, $expr4, $expr2, $expr5], output_watermarks: [[$expr2, $expr5]] }
@@ -1086,7 +1086,7 @@
 
   eowc_stream_plan: |-
     StreamMaterialize { columns: [auction, bidder, price, date_time, date, time, _row_id(hidden)], stream_key: [_row_id], pk_columns: [_row_id], pk_conflict: NoCheck, watermark_columns: [date_time] }
-    └─StreamEowcSort { sort_column: $expr1 }
+    └─StreamWatermarkSort { sort_column: $expr1 }
       └─StreamProject { exprs: [Field(bid, 0:Int32) as $expr2, Field(bid, 1:Int32) as $expr3, Field(bid, 2:Int32) as $expr4, $expr1, ToChar($expr1, 'YYYY-MM-DD':Varchar) as $expr5, ToChar($expr1, 'HH:MI':Varchar) as $expr6, _row_id], output_watermarks: [[$expr1]] }
         └─StreamFilter { predicate: (event_type = 2:Int32) }
           └─StreamWatermarkFilter { watermark_descs: [Desc { column: $expr1, expr: ($expr1 - '00:00:04':Interval) }], output_watermarks: [[$expr1]] }
@@ -1197,7 +1197,7 @@
 
   eowc_stream_plan: |-
     StreamMaterialize { columns: [auction, bidder, price, bidtimetype, date_time, extra, _row_id(hidden)], stream_key: [_row_id], pk_columns: [_row_id], pk_conflict: NoCheck, watermark_columns: [date_time] }
-    └─StreamEowcSort { sort_column: $expr1 }
+    └─StreamWatermarkSort { sort_column: $expr1 }
       └─StreamProject { exprs: [Field(bid, 0:Int32) as $expr2, Field(bid, 1:Int32) as $expr3, (0.908:Decimal * Field(bid, 2:Int32)::Decimal) as $expr4, Case(((Extract('HOUR':Varchar, $expr1) >= 8:Decimal) AND (Extract('HOUR':Varchar, $expr1) <= 18:Decimal)), 'dayTime':Varchar, ((Extract('HOUR':Varchar, $expr1) <= 6:Decimal) OR (Extract('HOUR':Varchar, $expr1) >= 20:Decimal)), 'nightTime':Varchar, 'otherTime':Varchar) as $expr5, $expr1, Field(bid, 6:Int32) as $expr6, _row_id], output_watermarks: [[$expr1]] }
         └─StreamFilter { predicate: ((0.908:Decimal * Field(bid, 2:Int32)::Decimal) > 1000000:Decimal) AND ((0.908:Decimal * Field(bid, 2:Int32)::Decimal) < 50000000:Decimal) AND (event_type = 2:Int32) }
           └─StreamWatermarkFilter { watermark_descs: [Desc { column: $expr1, expr: ($expr1 - '00:00:04':Interval) }], output_watermarks: [[$expr1]] }
@@ -2649,7 +2649,7 @@
     StreamMaterialize { columns: [auction, bidder, date_time, price, avg_price_10, max_price_10, _row_id(hidden)], stream_key: [_row_id, auction], pk_columns: [_row_id, auction], pk_conflict: NoCheck }
     └─StreamProject { exprs: [$expr2, $expr3, $expr1, $expr4, Case((count = 0:Int32), null:Decimal, (sum / count::Decimal)) as $expr5, max, _row_id] }
       └─StreamEowcOverWindow { window_functions: [sum($expr4) OVER(PARTITION BY $expr2 ORDER BY $expr1 ASC ROWS BETWEEN 10 PRECEDING AND CURRENT ROW), count($expr4) OVER(PARTITION BY $expr2 ORDER BY $expr1 ASC ROWS BETWEEN 10 PRECEDING AND CURRENT ROW), max($expr4) OVER(PARTITION BY $expr2 ORDER BY $expr1 ASC ROWS BETWEEN 10 PRECEDING AND CURRENT ROW)] }
-        └─StreamEowcSort { sort_column: $expr1 }
+        └─StreamWatermarkSort { sort_column: $expr1 }
           └─StreamExchange { dist: HashShard($expr2) }
             └─StreamProject { exprs: [Field(bid, 0:Int32) as $expr2, Field(bid, 1:Int32) as $expr3, Field(bid, 2:Int32) as $expr4, $expr1, _row_id], output_watermarks: [[$expr1]] }
               └─StreamFilter { predicate: ((Field(bid, 0:Int32) % 100:Int32) = 0:Int32) AND (event_type = 2:Int32) }

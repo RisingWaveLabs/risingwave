@@ -1044,6 +1044,7 @@ mod logical_join;
 mod logical_kafka_scan;
 mod logical_limit;
 mod logical_locality_provider;
+mod logical_match_recognize;
 mod logical_max_one_row;
 mod logical_multi_join;
 mod logical_now;
@@ -1082,6 +1083,7 @@ mod stream_iceberg_with_pk_index_writer;
 mod stream_join_common;
 mod stream_local_approx_percentile;
 mod stream_locality_provider;
+mod stream_match_recognize;
 mod stream_materialize;
 mod stream_materialized_exprs;
 mod stream_now;
@@ -1092,7 +1094,6 @@ mod stream_row_id_gen;
 mod stream_row_merge;
 mod stream_simple_agg;
 mod stream_sink;
-mod stream_sort;
 mod stream_source;
 mod stream_source_scan;
 mod stream_stateless_simple_agg;
@@ -1102,6 +1103,7 @@ mod stream_topn;
 mod stream_union;
 mod stream_values;
 mod stream_watermark_filter;
+mod stream_watermark_sort;
 
 mod batch_file_scan;
 mod batch_iceberg_metadata_scan;
@@ -1187,6 +1189,7 @@ pub use logical_join::LogicalJoin;
 pub use logical_kafka_scan::LogicalKafkaScan;
 pub use logical_limit::LogicalLimit;
 pub use logical_locality_provider::LogicalLocalityProvider;
+pub use logical_match_recognize::LogicalMatchRecognize;
 pub use logical_max_one_row::LogicalMaxOneRow;
 pub use logical_multi_join::{LogicalMultiJoin, LogicalMultiJoinBuilder};
 pub use logical_mysql_query::LogicalMySqlQuery;
@@ -1231,6 +1234,7 @@ pub use stream_iceberg_with_pk_index_writer::StreamIcebergWithPkIndexWriter;
 use stream_join_common::StreamJoinCommon;
 pub use stream_local_approx_percentile::StreamLocalApproxPercentile;
 pub use stream_locality_provider::StreamLocalityProvider;
+pub use stream_match_recognize::StreamMatchRecognize;
 pub use stream_materialize::StreamMaterialize;
 pub use stream_materialized_exprs::StreamMaterializedExprs;
 pub use stream_now::StreamNow;
@@ -1242,7 +1246,6 @@ pub use stream_row_merge::StreamRowMerge;
 pub use stream_share::StreamShare;
 pub use stream_simple_agg::StreamSimpleAgg;
 pub use stream_sink::{IcebergPartitionInfo, PartitionComputeInfo, StreamSink};
-pub use stream_sort::StreamEowcSort;
 pub use stream_source::StreamSource;
 pub use stream_source_scan::StreamSourceScan;
 pub use stream_stateless_simple_agg::StreamStatelessSimpleAgg;
@@ -1257,6 +1260,7 @@ pub use stream_values::StreamValues;
 pub use stream_vector_index_lookup_join::StreamVectorIndexLookupJoin;
 pub use stream_vector_index_write::StreamVectorIndexWrite;
 pub use stream_watermark_filter::StreamWatermarkFilter;
+pub use stream_watermark_sort::StreamWatermarkSort;
 
 use crate::expr::{ExprRewriter, ExprVisitor, Literal};
 use crate::optimizer::optimizer_context::OptimizerContextRef;
@@ -1310,6 +1314,7 @@ macro_rules! for_all_plan_nodes {
             , { Logical, Dedup }
             , { Logical, Intersect }
             , { Logical, Except }
+            , { Logical, MatchRecognize }
             , { Logical, MaxOneRow }
             , { Logical, KafkaScan }
             , { Logical, IcebergScan }
@@ -1390,7 +1395,8 @@ macro_rules! for_all_plan_nodes {
             , { Stream, Values }
             , { Stream, Dedup }
             , { Stream, EowcOverWindow }
-            , { Stream, EowcSort }
+            , { Stream, WatermarkSort }
+            , { Stream, MatchRecognize }
             , { Stream, OverWindow }
             , { Stream, FsFetch }
             , { Stream, ChangeLog }

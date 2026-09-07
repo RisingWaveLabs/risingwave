@@ -1,0 +1,142 @@
+# Preference supersession: emitting a provisional match early, on the grounds that "a later row
+# exists" (or that it is terminal from its own start), silently diverges from batch semantics.
+# Two shapes, both must HOLD until decided:
+#
+#   1. Same-start supersession — PATTERN (a b c d | a b): with rows a,b,c buffered, the finder's
+#      provisional match is (a b) and a later row exists, but the preferred first branch is blocked
+#      at the BUFFER boundary (it consumed a,b,c and awaits d). A future d makes the batch answer
+#      the four-row match; emitting the two-row match early is wrong and uncorrectable.
+#   2. Gap supersession — PATTERN (x n n | n): with rows x,n buffered, the only provisional match
+#      is the lone (n), terminal from its own start — but the position of x is still alive inside
+#      the preferred branch, and a future n makes the batch answer (x n n), which CONSUMES the row
+#      the lone (n) was built on. Leftmost preference: the alive gap must hold the emission.
+#
+# Each scenario runs both endings: the superseding row arrives (the preferred match must be the
+# ONLY output), and a killing row arrives (the held match is then decided and must emit).
+
+control substitution on
+
+statement ok
+set streaming_parallelism = 1;
+
+statement ok
+set rw_implicit_flush to true;
+
+statement ok
+drop materialized view if exists mv_same_start;
+
+statement ok
+drop materialized view if exists mv_gap;
+
+statement ok
+drop table if exists t_pref;
+
+statement ok
+create table t_pref (id int, ts int, v int, watermark for ts as ts - 1) append only;
+
+statement ok
+create materialized view mv_same_start as
+select * from t_pref match_recognize (
+  partition by id
+  order by ts
+  measures count(*) as len, classifier() as last_var
+  one row per match
+  after match skip past last row
+  pattern (a b c d | a b)
+  define a as a.v = 1, b as b.v = 2, c as c.v = 3, d as d.v = 4
+);
+
+# Partition 1: a,b,c buffered (watermark advanced past them by the partition-9 sentinels). The
+# provisional (a b) is followed by c — but the preferred branch is alive through c. NOTHING may
+# emit yet.
+statement ok
+insert into t_pref values (1, 10, 1), (1, 11, 2), (1, 12, 3), (9, 14, 0);
+
+query IIT rowsort
+select * from mv_same_start;
+----
+
+# The d arrives: the preferred four-row branch completes. The batch answer over a,b,c,d is the
+# single (a b c d) match — a premature (a b) emission would have left TWO rows here (or the wrong
+# one).
+statement ok
+insert into t_pref values (1, 13, 4), (9, 15, 0);
+
+query IIT rowsort
+select * from mv_same_start;
+----
+1 4 d
+
+# Partition 2: a,b then a KILLING row (v=9 matches nothing). The preferred branch dies on it, the
+# (a b) match is now the decided batch answer and must emit — holding forever would be the
+# opposite bug.
+statement ok
+insert into t_pref values (2, 20, 1), (2, 21, 2), (2, 22, 9), (9, 24, 0);
+
+query IIT rowsort
+select * from mv_same_start;
+----
+1 4 d
+2 2 b
+
+statement ok
+create materialized view mv_gap as
+select * from t_pref match_recognize (
+  partition by id
+  order by ts
+  measures count(*) as len, classifier() as last_var
+  one row per match
+  after match skip past last row
+  pattern (x n n | n)
+  define x as x.v = 7, n as n.v = 8
+);
+
+# Partition 3: x,n buffered. The lone (n) at position 1 is terminal from its own start, but
+# position 0 is alive (x n inside the preferred branch). NOTHING may emit.
+statement ok
+insert into t_pref values (3, 30, 7), (3, 31, 8), (9, 33, 0);
+
+query IIT rowsort
+select * from mv_gap;
+----
+
+# The second n arrives: the batch answer is the single (x n n) — it consumes the row the lone (n)
+# was built on, so a premature emission could never be reconciled.
+statement ok
+insert into t_pref values (3, 32, 8), (9, 34, 0);
+
+query IIT rowsort
+select * from mv_gap;
+----
+3 3 n
+
+# Partition 4: x,n then a killing row — the preferred branch dies, the held lone (n) emits.
+statement ok
+insert into t_pref values (4, 40, 7), (4, 41, 8), (4, 42, 9), (9, 44, 0);
+
+query IIT rowsort
+select * from mv_gap;
+----
+3 3 n
+4 1 n
+
+# Partition 5: an n with NO x before it — the gap is empty, the lone (n) is terminal, and it must
+# emit at arrival (no watermark help beyond sort release): idle-partition starvation control.
+statement ok
+insert into t_pref values (5, 50, 8), (9, 52, 0);
+
+query IIT rowsort
+select * from mv_gap;
+----
+3 3 n
+4 1 n
+5 1 n
+
+statement ok
+drop materialized view mv_same_start;
+
+statement ok
+drop materialized view mv_gap;
+
+statement ok
+drop table t_pref;

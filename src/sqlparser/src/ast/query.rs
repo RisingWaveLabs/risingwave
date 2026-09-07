@@ -482,6 +482,217 @@ pub enum TableFactor {
     /// The parser may also accept non-standard nesting of bare tables for some
     /// dialects, but the information about such nesting is stripped from AST.
     NestedJoin(Box<TableWithJoins>),
+    /// `<table> MATCH_RECOGNIZE (...)`: SQL:2016 row pattern recognition applied
+    /// to an input table factor.
+    MatchRecognize {
+        /// The input the pattern is matched over.
+        table: Box<TableFactor>,
+        /// `PARTITION BY <expr>, ...` — empty when omitted.
+        partition_by: Vec<Expr>,
+        /// `ORDER BY <expr> [ASC|DESC], ...` — empty when omitted.
+        order_by: Vec<OrderByExpr>,
+        /// `MEASURES <expr> AS <alias>, ...` — empty when omitted.
+        measures: Vec<Measure>,
+        /// `ONE ROW PER MATCH` | `ALL ROWS PER MATCH` — `None` when omitted.
+        rows_per_match: Option<RowsPerMatch>,
+        /// `AFTER MATCH SKIP ...` — `None` when omitted.
+        after_match_skip: Option<AfterMatchSkip>,
+        /// `PATTERN ( <pattern> )` — required.
+        pattern: MatchRecognizePattern,
+        /// `WITHIN <interval>` — bounds a match's time span; `None` when omitted.
+        within: Option<Expr>,
+        /// `SUBSET <name> = (<vars>), ...` — empty when omitted.
+        subsets: Vec<SubsetDefinition>,
+        /// `DEFINE <symbol> AS <condition>, ...` — required.
+        symbols: Vec<SymbolDefinition>,
+        /// Optional alias for the row-pattern output.
+        alias: Option<TableAlias>,
+    },
+}
+
+/// A single `MEASURES` item: `<expr> AS <alias>`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Measure {
+    pub expr: Expr,
+    pub alias: Ident,
+}
+
+impl fmt::Display for Measure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} AS {}", self.expr, self.alias)
+    }
+}
+
+/// The output mode of a `MATCH_RECOGNIZE` clause.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum RowsPerMatch {
+    /// `ONE ROW PER MATCH`
+    OneRow,
+    /// `ALL ROWS PER MATCH`
+    AllRows,
+}
+
+impl fmt::Display for RowsPerMatch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            RowsPerMatch::OneRow => write!(f, "ONE ROW PER MATCH"),
+            RowsPerMatch::AllRows => write!(f, "ALL ROWS PER MATCH"),
+        }
+    }
+}
+
+/// The `AFTER MATCH SKIP` strategy of a `MATCH_RECOGNIZE` clause.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum AfterMatchSkip {
+    /// `AFTER MATCH SKIP PAST LAST ROW`
+    PastLastRow,
+    /// `AFTER MATCH SKIP TO NEXT ROW`
+    ToNextRow,
+    /// `AFTER MATCH SKIP TO FIRST <symbol>`
+    ToFirst(Ident),
+    /// `AFTER MATCH SKIP TO LAST <symbol>`
+    ToLast(Ident),
+}
+
+impl fmt::Display for AfterMatchSkip {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "AFTER MATCH SKIP ")?;
+        match self {
+            AfterMatchSkip::PastLastRow => write!(f, "PAST LAST ROW"),
+            AfterMatchSkip::ToNextRow => write!(f, "TO NEXT ROW"),
+            AfterMatchSkip::ToFirst(symbol) => write!(f, "TO FIRST {}", symbol),
+            AfterMatchSkip::ToLast(symbol) => write!(f, "TO LAST {}", symbol),
+        }
+    }
+}
+
+/// A single `DEFINE` item: `<symbol> AS <condition>`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SymbolDefinition {
+    pub symbol: Ident,
+    pub definition: Expr,
+}
+
+impl fmt::Display for SymbolDefinition {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} AS {}", self.symbol, self.definition)
+    }
+}
+
+/// A single `SUBSET` item: `<name> = (<pattern variable>, ...)` — a union variable.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SubsetDefinition {
+    pub name: Ident,
+    pub members: Vec<Ident>,
+}
+
+impl fmt::Display for SubsetDefinition {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} = ({})",
+            self.name,
+            display_comma_separated(&self.members)
+        )
+    }
+}
+
+/// A row-pattern variable, or one of the row-pattern anchors.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum MatchRecognizeSymbol {
+    /// A named pattern variable, defined (or referenced) in `DEFINE`.
+    Named(Ident),
+    /// The start anchor `^`.
+    Start,
+    /// The end anchor `$`.
+    End,
+}
+
+impl fmt::Display for MatchRecognizeSymbol {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            MatchRecognizeSymbol::Named(symbol) => write!(f, "{}", symbol),
+            MatchRecognizeSymbol::Start => write!(f, "^"),
+            MatchRecognizeSymbol::End => write!(f, "$"),
+        }
+    }
+}
+
+/// A row-pattern expression inside `PATTERN ( ... )`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum MatchRecognizePattern {
+    /// A single symbol, e.g. `A`, `^`, `$`.
+    Symbol(MatchRecognizeSymbol),
+    /// An exclusion `{- <pattern> -}`.
+    Exclude(MatchRecognizeSymbol),
+    /// `PERMUTE(<symbol>, ...)`.
+    Permute(Vec<MatchRecognizeSymbol>),
+    /// Concatenation, e.g. `A B C`.
+    Concat(Vec<MatchRecognizePattern>),
+    /// A parenthesized sub-pattern `( <pattern> )`.
+    Group(Box<MatchRecognizePattern>),
+    /// Alternation, e.g. `A | B | C`.
+    Alternation(Vec<MatchRecognizePattern>),
+    /// A quantified sub-pattern, e.g. `A*`, `A+`, `A?`, `A{1,3}`. The bool is `reluctant` (a trailing
+    /// `?`, e.g. `A*?`, which prefers the fewest matches).
+    Repetition(Box<MatchRecognizePattern>, RepetitionQuantifier, bool),
+}
+
+impl fmt::Display for MatchRecognizePattern {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        use MatchRecognizePattern::*;
+        match self {
+            Symbol(symbol) => write!(f, "{}", symbol),
+            Exclude(symbol) => write!(f, "{{- {} -}}", symbol),
+            Permute(symbols) => write!(f, "PERMUTE({})", display_comma_separated(symbols)),
+            Concat(patterns) => write!(f, "{}", display_separated(patterns, " ")),
+            Group(pattern) => write!(f, "({})", pattern),
+            Alternation(patterns) => write!(f, "{}", display_separated(patterns, " | ")),
+            Repetition(pattern, quantifier, reluctant) => {
+                write!(
+                    f,
+                    "{}{}{}",
+                    pattern,
+                    quantifier,
+                    if *reluctant { "?" } else { "" }
+                )
+            }
+        }
+    }
+}
+
+/// A quantifier applied to a row-pattern, e.g. `*`, `+`, `?`, `{n,m}`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum RepetitionQuantifier {
+    /// `*`
+    ZeroOrMore,
+    /// `+`
+    OneOrMore,
+    /// `?`
+    AtMostOne,
+    /// `{n}`
+    Exactly(u32),
+    /// `{n,}`
+    AtLeast(u32),
+    /// `{,m}`
+    AtMost(u32),
+    /// `{n,m}`
+    Range(u32, u32),
+}
+
+impl fmt::Display for RepetitionQuantifier {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        use RepetitionQuantifier::*;
+        match self {
+            ZeroOrMore => write!(f, "*"),
+            OneOrMore => write!(f, "+"),
+            AtMostOne => write!(f, "?"),
+            Exactly(n) => write!(f, "{{{}}}", n),
+            AtLeast(n) => write!(f, "{{{},}}", n),
+            AtMost(m) => write!(f, "{{,{}}}", m),
+            Range(n, m) => write!(f, "{{{},{}}}", n, m),
+        }
+    }
 }
 
 impl fmt::Display for TableFactor {
@@ -527,6 +738,48 @@ impl fmt::Display for TableFactor {
                 Ok(())
             }
             TableFactor::NestedJoin(table_reference) => write!(f, "({})", table_reference),
+            TableFactor::MatchRecognize {
+                table,
+                partition_by,
+                order_by,
+                measures,
+                rows_per_match,
+                after_match_skip,
+                pattern,
+                within,
+                subsets,
+                symbols,
+                alias,
+            } => {
+                write!(f, "{} MATCH_RECOGNIZE (", table)?;
+                if !partition_by.is_empty() {
+                    write!(f, "PARTITION BY {} ", display_comma_separated(partition_by))?;
+                }
+                if !order_by.is_empty() {
+                    write!(f, "ORDER BY {} ", display_comma_separated(order_by))?;
+                }
+                if !measures.is_empty() {
+                    write!(f, "MEASURES {} ", display_comma_separated(measures))?;
+                }
+                if let Some(rows_per_match) = rows_per_match {
+                    write!(f, "{} ", rows_per_match)?;
+                }
+                if let Some(after_match_skip) = after_match_skip {
+                    write!(f, "{} ", after_match_skip)?;
+                }
+                write!(f, "PATTERN ({}) ", pattern)?;
+                if let Some(within) = within {
+                    write!(f, "WITHIN {} ", within)?;
+                }
+                if !subsets.is_empty() {
+                    write!(f, "SUBSET {} ", display_comma_separated(subsets))?;
+                }
+                write!(f, "DEFINE {})", display_comma_separated(symbols))?;
+                if let Some(alias) = alias {
+                    write!(f, " AS {}", alias)?;
+                }
+                Ok(())
+            }
         }
     }
 }

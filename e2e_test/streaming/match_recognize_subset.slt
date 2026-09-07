@@ -1,0 +1,48 @@
+# Streaming MATCH_RECOGNIZE SUBSET: a union variable usable in MEASURES navigation/aggregates. Here
+# U = (a, b) covers every matched row, so FIRST/LAST/COUNT over U span the whole match.
+
+statement ok
+set streaming_parallelism = 1;
+
+statement ok
+set rw_implicit_flush to true;
+
+statement ok
+create table t (id int, ts int, v int, watermark for ts as ts - 10) append only;
+
+# pattern (a b a): up, down, up. SUBSET U = (a, b) -> all three rows.
+#   u_first = FIRST(u.v), u_last = LAST(u.v), u_cnt = COUNT(u.v), dip = b.v (last b).
+statement ok
+create materialized view mv_subset as
+select * from t match_recognize (
+  partition by id
+  order by ts
+  measures
+    first(u.v) as u_first,
+    last(u.v) as u_last,
+    count(u.v) as u_cnt,
+    b.v as dip
+  one row per match
+  after match skip past last row
+  pattern (a b a)
+  subset u = (a, b)
+  define a as a.v > 0, b as b.v < 0
+);
+
+# id=1: up(10) down(-5) up(20) then trailing up(1) to finalize; sentinel advances the watermark.
+# match rows = [10, -5, 20]: FIRST(u.v)=10, LAST(u.v)=20, COUNT(u.v)=3, b.v=-5.
+statement ok
+insert into t values
+  (1, 1, 10), (1, 2, -5), (1, 3, 20), (1, 4, 1),
+  (0, 100, 0);
+
+query IIIII rowsort
+select * from mv_subset;
+----
+1 10 20 3 -5
+
+statement ok
+drop materialized view mv_subset;
+
+statement ok
+drop table t;

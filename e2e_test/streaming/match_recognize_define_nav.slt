@@ -1,0 +1,78 @@
+# Streaming MATCH_RECOGNIZE row-pattern navigation in DEFINE: physical PREV (the canonical V-shape:
+# a falling run then a rising run) and a running reference to another pattern variable.
+
+statement ok
+set streaming_parallelism = 1;
+
+statement ok
+set rw_implicit_flush to true;
+
+# ---- PREV: V-shape detection ----
+statement ok
+create table tv (id int, ts int, price int, watermark for ts as ts - 100) append only;
+
+# `a` has no DEFINE (matches any row); `down`/`up` compare to the physical previous row via PREV.
+statement ok
+create materialized view mv_v as
+select * from tv match_recognize (
+  partition by id
+  order by ts
+  measures a.price as start, last(down.price) as bottom, last(up.price) as peak
+  one row per match
+  after match skip past last row
+  pattern (a down+ up+)
+  define down as down.price < prev(down.price), up as up.price > prev(up.price)
+);
+
+# id=1 prices 5,4,3,4,6 then 2 (breaks the rise) and a high-ts sentinel.
+# match: a=5, down=[4,3], up=[4,6] -> start=5, bottom=3, peak=6.
+statement ok
+insert into tv values
+  (1, 1, 5), (1, 2, 4), (1, 3, 3), (1, 4, 4), (1, 5, 6), (1, 6, 2),
+  (0, 1000, 0);
+
+query IIII rowsort
+select * from mv_v;
+----
+1 5 3 6
+
+# ---- running reference to another variable: b only matches if it exceeds the running a ----
+statement ok
+create table tr (id int, ts int, price int, watermark for ts as ts - 100) append only;
+
+statement ok
+create materialized view mv_run as
+select * from tr match_recognize (
+  partition by id
+  order by ts
+  measures a.price as av, b.price as bv
+  one row per match
+  after match skip past last row
+  pattern (a b)
+  define a as a.price > 0, b as b.price > a.price
+);
+
+# id=2 prices 10,15,8,20 then 1 (finalizes) + sentinel.
+# matches: (a=10, b=15) and (a=8, b=20); pairs where b <= a do not match.
+statement ok
+insert into tr values
+  (2, 1, 10), (2, 2, 15), (2, 3, 8), (2, 4, 20), (2, 5, 1),
+  (0, 1000, 0);
+
+query III rowsort
+select * from mv_run;
+----
+2 10 15
+2 8 20
+
+statement ok
+drop materialized view mv_v;
+
+statement ok
+drop materialized view mv_run;
+
+statement ok
+drop table tv;
+
+statement ok
+drop table tr;

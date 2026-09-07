@@ -1,0 +1,45 @@
+# Streaming MATCH_RECOGNIZE AFTER MATCH SKIP TO LAST <var>: resume matching at the match's last row
+# bound to a variable, which (with overlapping DEFINEs) produces overlapping matches that PAST LAST
+# ROW would not.
+
+statement ok
+set streaming_parallelism = 1;
+
+statement ok
+set rw_implicit_flush to true;
+
+statement ok
+create table t (id int, ts int, v int, watermark for ts as ts - 10) append only;
+
+# Every positive row satisfies both `a` and `b`, so pattern (a b b) can match overlapping windows.
+# SKIP TO LAST b resumes at each match's last `b`, giving matches starting at rows 0 and 2.
+statement ok
+create materialized view mv_skip as
+select * from t match_recognize (
+  partition by id
+  order by ts
+  measures first(a.v) as a0, last(b.v) as b_last, count(*) as n
+  one row per match
+  after match skip to last b
+  pattern (a b b)
+  define a as a.v > 0, b as b.v > 0
+);
+
+# id=1: six rising rows; sentinel advances the watermark so all become final.
+# matches (SKIP TO LAST b): [10,20,30] and [30,40,50].
+statement ok
+insert into t values
+  (1, 1, 10), (1, 2, 20), (1, 3, 30), (1, 4, 40), (1, 5, 50), (1, 6, 60),
+  (0, 100, 0);
+
+query IIII rowsort
+select * from mv_skip;
+----
+1 10 30 3
+1 30 50 3
+
+statement ok
+drop materialized view mv_skip;
+
+statement ok
+drop table t;

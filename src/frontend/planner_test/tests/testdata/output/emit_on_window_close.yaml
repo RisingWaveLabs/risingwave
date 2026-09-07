@@ -133,7 +133,7 @@
     StreamMaterialize { columns: [lag, _row_id(hidden), b(hidden)], stream_key: [_row_id, b], pk_columns: [_row_id, b], pk_conflict: NoCheck }
     └─StreamProject { exprs: [first_value, _row_id, b] }
       └─StreamEowcOverWindow { window_functions: [first_value(a) OVER(PARTITION BY b ORDER BY tm ASC ROWS BETWEEN 2 PRECEDING AND 2 PRECEDING)] }
-        └─StreamEowcSort { sort_column: tm }
+        └─StreamWatermarkSort { sort_column: tm }
           └─StreamExchange { dist: HashShard(b) }
             └─StreamProject { exprs: [a, b, tm, _row_id], output_watermarks: [[tm]] }
               └─StreamWatermarkFilter { watermark_descs: [Desc { column: tm, expr: (tm - '00:05:00':Interval) }], output_watermarks: [[tm]] }
@@ -145,7 +145,7 @@
     └── StreamProject { exprs: [first_value, _row_id, b] }
         └── StreamEowcOverWindow { window_functions: [first_value(a) OVER(PARTITION BY b ORDER BY tm ASC ROWS BETWEEN 2 PRECEDING AND 2 PRECEDING)] }
             ├── tables: [ EowcOverWindow: 0 ]
-            └── StreamEowcSort { sort_column: tm } { tables: [ Sort: 1 ] }
+            └── StreamWatermarkSort { sort_column: tm } { tables: [ Sort: 1 ] }
                 └── StreamExchange Hash([1]) from 1
 
     Fragment 1
@@ -205,7 +205,7 @@
   explain_output: |
     StreamSink { type: append-only, columns: [tm, foo, bar, t._row_id(hidden), lag, max, sum] }
     └─StreamEowcOverWindow { window_functions: [first_value(t.foo) OVER(PARTITION BY t.bar ORDER BY t.tm ASC ROWS BETWEEN 2 PRECEDING AND 2 PRECEDING), max(t.foo) OVER(PARTITION BY t.bar ORDER BY t.tm ASC ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING), sum(t.foo) OVER(PARTITION BY t.bar ORDER BY t.tm ASC ROWS BETWEEN 2 PRECEDING AND CURRENT ROW EXCLUDE CURRENT ROW)] }
-      └─StreamEowcSort { sort_column: t.tm }
+      └─StreamWatermarkSort { sort_column: t.tm }
         └─StreamExchange { dist: HashShard(t.bar) }
           └─StreamTableScan { table: t, columns: [tm, foo, bar, _row_id] }
 - sql: |
@@ -234,7 +234,7 @@
   eowc_stream_plan: |-
     StreamMaterialize { columns: [id1, value1, id2, value2, ts1, ts2, s1._row_id(hidden), s2._row_id(hidden), count], stream_key: [s1._row_id, s2._row_id, id1, value2], pk_columns: [s1._row_id, s2._row_id, id1, value2], pk_conflict: NoCheck }
     └─StreamEowcOverWindow { window_functions: [count() OVER(PARTITION BY s2.value ORDER BY s2.ts ASC ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)] }
-      └─StreamEowcSort { sort_column: s2.ts }
+      └─StreamWatermarkSort { sort_column: s2.ts }
         └─StreamExchange { dist: HashShard(s2.value) }
           └─StreamHashJoin [interval, append_only] { type: Inner, predicate: s1.id = s2.id AND (s1.ts >= s2.ts) AND ($expr1 <= s2.ts), conditions_to_clean_left_state_table: (s1.ts >= s2.ts), conditions_to_clean_right_state_table: ($expr1 <= s2.ts), output_watermarks: [[s1.ts], [s2.ts]], output: [s1.id, s1.value, s2.id, s2.value, s1.ts, s2.ts, s1._row_id, s2._row_id] }
             ├─StreamExchange { dist: HashShard(s1.id) }
@@ -254,7 +254,7 @@
     StreamMaterialize { columns: [row_number, rank, dense_rank, _row_id(hidden), b(hidden)], stream_key: [_row_id, b], pk_columns: [_row_id, b], pk_conflict: NoCheck }
     └─StreamProject { exprs: [row_number, rank, dense_rank, _row_id, b] }
       └─StreamEowcOverWindow { window_functions: [row_number() OVER(PARTITION BY b ORDER BY tm ASC ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW), rank() OVER(PARTITION BY b ORDER BY tm ASC ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW), dense_rank() OVER(PARTITION BY b ORDER BY tm ASC ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)] }
-        └─StreamEowcSort { sort_column: tm }
+        └─StreamWatermarkSort { sort_column: tm }
           └─StreamExchange { dist: HashShard(b) }
             └─StreamProject { exprs: [b, tm, _row_id], output_watermarks: [[tm]] }
               └─StreamWatermarkFilter { watermark_descs: [Desc { column: tm, expr: (tm - '00:05:00':Interval) }], output_watermarks: [[tm]] }
@@ -266,7 +266,7 @@
     └── StreamProject { exprs: [row_number, rank, dense_rank, _row_id, b] }
         └── StreamEowcOverWindow { window_functions: [row_number() OVER(PARTITION BY b ORDER BY tm ASC ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW), rank() OVER(PARTITION BY b ORDER BY tm ASC ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW), dense_rank() OVER(PARTITION BY b ORDER BY tm ASC ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)] }
             ├── tables: [ EowcOverWindow: 0, EowcOverWindowIntermediateState: 1 ]
-            └── StreamEowcSort { sort_column: tm } { tables: [ Sort: 2 ] }
+            └── StreamWatermarkSort { sort_column: tm } { tables: [ Sort: 2 ] }
                 └── StreamExchange Hash([0]) from 1
 
     Fragment 1
@@ -298,7 +298,7 @@
     StreamMaterialize { columns: [row_number, lag, _row_id(hidden), b(hidden)], stream_key: [_row_id, b], pk_columns: [_row_id, b], pk_conflict: NoCheck }
     └─StreamProject { exprs: [row_number, first_value, _row_id, b] }
       └─StreamEowcOverWindow { window_functions: [row_number() OVER(PARTITION BY b ORDER BY tm ASC ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW), first_value(a) OVER(PARTITION BY b ORDER BY tm ASC ROWS BETWEEN 1 PRECEDING AND 1 PRECEDING)] }
-        └─StreamEowcSort { sort_column: tm }
+        └─StreamWatermarkSort { sort_column: tm }
           └─StreamExchange { dist: HashShard(b) }
             └─StreamProject { exprs: [a, b, tm, _row_id], output_watermarks: [[tm]] }
               └─StreamWatermarkFilter { watermark_descs: [Desc { column: tm, expr: (tm - '00:05:00':Interval) }], output_watermarks: [[tm]] }
@@ -310,7 +310,7 @@
     └── StreamProject { exprs: [row_number, first_value, _row_id, b] }
         └── StreamEowcOverWindow { window_functions: [row_number() OVER(PARTITION BY b ORDER BY tm ASC ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW), first_value(a) OVER(PARTITION BY b ORDER BY tm ASC ROWS BETWEEN 1 PRECEDING AND 1 PRECEDING)] }
             ├── tables: [ EowcOverWindow: 0, EowcOverWindowIntermediateState: 1 ]
-            └── StreamEowcSort { sort_column: tm } { tables: [ Sort: 2 ] }
+            └── StreamWatermarkSort { sort_column: tm } { tables: [ Sort: 2 ] }
                 └── StreamExchange Hash([1]) from 1
 
     Fragment 1
@@ -343,7 +343,7 @@
     StreamMaterialize { columns: [row_number, rank, dense_rank, _row_id(hidden), 1:Int32(hidden)], stream_key: [_row_id, 1:Int32], pk_columns: [_row_id, 1:Int32], pk_conflict: NoCheck }
     └─StreamProject { exprs: [row_number, rank, dense_rank, _row_id, 1:Int32] }
       └─StreamEowcOverWindow { window_functions: [row_number() OVER(PARTITION BY 1:Int32 ORDER BY tm ASC ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW), rank() OVER(PARTITION BY 1:Int32 ORDER BY tm ASC ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW), dense_rank() OVER(PARTITION BY 1:Int32 ORDER BY tm ASC ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)] }
-        └─StreamEowcSort { sort_column: tm }
+        └─StreamWatermarkSort { sort_column: tm }
           └─StreamExchange { dist: HashShard(1:Int32) }
             └─StreamProject { exprs: [tm, 1:Int32, _row_id], output_watermarks: [[tm]] }
               └─StreamWatermarkFilter { watermark_descs: [Desc { column: tm, expr: (tm - '00:05:00':Interval) }], output_watermarks: [[tm]] }
@@ -355,7 +355,7 @@
     └── StreamProject { exprs: [row_number, rank, dense_rank, _row_id, 1:Int32] }
         └── StreamEowcOverWindow { window_functions: [row_number() OVER(PARTITION BY 1:Int32 ORDER BY tm ASC ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW), rank() OVER(PARTITION BY 1:Int32 ORDER BY tm ASC ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW), dense_rank() OVER(PARTITION BY 1:Int32 ORDER BY tm ASC ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)] }
             ├── tables: [ EowcOverWindow: 0, EowcOverWindowIntermediateState: 1 ]
-            └── StreamEowcSort { sort_column: tm } { tables: [ Sort: 2 ] }
+            └── StreamWatermarkSort { sort_column: tm } { tables: [ Sort: 2 ] }
                 └── StreamExchange Hash([1]) from 1
 
     Fragment 1
@@ -389,7 +389,7 @@
     └── StreamProject { exprs: [first_value, first_value, _row_id, b] }
         └── StreamEowcOverWindow { window_functions: [first_value(a) OVER(PARTITION BY b ORDER BY tm ASC ROWS BETWEEN 1 PRECEDING AND 1 PRECEDING), first_value(a) OVER(PARTITION BY b ORDER BY tm ASC ROWS BETWEEN 2 PRECEDING AND 2 PRECEDING)] }
             ├── tables: [ EowcOverWindow: 0 ]
-            └── StreamEowcSort { sort_column: tm } { tables: [ Sort: 1 ] }
+            └── StreamWatermarkSort { sort_column: tm } { tables: [ Sort: 1 ] }
                 └── StreamExchange Hash([1]) from 1
 
     Fragment 1

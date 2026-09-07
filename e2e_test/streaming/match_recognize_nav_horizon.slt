@@ -1,0 +1,74 @@
+# Physical navigation across watermark batches: the accepted PREV shape.
+#
+# PREV in DEFINE reads rows *before* the candidate; the bind-time start-distance rule guarantees
+# those reads stay inside the match span, so they need no retention — but only if that holds across
+# evictions, which is what this scenario pins: a second match in the same partition, found after
+# the first match's rows were consumed and deleted, must evaluate its PREV against its own rows
+# (buffer index 0 is now mid-partition).
+#
+# Physical NEXT in DEFINE is rejected at bind time (see match_recognize_validation.slt): a row's
+# verdict would depend on rows after it, and per-candidate decidability — an out-of-range read
+# being a wait for exactly that candidate, not a NULL verdict and not a global horizon — is not
+# implemented yet.
+
+statement ok
+set streaming_parallelism = 1;
+
+statement ok
+set rw_implicit_flush to true;
+
+# ---------------------------------------------------------------------------------------------
+# Accepted PREV shape stays correct across an eviction. The first match is emitted and
+# its rows deleted; the second match's `down` rows then sit at the START of the surviving buffer,
+# and their PREV must read the second match's own rows (never a stale or missing predecessor).
+# ---------------------------------------------------------------------------------------------
+
+statement ok
+create table t_nav_prev (id int, ts int, price int, watermark for ts as ts - 1) append only;
+
+statement ok
+create materialized view mv_nav_prev as
+select * from t_nav_prev match_recognize (
+  partition by id
+  order by ts
+  measures first(a.ts) as start_ts, min(down.price) as bottom
+  one row per match
+  after match skip past last row
+  pattern (a down+ up+)
+  define a as a.price = 10,
+         down as down.price < prev(down.price),
+         up as up.price > prev(up.price)
+);
+
+# First V-shape: 10 > 5 < 9. Trailing row + sentinel finalize and evict it.
+statement ok
+insert into t_nav_prev values (1, 1, 10), (1, 2, 5), (1, 3, 9);
+
+statement ok
+insert into t_nav_prev values (1, 4, 9), (9, 6, 0);
+
+query II rowsort
+select start_ts, bottom from mv_nav_prev;
+----
+1 5
+
+# Second V-shape in the same partition, entirely after the eviction: 10 > 3 < 7. Its `down@11`
+# compares against `a@10` -- a row of THIS match -- at what is now the front of the buffer.
+# (The leftover trailing row from the first batch cannot start a match: `a` requires price 10.)
+statement ok
+insert into t_nav_prev values (1, 10, 10), (1, 11, 3), (1, 12, 7);
+
+statement ok
+insert into t_nav_prev values (1, 13, 7), (9, 15, 0);
+
+query II rowsort
+select start_ts, bottom from mv_nav_prev;
+----
+1 5
+10 3
+
+statement ok
+drop materialized view mv_nav_prev;
+
+statement ok
+drop table t_nav_prev;

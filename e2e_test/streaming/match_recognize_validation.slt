@@ -1,0 +1,347 @@
+# v1 validation: MATCH_RECOGNIZE must reject inputs/clauses it cannot faithfully execute, at
+# CREATE time, rather than compiling to wrong behaviour or crashing the executor later.
+
+statement ok
+set rw_implicit_flush to true;
+
+statement ok
+create table src (id int, ts int, v int, watermark for ts as ts - 10) append only;
+
+# ORDER BY direction / null placement is dropped by the plan, so DESC or explicit NULLS would sort
+# the wrong way. Reject non-default ordering.
+statement error ascending
+create materialized view bad_desc as
+select * from src match_recognize (
+  partition by id
+  order by ts desc
+  measures a.v as m
+  one row per match
+  pattern (a)
+  define a as a.v > 0
+);
+
+statement error ascending
+create materialized view bad_nulls as
+select * from src match_recognize (
+  partition by id
+  order by ts nulls first
+  measures a.v as m
+  one row per match
+  pattern (a)
+  define a as a.v > 0
+);
+
+# PREV/NEXT offsets are physical row navigation; offset 0 would resolve to the current row, which is
+# not what the navigation means.
+statement error positive integer literal
+create materialized view bad_offset as
+select * from src match_recognize (
+  partition by id
+  order by ts
+  measures a.v as m
+  one row per match
+  pattern (a b)
+  define a as a.v > 0, b as b.v < prev(b.v, 0)
+);
+
+# The offset is an operational knob: a NEXT offset defers finality by that many rows and a PREV
+# offset requires that many mandatory pattern rows before the variable, so it is capped small (100).
+statement error PREV.. offset of 4294967296
+create materialized view bad_offset_huge as
+select * from src match_recognize (
+  partition by id
+  order by ts
+  measures a.v as m
+  one row per match
+  pattern (a b)
+  define a as a.v > 0, b as b.v < prev(b.v, 4294967296)
+);
+
+# A WITHIN bound that is NULL, zero or negative can never hold a multi-row match: the view would
+# stay empty (or, for NULL, silently bound nothing) while reading as if it were windowed.
+statement error NULL, zero or negative
+create materialized view bad_within_zero as
+select * from src match_recognize (
+  partition by id
+  order by ts
+  measures a.v as m
+  one row per match
+  pattern (a b) within 0
+  define a as a.v > 0, b as b.v < 0
+);
+
+statement error NULL, zero or negative
+create materialized view bad_within_null as
+select * from src match_recognize (
+  partition by id
+  order by ts
+  measures a.v as m
+  one row per match
+  pattern (a b) within null
+  define a as a.v > 0, b as b.v < 0
+);
+
+# An interval bound that is positive in total but has a negative component is rejected too:
+# `timestamp + interval` adds months, days and microseconds as separate checked steps, so such a
+# bound can overflow on one component while its true sum is representable — and the executor reads
+# an out-of-range deadline as a window that never closes.
+statement error negative component
+create materialized view bad_within_mixed_sign as
+select * from src match_recognize (
+  partition by id
+  order by ts
+  measures a.v as m
+  one row per match
+  pattern (a b) within interval '1 month -29 days'
+  define a as a.v > 0, b as b.v < 0
+);
+
+# Physical PREV/NEXT in MEASURES reads rows outside the match; rejected by name rather than falling
+# through to a misleading "function prev does not exist".
+statement error in MATCH_RECOGNIZE MEASURES
+create materialized view bad_measures_prev as
+select * from src match_recognize (
+  partition by id
+  order by ts
+  measures prev(a.v) as m
+  one row per match
+  pattern (a b)
+  define a as a.v > 0, b as b.v < 0
+);
+
+# Physical NEXT in DEFINE is rejected outright: a row's verdict would depend on rows after it, and
+# per-candidate decidability (an out-of-range read must be a wait for exactly that candidate, not a
+# NULL verdict and not a global horizon that can starve an idle partition) is not implemented yet.
+statement error physical NEXT
+create materialized view bad_next as
+select * from src match_recognize (
+  partition by id
+  order by ts
+  measures a.v as m
+  one row per match
+  pattern (a b)
+  define a as next(a.v) < 0, b as b.v < 0
+);
+
+# Physical PREV may only read rows inside the match span: rows before the match are not retained,
+# so a variable that can START the match must not look behind itself. `PREV(v) IS NULL` here would
+# accept a mid-partition row as a match start or not depending only on whether eviction has run.
+statement error can occur 0 row.s. from the match start
+create materialized view bad_prev_at_start as
+select * from src match_recognize (
+  partition by id
+  order by ts
+  measures a.v as m
+  one row per match
+  pattern (a b)
+  define a as prev(a.v) is null, b as b.v < 0
+);
+
+# A zero-minimum quantifier prefix can match no rows, so the variable behind it can still start the
+# match; the same read-before-the-match rejection applies.
+statement error can occur 0 row.s. from the match start
+create materialized view bad_prev_zero_prefix as
+select * from src match_recognize (
+  partition by id
+  order by ts
+  measures a.v as m
+  one row per match
+  pattern (a* b)
+  define a as a.v > 0, b as b.v < prev(b.v)
+);
+
+# Only the function name and argument list of a navigation call are read, so anything past the offset
+# would be silently ignored.
+statement error with 3 arguments in DEFINE
+create materialized view bad_prev_arity as
+select * from src match_recognize (
+  partition by id
+  order by ts
+  measures a.v as m
+  one row per match
+  pattern (a b)
+  define a as a.v > 0, b as b.v < prev(b.v, 1, 999)
+);
+
+# ... and the same holds for every function-call modifier: it would be dropped and the plain call
+# evaluated, so each is rejected in DEFINE exactly as it already is in MEASURES.
+statement error FILTER on LAST
+create materialized view bad_define_filter as
+select * from src match_recognize (
+  partition by id
+  order by ts
+  measures a.v as m
+  one row per match
+  pattern (a b)
+  define a as a.v > 0, b as b.v < last(a.v) filter (where a.v > 0)
+);
+
+statement error OVER on LAST
+create materialized view bad_define_over as
+select * from src match_recognize (
+  partition by id
+  order by ts
+  measures a.v as m
+  one row per match
+  pattern (a b)
+  define a as a.v > 0, b as b.v < last(a.v) over ()
+);
+
+statement error DISTINCT on LAST
+create materialized view bad_define_distinct as
+select * from src match_recognize (
+  partition by id
+  order by ts
+  measures a.v as m
+  one row per match
+  pattern (a b)
+  define a as a.v > 0, b as b.v < last(distinct a.v)
+);
+
+statement error IGNORE NULLS on PREV
+create materialized view bad_define_ignore_nulls as
+select * from src match_recognize (
+  partition by id
+  order by ts
+  measures a.v as m
+  one row per match
+  pattern (a b)
+  define a as a.v > 0, b as b.v < prev(b.v, 1 ignore nulls)
+);
+
+# Navigation nested in AST nodes the extractor has to traverse (CASE, IN-list, IS DISTINCT FROM,
+# array constructor, subscript): these used to fail with a misleading "function prev does not
+# exist". The error proves the traversal reached every one of them -- the deepest nested slot,
+# `prev(b.v, 2)`, is what the start-distance rule rejects (`b` sits 1 row from the match start).
+statement error can occur 1 row.s. from the match start
+create materialized view nested_nav as
+select * from src match_recognize (
+  partition by id
+  order by ts
+  measures a.v as m
+  one row per match
+  pattern (a b)
+  define a as a.v > 0,
+         b as b.v < case when prev(b.v) > 0 then prev(b.v) else 0 end
+                and b.v not in (prev(b.v, 2), last(a.v))
+                and (prev(b.v) is distinct from b.v)
+                and ((array[prev(b.v, 2), last(a.v)])[1] < b.v)
+);
+
+# The same nesting with offsets the start-distance rule admits binds and plans cleanly.
+statement ok
+create materialized view nested_nav as
+select * from src match_recognize (
+  partition by id
+  order by ts
+  measures a.v as m
+  one row per match
+  pattern (a b)
+  define a as a.v > 0,
+         b as b.v < case when prev(b.v) > 0 then prev(b.v) else 0 end
+                and b.v not in (prev(b.v), last(a.v))
+                and (prev(b.v) is distinct from b.v)
+                and ((array[prev(b.v), last(a.v)])[1] < b.v)
+);
+
+statement ok
+drop materialized view nested_nav;
+
+# The left-hand operand of `IN (subquery)` is outside the subquery, so navigation there is extracted
+# and the predicate is then rejected for the subquery itself -- not for an "unknown function".
+statement error subquery in the DEFINE predicate
+create materialized view bad_define_subquery as
+select * from src match_recognize (
+  partition by id
+  order by ts
+  measures a.v as m
+  one row per match
+  pattern (a b)
+  define a as a.v > 0, b as prev(b.v) in (select v from src)
+);
+
+# A range quantifier is expanded eagerly into NFA states when the actor is built, i.e. after the DDL
+# has been committed, so a bound that cannot be expanded has to be rejected here.
+statement error lower bound above its upper bound
+create materialized view bad_range_inverted as
+select * from src match_recognize (
+  partition by id
+  order by ts
+  measures a.v as m
+  one row per match
+  pattern (a{5,3} b)
+  define a as a.v > 0, b as b.v < 0
+);
+
+statement error range quantifier bound of 2000
+create materialized view bad_range_too_large as
+select * from src match_recognize (
+  partition by id
+  order by ts
+  measures a.v as m
+  one row per match
+  pattern (a{2000} b)
+  define a as a.v > 0, b as b.v < 0
+);
+
+# Nested quantifiers multiply, so bounds that are individually legal can still expand out of range.
+statement error NFA states
+create materialized view bad_range_nested as
+select * from src match_recognize (
+  partition by id
+  order by ts
+  measures a.v as m
+  one row per match
+  pattern ((a{900}){900} b)
+  define a as a.v > 0, b as b.v < 0
+);
+
+# A bound above u32 used to wrap to 0, i.e. a pattern that can never match; the parser rejects it.
+statement error invalid u32
+create materialized view bad_range_overflow as
+select * from src match_recognize (
+  partition by id
+  order by ts
+  measures a.v as m
+  one row per match
+  pattern (a{4294967296} b)
+  define a as a.v > 0, b as b.v < 0
+);
+
+# AFTER MATCH SKIP TO FIRST/LAST looks its target up among the labels of a completed match, so a
+# variable that only exists as a DEFINE symbol can never be found and the skip would silently
+# degrade to skipping past the last row -- on every match, forever.
+statement error does not appear in PATTERN
+create materialized view bad_skip_define_only as
+select * from src match_recognize (
+  partition by id
+  order by ts
+  measures a.v as m
+  one row per match
+  after match skip to last x
+  pattern (a b)
+  define a as a.v > 0, b as b.v < 0, x as x.v > 100
+);
+
+# The executor matches over an append-only sequence and emits insert-only results; a non-append-only
+# input (here, an aggregation that produces a retract stream) must be rejected during planning.
+statement ok
+create materialized view agg as
+select id, max(ts) as ts, count(*)::int as v from src group by id;
+
+statement error append-only
+create materialized view bad_input as
+select * from agg match_recognize (
+  partition by id
+  order by ts
+  measures a.v as m
+  one row per match
+  pattern (a)
+  define a as a.v > 0
+);
+
+statement ok
+drop materialized view agg;
+
+statement ok
+drop table src;

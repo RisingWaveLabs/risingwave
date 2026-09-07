@@ -1,0 +1,201 @@
+# Watermark boundary: a row at exactly `ts == watermark` is NOT final.
+#
+# RisingWave's watermark contract is that no future row will have `ts < w`; a row with `ts == w` may
+# still arrive, and `watermark_filter` admits it (it keeps `event_time >= watermark`). MATCH_RECOGNIZE
+# expressed every finality decision with `<=` -- safe prefix, WITHIN boundary emit, WITHIN eviction,
+# wakeup scheduling -- and so treated rows and deadlines *at* the watermark as already final. Each
+# case below loses (or prematurely emits) a match because of that.
+#
+# Regression for the strict-comparison fix (finality is `< w`, wakeup is `>= w`).
+
+statement ok
+set streaming_parallelism = 1;
+
+statement ok
+set rw_implicit_flush to true;
+
+# Self-cleaning: these cases intentionally fail on unpatched code, aborting before their own drops, so
+# guard the re-run against leftovers rather than needing a clean-data.
+statement ok
+drop materialized view if exists mv_wm_within;
+
+statement ok
+drop materialized view if exists mv_wm_multi;
+
+statement ok
+drop materialized view if exists mv_wm_wakeup;
+
+statement ok
+drop table if exists t_within;
+
+statement ok
+drop table if exists t_multi;
+
+statement ok
+drop table if exists t_wakeup;
+
+# ---- 1. WITHIN: a deadline exactly at the watermark has not expired ----
+#
+# The WITHIN eviction drops a partial once its window has closed. The window closes only when the
+# watermark is strictly past the deadline: at `deadline == w` a completing row at `ts == w` is still
+# admissible, and it is exactly the row that completes the match here.
+
+statement ok
+create table t_within (id int, ts int, v int, watermark for ts as ts - 1) append only;
+
+statement ok
+create materialized view mv_wm_within as
+select * from t_within match_recognize (
+  partition by id
+  order by ts
+  measures a.ts as a_ts, b.v as dip
+  one row per match
+  after match skip past last row
+  pattern (a b)
+  within 3
+  define a as a.v > 0, b as b.v < 0
+);
+
+# `a`@10 arrives alone. Its WITHIN deadline is 10 + 3 = 13.
+statement ok
+insert into t_within values (1, 10, 5);
+
+# The sentinel (ts 14, lateness 1) advances the watermark to exactly 13 -- `a`'s deadline. `a`@10 must
+# be RETAINED: a `b` at ts = 13 is still admissible, so the window is not closed. Nothing emits yet,
+# and the partition must stay scheduled (its only wakeup is that very deadline, 13).
+statement ok
+insert into t_within values (2, 14, 0);
+
+query III rowsort
+select * from mv_wm_within;
+----
+
+# `b`@13 arrives *after* the watermark reached 13 -- admitted, because `watermark_filter` keeps
+# `ts >= watermark`. Span 13 - 10 = 3 is exactly the WITHIN bound, so (a b) is a valid match.
+statement ok
+insert into t_within values (1, 13, -1);
+
+# Advance strictly past the deadline (sentinel ts 16 -> watermark 15 > 13): the match is final and
+# emits. On unpatched code `a`@10 was already deleted at watermark 13, so nothing can emit.
+statement ok
+insert into t_within values (2, 16, 0);
+
+query III rowsort
+select * from mv_wm_within;
+----
+1 10 -1
+
+statement ok
+drop materialized view mv_wm_within;
+
+statement ok
+drop table t_within;
+
+# ---- 2. No WITHIN: a row at exactly the watermark must not be evicted ----
+#
+# With a multi-column ORDER BY, a row arriving at `ts == watermark` can sort *into the middle* of the
+# rows already at that ts: the buffer PK is `(partition, ORDER BY cols, seq)`, so the secondary column
+# decides the order, not arrival. Counting the already-present `ts == w` row as final therefore
+# evicts a row that a later arrival still needs as its immediate successor. (With a single ORDER BY
+# column a late row at `ts == w` always sorts after every already-safe row, so this loss needs the
+# secondary key.)
+
+statement ok
+create table t_multi (id int, ts int, k int, v int, watermark for ts as ts - 1) append only;
+
+statement ok
+create materialized view mv_wm_multi as
+select * from t_multi match_recognize (
+  partition by id
+  order by ts, k
+  measures a.v as av, b.v as bv
+  one row per match
+  after match skip past last row
+  pattern (a b)
+  define a as a.v > 0, b as b.v < 0
+);
+
+# The `b` row (ts 13, k 9) arrives first. Nothing can begin a match at it.
+statement ok
+insert into t_multi values (1, 13, 9, -1);
+
+# The sentinel (ts 14) advances the watermark to exactly 13. On unpatched code the `b` row counted as
+# final, was found dead (no live match start covers it) and was deleted.
+statement ok
+insert into t_multi values (2, 14, 0, 0);
+
+# The `a` row arrives at the same ts with a smaller secondary key, so it sorts BEFORE the `b` row --
+# giving the (a b) pair that the deletion above made impossible.
+statement ok
+insert into t_multi values (1, 13, 1, 5);
+
+# A trailing row, then a sentinel past it: the pair is fully safe and confirmed maximal, so it emits.
+statement ok
+insert into t_multi values (1, 20, 0, 0);
+
+statement ok
+insert into t_multi values (2, 25, 0, 0);
+
+query III rowsort
+select * from mv_wm_multi;
+----
+1 5 -1
+
+statement ok
+drop materialized view mv_wm_multi;
+
+statement ok
+drop table t_multi;
+
+# ---- 3. The wakeup frontier must be scheduled AT the watermark, not past it ----
+#
+# Rows at exactly `ts == w` are the partition's next unit of work, so `w` itself is the correct next
+# wakeup -- the complement of the safe prefix ending strictly below `w`. Scheduling only rows strictly
+# past `w` would drop the frontier entry of a partition whose every surviving row sits at `w` (with no
+# WITHIN deadline to fall back on), and with no further insert in that partition to re-schedule it the
+# match would never be revisited.
+
+statement ok
+create table t_wakeup (id int, ts int, v int, watermark for ts as ts - 1) append only;
+
+statement ok
+create materialized view mv_wm_wakeup as
+select * from t_wakeup match_recognize (
+  partition by id
+  order by ts
+  measures a.v as av, b.v as bv
+  one row per match
+  after match skip past last row
+  pattern (a b)
+  define a as a.v > 0, b as b.v < 0
+);
+
+# Partition 1: three rows all at ts 13 -- the `a`, the `b`, and a trailing row, inserted in that order
+# so `seq` breaks the tie in that order.
+statement ok
+insert into t_wakeup values (1, 13, 5), (1, 13, -1), (1, 13, 0);
+
+# The sentinel (ts 14) advances the watermark to exactly 13. None of partition 1's rows is final yet,
+# so the match must NOT be emitted -- a further row at ts = 13 could still change it (see case 2).
+statement ok
+insert into t_wakeup values (2, 14, 0);
+
+query III rowsort
+select * from mv_wm_wakeup;
+----
+
+# Watermark 19, with NO further row in partition 1: it is revisited purely via its frontier entry
+# (scheduled at 13), the three rows become safe, and the trailing row confirms the pair is maximal.
+statement ok
+insert into t_wakeup values (2, 20, 0);
+
+query III rowsort
+select * from mv_wm_wakeup;
+----
+1 5 -1
+
+statement ok
+drop materialized view mv_wm_wakeup;
+
+statement ok
+drop table t_wakeup;

@@ -208,6 +208,12 @@ impl QueryRewriter<'_> {
             TableFactor::NestedJoin(table_with_joins) => {
                 self.visit_table_with_joins(table_with_joins);
             }
+            TableFactor::MatchRecognize { table, .. } => {
+                // Only the input table can reference a relation: the binder rejects subqueries in
+                // both DEFINE and MEASURES (they have no representation in the executor's scalar
+                // expressions), so the remaining clauses contain no rename targets.
+                self.visit_table_factor(table);
+            }
         }
     }
 

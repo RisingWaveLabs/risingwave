@@ -49,6 +49,7 @@ mod iceberg_with_pk_index;
 mod locality_provider;
 mod lookup;
 mod lookup_union;
+mod match_recognize;
 mod materialized_exprs;
 mod merge;
 mod mview;

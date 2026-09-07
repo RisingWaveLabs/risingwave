@@ -391,6 +391,9 @@ fn find_ddl_references_for_query_in_table_factor(
         TableFactor::NestedJoin(table_with_joins) => {
             find_ddl_references_for_query_in_table_with_joins(table_with_joins, ddl_references);
         }
+        TableFactor::MatchRecognize { table, .. } => {
+            find_ddl_references_for_query_in_table_factor(table, ddl_references);
+        }
     }
 }
 

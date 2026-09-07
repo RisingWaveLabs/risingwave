@@ -1594,7 +1594,7 @@
     StreamMaterialize { columns: [window_start, window_end, t._row_id(hidden), t.bi(hidden)], stream_key: [t._row_id, t.bi], pk_columns: [t._row_id, t.bi], pk_conflict: NoCheck }
     └─StreamProject { exprs: [first_value, last_value, t._row_id, t.bi] }
       └─StreamEowcOverWindow { window_functions: [first_value(t.i) OVER(PARTITION BY t.bi ORDER BY t.ts ASC SESSION WITH GAP 00:10:00), last_value(t.i) OVER(PARTITION BY t.bi ORDER BY t.ts ASC SESSION WITH GAP 00:10:00)] }
-        └─StreamEowcSort { sort_column: t.ts }
+        └─StreamWatermarkSort { sort_column: t.ts }
           └─StreamExchange { dist: HashShard(t.bi) }
             └─StreamTableScan { table: t, columns: [t.i, t.bi, t.ts, t._row_id], stream_scan_type: SnapshotBackfill, stream_key: [t._row_id], pk: [_row_id], dist: UpstreamHashShard(t._row_id) }
 - sql: |

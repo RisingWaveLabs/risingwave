@@ -96,6 +96,7 @@ mod join;
 pub mod locality_provider;
 mod lookup;
 mod lookup_union;
+pub mod match_recognize;
 mod merge;
 mod mview;
 mod nested_loop_temporal_join;

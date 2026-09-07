@@ -180,7 +180,7 @@ impl ToBatch for LogicalGapFill {
 
 impl ToStream for LogicalGapFill {
     fn to_stream(&self, ctx: &mut ToStreamContext) -> Result<super::StreamPlanRef> {
-        use super::{StreamEowcGapFill, StreamEowcSort, StreamGapFill};
+        use super::{StreamEowcGapFill, StreamGapFill, StreamWatermarkSort};
         use crate::error::ErrorCode;
         use crate::optimizer::property::RequiredDist;
 
@@ -217,7 +217,7 @@ impl ToStream for LogicalGapFill {
                 .into());
             }
 
-            let sorted_input = StreamEowcSort::new(new_input, time_col_idx).into();
+            let sorted_input = StreamWatermarkSort::new(new_input, time_col_idx).into();
             let core = generic::GapFill {
                 input: sorted_input,
                 time_col: self.core.time_col.clone(),

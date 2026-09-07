@@ -1,0 +1,56 @@
+# Streaming MATCH_RECOGNIZE PERMUTE: PERMUTE(a, b) matches the variables in any order, i.e. it is
+# the alternation of every ordering. Because that expansion is factorial in the number of variables,
+# the planner caps the variable count.
+
+statement ok
+set streaming_parallelism = 1;
+
+statement ok
+set rw_implicit_flush to true;
+
+statement ok
+create table t (id int, ts int, v int, watermark for ts as ts - 10) append only;
+
+statement ok
+create materialized view mv_permute as
+select * from t match_recognize (
+  partition by id
+  order by ts
+  measures count(*) as n
+  one row per match
+  after match skip past last row
+  pattern (permute(a, b))
+  define a as a.v > 0, b as b.v < 0
+);
+
+# id=1 sees `b` (v<0) then `a` (v>0); id=2 sees `a` then `b`. PERMUTE matches both orderings, so each
+# partition produces one 2-row match. ts=3 (v=0) matches neither and terminates the run.
+statement ok
+insert into t values
+  (1, 1, -1), (1, 2, 5), (1, 3, 0),
+  (2, 1, 5), (2, 2, -1), (2, 3, 0),
+  (0, 1000, 0);
+
+query II rowsort
+select * from mv_permute;
+----
+1 2
+2 2
+
+statement ok
+drop materialized view mv_permute;
+
+# PERMUTE over more than 6 variables expands to 7! = 5040 orderings; the planner rejects it.
+statement error PERMUTE
+create materialized view mv_permute_big as
+select * from t match_recognize (
+  partition by id
+  order by ts
+  measures count(*) as n
+  one row per match
+  pattern (permute(a, b, c, d, e, f, g))
+  define a as a.v > 0
+);
+
+statement ok
+drop table t;

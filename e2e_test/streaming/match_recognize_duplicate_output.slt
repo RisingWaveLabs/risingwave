@@ -1,0 +1,44 @@
+# Streaming MATCH_RECOGNIZE where two distinct matches in the same partition produce byte-identical
+# (partition + measures) output. These rows are not distinguishable by their visible columns, so the
+# operator appends a hidden per-match id as the unique stream key; both matches must be emitted (the
+# downstream materialized view must not collide on, or dedupe, them).
+
+statement ok
+set streaming_parallelism = 1;
+
+statement ok
+set rw_implicit_flush to true;
+
+statement ok
+create table t (id int, ts int, v int, watermark for ts as ts - 10) append only;
+
+statement ok
+create materialized view mv_dup as
+select * from t match_recognize (
+  partition by id
+  order by ts
+  measures b.v as dip
+  one row per match
+  after match skip past last row
+  pattern (a b)
+  define a as a.v > 0, b as b.v < 0
+);
+
+# Two (up, down) matches in partition 1, both with dip = -1: identical output rows. ts=5 finalizes
+# the second match and the sentinel advances the watermark.
+statement ok
+insert into t values
+  (1, 1, 5), (1, 2, -1), (1, 3, 5), (1, 4, -1), (1, 5, 0),
+  (0, 1000, 0);
+
+query II rowsort
+select * from mv_dup;
+----
+1 -1
+1 -1
+
+statement ok
+drop materialized view mv_dup;
+
+statement ok
+drop table t;

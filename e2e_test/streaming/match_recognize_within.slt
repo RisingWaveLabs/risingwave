@@ -1,0 +1,84 @@
+# Streaming MATCH_RECOGNIZE WITHIN: a match whose span (last - first ORDER BY value) exceeds the
+# bound is rejected. This is a streaming extension (Flink-style); BigQuery, being batch, has no
+# WITHIN.
+
+statement ok
+set streaming_parallelism = 1;
+
+statement ok
+set rw_implicit_flush to true;
+
+statement ok
+create table t (id int, ts int, v int, watermark for ts as ts - 100) append only;
+
+# (a b) must complete WITHIN a span of 3 in the ORDER BY column.
+statement ok
+create materialized view mv_within as
+select * from t match_recognize (
+  partition by id
+  order by ts
+  measures a.ts as t0, b.v as dip
+  one row per match
+  after match skip past last row
+  pattern (a b)
+  within 3
+  define a as a.v > 0, b as b.v < 0
+);
+
+# id=1: (ts1 up, ts2 down) -> span 1 <= 3, matches. (ts10 up, ts14 down) -> span 4 > 3, rejected.
+# ts15 finalizes the second (rejected) candidate; sentinel advances the watermark.
+statement ok
+insert into t values
+  (1, 1, 5), (1, 2, -1), (1, 10, 5), (1, 14, -1), (1, 15, 9),
+  (0, 1000, 0);
+
+query III rowsort
+select * from mv_within;
+----
+1 1 -1
+
+statement ok
+drop materialized view mv_within;
+
+statement ok
+drop table t;
+
+# A WITHIN bound whose addition widens the ORDER BY type is rejected at bind time. The bound doubles
+# as a per-row deadline compared directly against the order key and the watermark, and a mismatched
+# datum there panics the actor rather than erroring — so this has to fail before the job is created.
+statement ok
+create table t_narrow (id int, ts smallint, v int, watermark for ts as ts) append only;
+
+# `2` binds as int4, so `int2 + int4` yields an int4 deadline against an int2 order key.
+statement error widens the ORDER BY type
+create materialized view mv_narrow as
+select * from t_narrow match_recognize (
+  partition by id
+  order by ts
+  measures count(*) as n
+  one row per match
+  after match skip past last row
+  pattern (a+)
+  within 2
+  define a as a.v > 0
+) as m;
+
+# Casting the bound to the order key's type is the documented way through.
+statement ok
+create materialized view mv_narrow as
+select * from t_narrow match_recognize (
+  partition by id
+  order by ts
+  measures count(*) as n
+  one row per match
+  after match skip past last row
+  pattern (a+)
+  within 2::smallint
+  define a as a.v > 0
+) as m;
+
+statement ok
+drop materialized view mv_narrow;
+
+statement ok
+drop table t_narrow;

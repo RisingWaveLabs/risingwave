@@ -17,6 +17,7 @@ ot = "ot"
 bui = "bui"             # BackwardUserIterator
 mosquitto = "mosquitto" # This is a MQTT broker.
 abd = "abd"
+ba = "ba"               # NFA pattern "b then a" in MATCH_RECOGNIZE tests
 iy = "iy"
 Pn = "Pn"
 barreir = "barrier"

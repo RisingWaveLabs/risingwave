@@ -1,0 +1,196 @@
+# Terminal-path finality: a boundary match that cannot extend is emitted without waiting.
+#
+# The emit guard holds a match ending at the decision boundary so a later decided row can prove the
+# greedy match maximal. For a pattern whose accepting path is TERMINAL — no continuation of the
+# automaton could consume another row, e.g. a fixed `(a b)` — that wait is for a proof that nothing
+# could ever supply, and without WITHIN it starves: the frontier recompute finds neither a future
+# row nor a deadline, drops the partition, and the last complete match of an idle partition is never
+# emitted unless an unrelated row happens to arrive. Finality must distinguish "the accepting path
+# can still extend" (hold) from "already terminal" (emit now).
+
+statement ok
+set streaming_parallelism = 1;
+
+statement ok
+set rw_implicit_flush to true;
+
+# ---------------------------------------------------------------------------------------------
+# Scenario 1: fixed (a b), no WITHIN, an advancing watermark, then an IDLE partition. No trailing
+# partition-1 row, no WITHIN deadline -- the match must still appear.
+# ---------------------------------------------------------------------------------------------
+
+statement ok
+create table t_term (id int, ts int, v int, watermark for ts as ts - 1) append only;
+
+statement ok
+create materialized view mv_term as
+select * from t_term match_recognize (
+  partition by id
+  order by ts
+  measures a.ts as a_ts, b.v as dip
+  one row per match
+  after match skip past last row
+  pattern (a b)
+  define a as a.v > 0, b as b.v < 0
+);
+
+statement ok
+insert into t_term values (1, 10, 5), (1, 11, -1);
+
+# The sentinel (partition 9) advances the watermark strictly past both rows; partition 1 then goes
+# idle forever.
+statement ok
+insert into t_term values (9, 13, 0);
+
+query II rowsort
+select a_ts, dip from mv_term;
+----
+10 -1
+
+statement ok
+drop materialized view mv_term;
+
+statement ok
+drop table t_term;
+
+# ---------------------------------------------------------------------------------------------
+# Scenario 2: the contrast -- an extendable accepting path (a b+) must STILL be held: a future `b`
+# could legally extend the greedy match, so without WITHIN there is genuinely no point at which it
+# is final. Only a closing non-matching row makes it emittable.
+# ---------------------------------------------------------------------------------------------
+
+statement ok
+create table t_term_open (id int, ts int, v int, watermark for ts as ts - 1) append only;
+
+statement ok
+create materialized view mv_term_open as
+select * from t_term_open match_recognize (
+  partition by id
+  order by ts
+  measures a.ts as a_ts, count(*) as n
+  one row per match
+  after match skip past last row
+  pattern (a b+)
+  define a as a.v > 0, b as b.v < 0
+);
+
+statement ok
+insert into t_term_open values (1, 10, 5), (1, 11, -1);
+
+statement ok
+insert into t_term_open values (9, 13, 0);
+
+# Open quantifier at the boundary: held, correctly -- nothing emitted yet.
+query II rowsort
+select a_ts, n from mv_term_open;
+----
+
+# A later non-matching partition-1 row closes it (b fails on v=7), and the watermark passes.
+statement ok
+insert into t_term_open values (1, 20, 7);
+
+statement ok
+insert into t_term_open values (9, 22, 0);
+
+query II rowsort
+select a_ts, n from mv_term_open;
+----
+10 2
+
+statement ok
+drop materialized view mv_term_open;
+
+statement ok
+drop table t_term_open;
+
+# ---------------------------------------------------------------------------------------------
+# Scenario 3: ordered alternation is terminal through PREFERENCE. After (a, b), the first-listed
+# `b` branch has already produced the finder's preferred result; a later `c` could only complete
+# the lower-priority `b c` branch, which can never override it. The match is final immediately —
+# holding it would wait for an outcome the finder cannot return.
+# ---------------------------------------------------------------------------------------------
+
+statement ok
+create table t_term_alt (id int, ts int, v int, watermark for ts as ts - 1) append only;
+
+statement ok
+create materialized view mv_term_alt as
+select * from t_term_alt match_recognize (
+  partition by id
+  order by ts
+  measures a.ts as a_ts, count(*) as n
+  one row per match
+  after match skip past last row
+  pattern (a (b | b c))
+  define a as a.v > 0, b as b.v < 0, c as c.v > 100
+);
+
+statement ok
+insert into t_term_alt values (1, 10, 5), (1, 11, -1);
+
+statement ok
+insert into t_term_alt values (9, 13, 0);
+
+# The first-listed branch already accepted and outranks `b c` forever: emitted now, idle partition
+# notwithstanding.
+query II rowsort
+select a_ts, n from mv_term_alt;
+----
+10 2
+
+statement ok
+drop materialized view mv_term_alt;
+
+statement ok
+drop table t_term_alt;
+
+# ---------------------------------------------------------------------------------------------
+# Scenario 4: the same alternation with the LONGER branch listed first. Now a future `c` WOULD
+# produce the preferred result, so the two-row match must be held until the `c` possibility is
+# closed by a non-matching row. Preference order, not structure, decides.
+# ---------------------------------------------------------------------------------------------
+
+statement ok
+create table t_term_alt_rev (id int, ts int, v int, watermark for ts as ts - 1) append only;
+
+statement ok
+create materialized view mv_term_alt_rev as
+select * from t_term_alt_rev match_recognize (
+  partition by id
+  order by ts
+  measures a.ts as a_ts, count(*) as n
+  one row per match
+  after match skip past last row
+  pattern (a (b c | b))
+  define a as a.v > 0, b as b.v < 0, c as c.v > 100
+);
+
+statement ok
+insert into t_term_alt_rev values (1, 10, 5), (1, 11, -1);
+
+statement ok
+insert into t_term_alt_rev values (9, 13, 0);
+
+# `b c` is preferred and only blocked on the missing `c` row: held.
+query II rowsort
+select a_ts, n from mv_term_alt_rev;
+----
+
+# The next row is not a `c` (7 <= 100): the preferred branch dies on real data, the two-row match
+# via the second branch is final.
+statement ok
+insert into t_term_alt_rev values (1, 20, 7);
+
+statement ok
+insert into t_term_alt_rev values (9, 22, 0);
+
+query II rowsort
+select a_ts, n from mv_term_alt_rev;
+----
+10 2
+
+statement ok
+drop materialized view mv_term_alt_rev;
+
+statement ok
+drop table t_term_alt_rev;

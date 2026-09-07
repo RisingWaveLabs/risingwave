@@ -254,7 +254,7 @@
     explain create materialized view mv as select t.ts, unnest(Array[1,2,3]) from t emit on window close;
   explain_output: |
     StreamMaterialize { columns: [_rw_projected_row_id(hidden), ts, unnest, t._row_id(hidden)], stream_key: [t._row_id, _rw_projected_row_id], pk_columns: [t._row_id, _rw_projected_row_id], pk_conflict: NoCheck, watermark_columns: [ts] }
-    └─StreamEowcSort { sort_column: t.ts }
+    └─StreamWatermarkSort { sort_column: t.ts }
       └─StreamProjectSet { select_list: [$0, Unnest(ARRAY[1, 2, 3]:List(Int32)), $1] }
         └─StreamTableScan { table: t, columns: [ts, _row_id] }
 - name: asof join

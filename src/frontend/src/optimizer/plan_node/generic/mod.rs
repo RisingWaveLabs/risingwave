@@ -47,6 +47,8 @@ mod filter;
 pub use filter::*;
 mod gap_fill;
 pub use gap_fill::*;
+mod match_recognize;
+pub use match_recognize::*;
 mod expand;
 pub use expand::*;
 mod source;

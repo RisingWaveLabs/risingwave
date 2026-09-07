@@ -1163,6 +1163,196 @@ message GapFillNode {
   repeated uint32 pointer_key_indices = 7;
 }
 
+// SQL:2016 MATCH_RECOGNIZE (row pattern recognition). v1: append-only input,
+// ONE ROW PER MATCH. PARTITION BY / ORDER BY are input column indices.
+message MatchRecognizeNode {
+  repeated uint32 partition_by = 1;
+  // ORDER BY keys, carried as ColumnOrder like every other ordered streaming node. v1 only supports
+  // the default ascending order (the binder rejects DESC / explicit NULLS); the executor asserts it.
+  repeated common.ColumnOrder order_by = 2;
+  repeated MatchRecognizeMeasure measures = 3;
+  repeated MatchRecognizeDefine defines = 5;
+  // The PATTERN clause as a structured tree (the v1 subset: variables, concatenation, alternation,
+  // quantification and PERMUTE; anchors and exclusions are rejected at parse time). Field 7
+  // previously carried the pattern as text; it is now reserved.
+  MatchRecognizePatternNode pattern_node = 12;
+  // Rows referenced by live partial matches, keyed (partition..., order..., seq): the retained
+  // window the matcher re-feeds on recovery. Input arrives already ordered (see `input_mode`), so
+  // this holds only what live matches still need -- there is no out-of-order buffer here.
+  catalog.Table state_table = 8;
+  // AFTER MATCH SKIP strategy.
+  MatchRecognizeAfterMatchSkip after_match_skip = 9;
+  // WITHIN span check: a predicate over a synthetic `[last_order_key, first_order_key]` row
+  // (`InputRef(0) - InputRef(1) <= interval`). Absent when there is no WITHIN clause.
+  optional expr.ExprNode within = 11;
+  // WITHIN deadline: `first_order_key + interval` over a synthetic `[first_order_key]` row
+  // (`InputRef(0) + interval`). The watermark at which a partial starting at that row expires;
+  // used to wake an idle partition to evict it. Absent when there is no WITHIN clause.
+  optional expr.ExprNode within_deadline = 15;
+
+  // How the ordered-input requirement is satisfied. EVENT_TIME: a WatermarkSort upstream (same
+  // fragment) emits rows in full ORDER BY order, strictly below each forwarded watermark.
+  // PROCESSING_TIME (not yet planned): rows are matched in observed arrival order.
+  MatchRecognizeInputMode input_mode = 16;
+
+  reserved 7, 13, 14;
+  reserved "pattern", "frontier_meta_table", "frontier_index_table";
+}
+
+enum MatchRecognizeInputMode {
+  MATCH_RECOGNIZE_INPUT_MODE_UNSPECIFIED = 0;
+  MATCH_RECOGNIZE_INPUT_MODE_EVENT_TIME = 1;
+  MATCH_RECOGNIZE_INPUT_MODE_PROCESSING_TIME = 2;
+}
+
+// A node in the structured row pattern tree, mirroring the executor-side pattern AST. Groups and
+// anchors are not represented: parenthesized groups are flattened during lowering, and anchors /
+// exclusions are rejected at planning time (not supported in v1).
+message MatchRecognizePatternNode {
+  oneof node {
+    // A pattern variable, e.g. `A`.
+    string var = 1;
+    // Concatenation, e.g. `A B C`.
+    MatchRecognizePatternSeq concat = 2;
+    // Alternation, e.g. `A | B | C`.
+    MatchRecognizePatternSeq alternation = 3;
+    // A quantified sub-pattern, e.g. `A+`.
+    MatchRecognizeQuantifiedPattern quantified = 4;
+    // `PERMUTE(a, b, ...)`.
+    MatchRecognizePermutePattern permute = 5;
+  }
+}
+
+// An ordered list of sub-patterns (the operands of a concatenation or alternation).
+message MatchRecognizePatternSeq {
+  repeated MatchRecognizePatternNode patterns = 1;
+}
+
+// `PERMUTE(a, b, ...)` over the listed pattern variables.
+message MatchRecognizePermutePattern {
+  repeated string vars = 1;
+}
+
+// A sub-pattern with a quantifier, e.g. `A+`, `A*?`, `A{1,3}`.
+message MatchRecognizeQuantifiedPattern {
+  MatchRecognizePatternNode inner = 1;
+  MatchRecognizeQuantifier quantifier = 2;
+  // A trailing `?` (e.g. `A*?`) — prefer the fewest repetitions.
+  bool reluctant = 3;
+}
+
+// A row-pattern quantifier.
+message MatchRecognizeQuantifier {
+  enum Kind {
+    KIND_UNSPECIFIED = 0;
+    // `*`
+    KIND_STAR = 1;
+    // `+`
+    KIND_PLUS = 2;
+    // `?`
+    KIND_QUESTION = 3;
+    // `{min,max}` (and its `{n}`, `{n,}`, `{,m}` forms).
+    KIND_RANGE = 4;
+  }
+  Kind kind = 1;
+  // For RANGE: minimum repetitions (defaults to 0).
+  uint32 min = 2;
+  // For RANGE: maximum repetitions; absent means unbounded.
+  optional uint32 max = 3;
+}
+
+// A DEFINE predicate. The condition is evaluated, per candidate row during matching, over a
+// synthetic row whose i-th column is produced by slots[i] from the candidate row, its physical
+// neighbours, and the in-progress match's labels.
+message MatchRecognizeDefine {
+  string symbol = 1;
+  // Predicate over the synthetic slot row: an InputRef(i) reads slots[i].
+  expr.ExprNode condition = 2;
+  repeated MatchRecognizeDefineSlot slots = 3;
+}
+
+// The AFTER MATCH SKIP clause: where the scan resumes after an emitted match.
+message MatchRecognizeAfterMatchSkip {
+  enum Mode {
+    MODE_UNSPECIFIED = 0;
+    // Resume past the match's last row (the default).
+    MODE_PAST_LAST_ROW = 1;
+    // Resume at the row after the match's first row.
+    MODE_TO_NEXT_ROW = 2;
+    // Resume at the first / last row bound to `target` within the match.
+    MODE_TO_FIRST = 3;
+    MODE_TO_LAST = 4;
+  }
+  Mode mode = 1;
+  // Target pattern variable, for TO_FIRST / TO_LAST only.
+  optional string target = 2;
+}
+
+// One input a DEFINE predicate reads.
+message MatchRecognizeDefineSlot {
+  enum Kind {
+    KIND_UNSPECIFIED = 0;
+    // The candidate row's own column.
+    KIND_SELF_COL = 1;
+    // PREV(col, offset) / NEXT(col, offset): a physical-offset row's column.
+    KIND_PREV = 2;
+    KIND_NEXT = 3;
+    // FIRST(var.col) / LAST(var.col): RUNNING navigation — the first / last row of the match so
+    // far that belongs to `vars`. The candidate row belongs to `vars` whenever `vars` contains the
+    // variable being defined: its label is still tentative, so it is not yet among the match's
+    // labels, but the standard counts it (a `var.col` reference *is* RUNNING LAST of that column).
+    KIND_RUNNING_FIRST = 4;
+    KIND_RUNNING_LAST = 5;
+  }
+  Kind kind = 1;
+  repeated string vars = 2;
+  uint32 col_idx = 3;
+  uint32 offset = 4;
+}
+
+// One MEASURES item. The expression is evaluated over a synthetic per-match row whose i-th column is
+// produced by `slots[i]`; the executor materializes that row once the match and its per-row pattern
+// variable labels are known.
+message MatchRecognizeMeasure {
+  // Expression over the synthetic row: an InputRef(i) reads slots[i].
+  expr.ExprNode expr = 1;
+  string name = 2;
+  repeated MatchRecognizeMeasureSlot slots = 3;
+}
+
+// One navigation input of a measure expression.
+message MatchRecognizeMeasureSlot {
+  enum Kind {
+    KIND_UNSPECIFIED = 0;
+    // LAST(var.col): column value of the last row labeled `var` in the match (also the meaning of
+    // a bare `var.col` under ONE ROW PER MATCH FINAL semantics).
+    KIND_LAST = 1;
+    // FIRST(var.col): column value of the first such row.
+    KIND_FIRST = 2;
+    // CLASSIFIER(): the pattern variable bound to the match's last row (`var`/`col_idx` unused).
+    KIND_CLASSIFIER = 3;
+    // COUNT(*): number of rows in the match (`var`/`col_idx` unused).
+    KIND_COUNT_STAR = 4;
+    // COUNT(var.col): number of rows labeled `var` whose `col` is non-null.
+    KIND_COUNT = 5;
+    // MIN(var.col) / MAX(var.col): min / max of `col` over rows labeled `var`.
+    KIND_MIN = 6;
+    KIND_MAX = 7;
+    // SUM(var.col): evaluated by `agg_call` over the rows labeled `var`. (AVG is lowered by the
+    // planner into a SUM slot plus a COUNT slot and a division expression.)
+    KIND_SUM = 8;
+  }
+  Kind kind = 1;
+  // The pattern variables this slot navigates over: one for a plain variable, several for a SUBSET
+  // union variable. Empty for CLASSIFIER. A row matches if its label is any of these.
+  repeated string vars = 2;
+  uint32 col_idx = 3;
+  data.DataType data_type = 4;
+  // The aggregate to run for KIND_SUM, over a single input column (the projected `col_idx`) of
+  // the rows labeled by `vars`. Its single arg is an InputRef to column 0.
+  optional expr.AggCall agg_call = 5;
+}
+
 message StreamNode {
   // This field used to be a `bool append_only`.
   // Enum variants are ordered for backwards compatibility.
@@ -1231,6 +1421,7 @@ message StreamNode {
     VectorIndexLookupJoinNode vector_index_lookup_join = 155;
     IcebergWithPkIndexWriterNode iceberg_with_pk_index_writer = 156;
     IcebergWithPkIndexPositionDeleteMergerNode iceberg_with_pk_index_position_delete_merger = 157;
+    MatchRecognizeNode match_recognize = 158;
     CompactionResolverNode compaction_resolver = 159;
   }
   // The id for the operator. This is local per mview.

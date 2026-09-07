@@ -1,0 +1,108 @@
+# WITHIN boundary finality.
+#
+# A match whose span is exactly the WITHIN bound, and whose last row is the final safe row (no
+# trailing row follows it), must still be emitted. Once the watermark passes the match's WITHIN
+# deadline (first row's order_key + interval), no future row can legally extend it — any extension
+# would fall inside the now-fully-safe window — so the match is final.
+#
+# Regression for a bug where the emit path waited for a trailing safe row to confirm greedy
+# maximality (`m.end >= safe_len` -> skip) while the WITHIN-eviction path deleted the rows first
+# (the deadline having been cleared by the watermark), silently dropping a valid boundary match.
+
+statement ok
+set streaming_parallelism = 1;
+
+statement ok
+set rw_implicit_flush to true;
+
+# Self-cleaning: this test intentionally fails on unpatched code, aborting before its own drops, so
+# guard the re-run against leftovers rather than needing a clean-data.
+statement ok
+drop materialized view if exists mv_boundary;
+
+statement ok
+drop materialized view if exists mv_over;
+
+statement ok
+drop table if exists t;
+
+statement ok
+drop table if exists t2;
+
+statement ok
+create table t (id int, ts int, v int, watermark for ts as ts - 1) append only;
+
+statement ok
+create materialized view mv_boundary as
+select * from t match_recognize (
+  partition by id
+  order by ts
+  measures a.ts as a_ts, b.v as dip
+  one row per match
+  after match skip past last row
+  pattern (a b)
+  within 3
+  define a as a.v > 0, b as b.v < 0
+);
+
+# a@10, b@13: span 13 - 10 = 3, exactly the WITHIN bound -> valid. Partition 1 has no trailing row;
+# the sentinel in partition 2 (ts 15, lateness 1) advances the watermark to 14 -- strictly past this
+# match's deadline (10 + 3 = 13). No future row can extend it, so it must be emitted, not evicted.
+# (The watermark must clear the deadline strictly: at watermark 13 a completing row at ts 13 is still
+# admissible, so the match is not yet final -- see match_recognize_watermark_boundary.slt.)
+statement ok
+insert into t values (1, 10, 5);
+
+statement ok
+insert into t values (1, 13, -1);
+
+statement ok
+insert into t values (2, 15, 0);
+
+query III rowsort
+select * from mv_boundary;
+----
+1 10 -1
+
+statement ok
+drop materialized view mv_boundary;
+
+statement ok
+drop table t;
+
+# Contrast: an over-span match (span > WITHIN) must NOT be emitted, so the boundary fix does not
+# over-emit. a@10, b@14 -> span 4 > 3, rejected by the matcher's WITHIN prune.
+statement ok
+create table t2 (id int, ts int, v int, watermark for ts as ts - 1) append only;
+
+statement ok
+create materialized view mv_over as
+select * from t2 match_recognize (
+  partition by id
+  order by ts
+  measures a.ts as a_ts, b.v as dip
+  one row per match
+  after match skip past last row
+  pattern (a b)
+  within 3
+  define a as a.v > 0, b as b.v < 0
+);
+
+statement ok
+insert into t2 values (1, 10, 5);
+
+statement ok
+insert into t2 values (1, 14, -1);
+
+statement ok
+insert into t2 values (2, 20, 0);
+
+query III rowsort
+select * from mv_over;
+----
+
+statement ok
+drop materialized view mv_over;
+
+statement ok
+drop table t2;

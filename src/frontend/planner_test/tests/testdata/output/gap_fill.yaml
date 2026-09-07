@@ -101,7 +101,7 @@
   eowc_stream_plan: |-
     StreamMaterialize { columns: [id, ts, val], stream_key: [ts], pk_columns: [ts], pk_conflict: NoCheck }
     └─StreamEowcGapFill { time_col: $1, interval: '00:01:00':Interval, fill_strategies: [BoundFillStrategy { strategy: Locf, target_col: $2 }] }
-      └─StreamEowcSort { sort_column: t.ts }
+      └─StreamWatermarkSort { sort_column: t.ts }
         └─StreamExchange { dist: Single }
           └─StreamTableScan { table: t, columns: [t.id, t.ts, t.val], stream_scan_type: SnapshotBackfill, stream_key: [t.ts], pk: [ts], dist: UpstreamHashShard(t.ts) }
   eowc_stream_dist_plan: |+
@@ -109,7 +109,7 @@
     StreamMaterialize { columns: [id, ts, val], stream_key: [ts], pk_columns: [ts], pk_conflict: NoCheck }
     └── StreamEowcGapFill { time_col: $1, interval: '00:01:00':Interval, fill_strategies: [BoundFillStrategy { strategy: Locf, target_col: $2 }] }
         ├── tables: [ EowcGapFillPrevRowTable: 0 ]
-        └── StreamEowcSort { sort_column: t.ts } { tables: [ Sort: 1 ] }
+        └── StreamWatermarkSort { sort_column: t.ts } { tables: [ Sort: 1 ] }
             └── StreamExchange Single from 1
 
     Fragment 1
@@ -159,7 +159,7 @@
   eowc_stream_plan: |-
     StreamMaterialize { columns: [ts, val], stream_key: [ts], pk_columns: [ts], pk_conflict: NoCheck }
     └─StreamEowcGapFill { time_col: $0, interval: '00:01:00':Interval, fill_strategies: [BoundFillStrategy { strategy: Interpolate, target_col: $1 }] }
-      └─StreamEowcSort { sort_column: t.ts }
+      └─StreamWatermarkSort { sort_column: t.ts }
         └─StreamExchange { dist: Single }
           └─StreamTableScan { table: t, columns: [t.ts, t.val], stream_scan_type: SnapshotBackfill, stream_key: [t.ts], pk: [ts], dist: UpstreamHashShard(t.ts) }
   eowc_stream_dist_plan: |+
@@ -167,7 +167,7 @@
     StreamMaterialize { columns: [ts, val], stream_key: [ts], pk_columns: [ts], pk_conflict: NoCheck }
     └── StreamEowcGapFill { time_col: $0, interval: '00:01:00':Interval, fill_strategies: [BoundFillStrategy { strategy: Interpolate, target_col: $1 }] }
         ├── tables: [ EowcGapFillPrevRowTable: 0 ]
-        └── StreamEowcSort { sort_column: t.ts } { tables: [ Sort: 1 ] }
+        └── StreamWatermarkSort { sort_column: t.ts } { tables: [ Sort: 1 ] }
             └── StreamExchange Single from 1
 
     Fragment 1
@@ -217,7 +217,7 @@
   eowc_stream_plan: |-
     StreamMaterialize { columns: [ts, name], stream_key: [ts], pk_columns: [ts], pk_conflict: NoCheck }
     └─StreamEowcGapFill { time_col: $0, interval: '00:01:00':Interval, fill_strategies: [BoundFillStrategy { strategy: Null, target_col: $1 }] }
-      └─StreamEowcSort { sort_column: t.ts }
+      └─StreamWatermarkSort { sort_column: t.ts }
         └─StreamExchange { dist: Single }
           └─StreamTableScan { table: t, columns: [t.ts, t.name], stream_scan_type: SnapshotBackfill, stream_key: [t.ts], pk: [ts], dist: UpstreamHashShard(t.ts) }
   eowc_stream_dist_plan: |+
@@ -225,7 +225,7 @@
     StreamMaterialize { columns: [ts, name], stream_key: [ts], pk_columns: [ts], pk_conflict: NoCheck }
     └── StreamEowcGapFill { time_col: $0, interval: '00:01:00':Interval, fill_strategies: [BoundFillStrategy { strategy: Null, target_col: $1 }] }
         ├── tables: [ EowcGapFillPrevRowTable: 0 ]
-        └── StreamEowcSort { sort_column: t.ts } { tables: [ Sort: 1 ] }
+        └── StreamWatermarkSort { sort_column: t.ts } { tables: [ Sort: 1 ] }
             └── StreamExchange Single from 1
 
     Fragment 1
@@ -275,7 +275,7 @@
   eowc_stream_plan: |-
     StreamMaterialize { columns: [ts, temp, status], stream_key: [ts], pk_columns: [ts], pk_conflict: NoCheck }
     └─StreamEowcGapFill { time_col: $0, interval: '00:01:00':Interval, fill_strategies: [BoundFillStrategy { strategy: Interpolate, target_col: $1 }, BoundFillStrategy { strategy: Null, target_col: $2 }] }
-      └─StreamEowcSort { sort_column: t.ts }
+      └─StreamWatermarkSort { sort_column: t.ts }
         └─StreamExchange { dist: Single }
           └─StreamTableScan { table: t, columns: [t.ts, t.temp, t.status], stream_scan_type: SnapshotBackfill, stream_key: [t.ts], pk: [ts], dist: UpstreamHashShard(t.ts) }
   eowc_stream_dist_plan: |+
@@ -283,7 +283,7 @@
     StreamMaterialize { columns: [ts, temp, status], stream_key: [ts], pk_columns: [ts], pk_conflict: NoCheck }
     └── StreamEowcGapFill { time_col: $0, interval: '00:01:00':Interval, fill_strategies: [BoundFillStrategy { strategy: Interpolate, target_col: $1 }, BoundFillStrategy { strategy: Null, target_col: $2 }] }
         ├── tables: [ EowcGapFillPrevRowTable: 0 ]
-        └── StreamEowcSort { sort_column: t.ts } { tables: [ Sort: 1 ] }
+        └── StreamWatermarkSort { sort_column: t.ts } { tables: [ Sort: 1 ] }
             └── StreamExchange Single from 1
 
     Fragment 1
@@ -317,7 +317,7 @@
   eowc_stream_plan: |-
     StreamMaterialize { columns: [ts, val], stream_key: [ts], pk_columns: [ts], pk_conflict: NoCheck }
     └─StreamEowcGapFill { time_col: $0, interval: '01:00:00':Interval, fill_strategies: [BoundFillStrategy { strategy: Locf, target_col: $1 }] }
-      └─StreamEowcSort { sort_column: t.ts }
+      └─StreamWatermarkSort { sort_column: t.ts }
         └─StreamExchange { dist: Single }
           └─StreamTableScan { table: t, columns: [t.ts, t.val], stream_scan_type: SnapshotBackfill, stream_key: [t.ts], pk: [ts], dist: UpstreamHashShard(t.ts) }
   eowc_stream_dist_plan: |+
@@ -325,7 +325,7 @@
     StreamMaterialize { columns: [ts, val], stream_key: [ts], pk_columns: [ts], pk_conflict: NoCheck }
     └── StreamEowcGapFill { time_col: $0, interval: '01:00:00':Interval, fill_strategies: [BoundFillStrategy { strategy: Locf, target_col: $1 }] }
         ├── tables: [ EowcGapFillPrevRowTable: 0 ]
-        └── StreamEowcSort { sort_column: t.ts } { tables: [ Sort: 1 ] }
+        └── StreamWatermarkSort { sort_column: t.ts } { tables: [ Sort: 1 ] }
             └── StreamExchange Single from 1
 
     Fragment 1
@@ -379,7 +379,7 @@
     └─StreamProject { exprs: [t.id, t.ts] }
       └─StreamFilter { predicate: (t.id = 1:Int32) }
         └─StreamEowcGapFill { time_col: $1, interval: '00:01:00':Interval, fill_strategies: [BoundFillStrategy { strategy: Locf, target_col: $2 }] }
-          └─StreamEowcSort { sort_column: t.ts }
+          └─StreamWatermarkSort { sort_column: t.ts }
             └─StreamExchange { dist: Single }
               └─StreamTableScan { table: t, columns: [t.id, t.ts, t.val], stream_scan_type: SnapshotBackfill, stream_key: [t.ts], pk: [ts], dist: UpstreamHashShard(t.ts) }
   eowc_stream_dist_plan: |+
@@ -389,7 +389,7 @@
         └── StreamFilter { predicate: (t.id = 1:Int32) }
             └── StreamEowcGapFill { time_col: $1, interval: '00:01:00':Interval, fill_strategies: [BoundFillStrategy { strategy: Locf, target_col: $2 }] }
                 ├── tables: [ EowcGapFillPrevRowTable: 0 ]
-                └── StreamEowcSort { sort_column: t.ts } { tables: [ Sort: 1 ] }
+                └── StreamWatermarkSort { sort_column: t.ts } { tables: [ Sort: 1 ] }
                     └── StreamExchange Single from 1
 
     Fragment 1
@@ -624,7 +624,7 @@
   eowc_stream_plan: |-
     StreamMaterialize { columns: [device_id, ts, val], stream_key: [device_id, ts], pk_columns: [device_id, ts], pk_conflict: NoCheck }
     └─StreamEowcGapFill { time_col: $1, interval: '00:01:00':Interval, fill_strategies: [BoundFillStrategy { strategy: Locf, target_col: $2 }], partition_by: [$0] }
-      └─StreamEowcSort { sort_column: t.ts }
+      └─StreamWatermarkSort { sort_column: t.ts }
         └─StreamExchange { dist: HashShard(t.device_id) }
           └─StreamTableScan { table: t, columns: [t.device_id, t.ts, t.val], stream_scan_type: SnapshotBackfill, stream_key: [t.device_id, t.ts], pk: [device_id, ts], dist: UpstreamHashShard(t.device_id, t.ts) }
   eowc_stream_dist_plan: |+
@@ -632,7 +632,7 @@
     StreamMaterialize { columns: [device_id, ts, val], stream_key: [device_id, ts], pk_columns: [device_id, ts], pk_conflict: NoCheck }
     └── StreamEowcGapFill { time_col: $1, interval: '00:01:00':Interval, fill_strategies: [BoundFillStrategy { strategy: Locf, target_col: $2 }], partition_by: [$0] }
         ├── tables: [ EowcGapFillPrevRowTable: 0 ]
-        └── StreamEowcSort { sort_column: t.ts } { tables: [ Sort: 1 ] }
+        └── StreamWatermarkSort { sort_column: t.ts } { tables: [ Sort: 1 ] }
             └── StreamExchange Hash([0]) from 1
 
     Fragment 1

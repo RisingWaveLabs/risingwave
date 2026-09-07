@@ -1,0 +1,50 @@
+# Streaming MATCH_RECOGNIZE MEASURES navigation: FIRST/LAST per pattern variable, bare `var.col`
+# (= LAST under FINAL semantics), and arithmetic combining variables. This exercises per-variable
+# resolution: a bare `a.col` must read the last row labeled `a`, not the match's last row.
+
+statement ok
+set streaming_parallelism = 1;
+
+statement ok
+set rw_implicit_flush to true;
+
+statement ok
+create table t (id int, ts int, v int, watermark for ts as ts - 10) append only;
+
+# pattern (a+ b): one or more rising rows then a falling row.
+#   first_up = FIRST(a.v), last_up = LAST(a.v), dip = b.v (= LAST(b.v)),
+#   spread = b.v - a.v (both resolve to their variable's last row: -5 - 20),
+#   cls = CLASSIFIER() (the last row's variable = 'b').
+statement ok
+create materialized view mv_nav as
+select * from t match_recognize (
+  partition by id
+  order by ts
+  measures
+    first(a.v) as first_up,
+    last(a.v) as last_up,
+    b.v as dip,
+    b.v - a.v as spread,
+    classifier() as cls
+  one row per match
+  after match skip past last row
+  pattern (a+ b)
+  define a as a.v > 0, b as b.v < 0
+);
+
+# id=1: up(10) up(20) down(-5) then a trailing up(1) to finalize the match; sentinel advances wm.
+statement ok
+insert into t values
+  (1, 1, 10), (1, 2, 20), (1, 3, -5), (1, 4, 1),
+  (0, 100, 0);
+
+query IIIIIT rowsort
+select * from mv_nav;
+----
+1 10 20 -5 -25 b
+
+statement ok
+drop materialized view mv_nav;
+
+statement ok
+drop table t;

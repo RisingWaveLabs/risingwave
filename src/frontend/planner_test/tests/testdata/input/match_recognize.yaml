@@ -1,0 +1,983 @@
+- name: MATCH_RECOGNIZE plans end-to-end to a WatermarkSort plus MatchRecognize pipeline
+  sql: |
+    create table t(id int, ts int, v int, watermark for ts as ts - 10) append only;
+    select * from t match_recognize (
+      partition by id
+      order by ts
+      measures b.v as dip
+      one row per match
+      after match skip past last row
+      pattern (a b)
+      define a as a.v > 0, b as b.v < 0
+    );
+  expected_outputs:
+    - logical_plan
+    - stream_plan
+- name: MATCH_RECOGNIZE predicate pushdown visits every shared CTE parent
+  sql: |
+    create table t(id int, ts int, v int, watermark for ts as ts - 10) append only;
+    with cte as (select * from t)
+    select * from cte match_recognize (
+      partition by id
+      order by ts
+      measures a.v as value
+      one row per match
+      after match skip past last row
+      pattern (a)
+      define a as a.v > 0
+    )
+    union all
+    select id, v from cte;
+  expected_outputs:
+    - logical_plan
+- name: MATCH_RECOGNIZE with a CLASSIFIER() measure
+  sql: |
+    create table t(id int, ts int, v int, watermark for ts as ts - 10) append only;
+    select * from t match_recognize (
+      partition by id
+      order by ts
+      measures classifier() as cls, b.v as dip
+      one row per match
+      after match skip past last row
+      pattern (a b)
+      define a as a.v > 0, b as b.v < 0
+    );
+  expected_outputs:
+    - logical_plan
+    - stream_plan
+- name: MATCH_RECOGNIZE with aggregate MEASURES over matched rows
+  sql: |
+    create table t(id int, ts int, v int, watermark for ts as ts - 10) append only;
+    select * from t match_recognize (
+      partition by id
+      order by ts
+      measures count(*) as n, min(a.v) as lo, max(a.v) as hi
+      one row per match
+      after match skip past last row
+      pattern (a b)
+      define a as a.v > 0, b as b.v < 0
+    );
+  expected_outputs:
+    - logical_plan
+    - stream_plan
+- name: MATCH_RECOGNIZE stream planning requires a watermark on the leading ORDER BY column
+  sql: |
+    create table t(id int, ts int, v int) append only;
+    select * from t match_recognize (
+      partition by id
+      order by ts
+      measures b.v as dip
+      one row per match
+      after match skip past last row
+      pattern (a b)
+      define a as a.v > 0, b as b.v < 0
+    );
+  expected_outputs:
+    - stream_error
+- name: MATCH_RECOGNIZE WITHIN accepts a constant bound
+  sql: |
+    create table t(id int, ts int, v int, watermark for ts as ts - 10) append only;
+    select * from t match_recognize (
+      partition by id
+      order by ts
+      measures b.v as dip
+      one row per match
+      after match skip past last row
+      pattern (a b) within 3
+      define a as a.v > 0, b as b.v < 0
+    );
+  expected_outputs:
+    - stream_plan
+- name: MATCH_RECOGNIZE WITHIN rejects an input column reference (would evaluate against a synthetic order-key row and crash)
+  sql: |
+    create table t(id int, ts int, v int, watermark for ts as ts - 10) append only;
+    select * from t match_recognize (
+      partition by id
+      order by ts
+      measures b.v as dip
+      one row per match
+      after match skip past last row
+      pattern (a b) within v
+      define a as a.v > 0, b as b.v < 0
+    );
+  expected_outputs:
+    - binder_error
+- name: MATCH_RECOGNIZE WITHIN rejects a non-constant expression over an input column
+  sql: |
+    create table t(id int, ts int, v int, watermark for ts as ts - 10) append only;
+    select * from t match_recognize (
+      partition by id
+      order by ts
+      measures b.v as dip
+      one row per match
+      after match skip past last row
+      pattern (a b) within v + 1
+      define a as a.v > 0, b as b.v < 0
+    );
+  expected_outputs:
+    - binder_error
+- name: MATCH_RECOGNIZE rejects a non-boolean DEFINE predicate at bind time
+  sql: |
+    create table t(id int, ts int, v int, watermark for ts as ts - 10) append only;
+    select * from t match_recognize (
+      partition by id
+      order by ts
+      measures b.v as dip
+      one row per match
+      after match skip past last row
+      pattern (a b)
+      define a as a.v, b as b.v < 0
+    );
+  expected_outputs:
+    - binder_error
+- name: MATCH_RECOGNIZE navigation over a duplicated input column name is ambiguous
+  sql: |
+    create table t(id int, ts int, v int, watermark for ts as ts - 10) append only;
+    select * from (select id, ts, v as x, v + 100 as x from t) match_recognize (
+      partition by id
+      order by ts
+      measures b.ts as dip
+      one row per match
+      after match skip past last row
+      pattern (a b)
+      define a as a.ts > 0, b as prev(x) > b.ts
+    );
+  expected_outputs:
+    - binder_error
+- name: MATCH_RECOGNIZE MEASURES aggregates go through the regular signatures (no max(boolean))
+  sql: |
+    create table t(id int, ts int, flag boolean, watermark for ts as ts - 10) append only;
+    select * from t match_recognize (
+      partition by id
+      order by ts
+      measures max(a.flag) as m
+      one row per match
+      after match skip past last row
+      pattern (a+)
+      define a as a.flag
+    );
+  expected_outputs:
+    - binder_error
+- name: MATCH_RECOGNIZE reserves the hidden _match_id name against measure aliases
+  sql: |
+    create table t(id int, ts int, v int, watermark for ts as ts - 10) append only;
+    select * from t match_recognize (
+      partition by id
+      order by ts
+      measures a.v as _match_id
+      one row per match
+      after match skip past last row
+      pattern (a)
+      define a as a.v > 0
+    );
+  expected_outputs:
+    - binder_error
+- name: MATCH_RECOGNIZE MEASURES rejects a subquery (no representation in the executor's scalar expressions)
+  sql: |
+    create table t(id int, ts int, v int, watermark for ts as ts - 10) append only;
+    select * from t match_recognize (
+      partition by id
+      order by ts
+      measures (select max(v) from t) as x
+      one row per match
+      after match skip past last row
+      pattern (a b)
+      define a as a.v > 0, b as b.v < 0
+    );
+  expected_outputs:
+    - binder_error
+- name: MATCH_RECOGNIZE MEASURES rejects COUNT(DISTINCT ...) (would silently evaluate as plain COUNT)
+  sql: |
+    create table t(id int, ts int, v int, watermark for ts as ts - 10) append only;
+    select * from t match_recognize (
+      partition by id
+      order by ts
+      measures count(distinct a.v) as n
+      one row per match
+      after match skip past last row
+      pattern (a b)
+      define a as a.v > 0, b as b.v < 0
+    );
+  expected_outputs:
+    - binder_error
+- name: MATCH_RECOGNIZE MEASURES rejects an aggregate FILTER clause (would silently evaluate unfiltered)
+  sql: |
+    create table t(id int, ts int, v int, watermark for ts as ts - 10) append only;
+    select * from t match_recognize (
+      partition by id
+      order by ts
+      measures sum(a.v) filter (where a.v > 10) as s
+      one row per match
+      after match skip past last row
+      pattern (a b)
+      define a as a.v > 0, b as b.v < 0
+    );
+  expected_outputs:
+    - binder_error
+- name: MATCH_RECOGNIZE MEASURES rejects an aggregate ORDER BY clause
+  sql: |
+    create table t(id int, ts int, v int, watermark for ts as ts - 10) append only;
+    select * from t match_recognize (
+      partition by id
+      order by ts
+      measures min(a.v order by a.v) as lo
+      one row per match
+      after match skip past last row
+      pattern (a b)
+      define a as a.v > 0, b as b.v < 0
+    );
+  expected_outputs:
+    - binder_error
+- name: MATCH_RECOGNIZE MEASURES rejects an OVER clause on an aggregate
+  sql: |
+    create table t(id int, ts int, v int, watermark for ts as ts - 10) append only;
+    select * from t match_recognize (
+      partition by id
+      order by ts
+      measures max(a.v) over () as hi
+      one row per match
+      after match skip past last row
+      pattern (a b)
+      define a as a.v > 0, b as b.v < 0
+    );
+  expected_outputs:
+    - binder_error
+- name: MATCH_RECOGNIZE MEASURES rejects WITHIN GROUP on an aggregate
+  sql: |
+    create table t(id int, ts int, v int, watermark for ts as ts - 10) append only;
+    select * from t match_recognize (
+      partition by id
+      order by ts
+      measures count(a.v) within group (order by a.v) as n
+      one row per match
+      after match skip past last row
+      pattern (a b)
+      define a as a.v > 0, b as b.v < 0
+    );
+  expected_outputs:
+    - binder_error
+- name: MATCH_RECOGNIZE MEASURES rejects FILTER on FIRST/LAST navigation
+  sql: |
+    create table t(id int, ts int, v int, watermark for ts as ts - 10) append only;
+    select * from t match_recognize (
+      partition by id
+      order by ts
+      measures first(a.v) filter (where a.v > 0) as f
+      one row per match
+      after match skip past last row
+      pattern (a b)
+      define a as a.v > 0, b as b.v < 0
+    );
+  expected_outputs:
+    - binder_error
+- name: MATCH_RECOGNIZE MEASURES rejects an OVER clause on CLASSIFIER()
+  sql: |
+    create table t(id int, ts int, v int, watermark for ts as ts - 10) append only;
+    select * from t match_recognize (
+      partition by id
+      order by ts
+      measures classifier() over () as cls
+      one row per match
+      after match skip past last row
+      pattern (a b)
+      define a as a.v > 0, b as b.v < 0
+    );
+  expected_outputs:
+    - binder_error
+- name: MATCH_RECOGNIZE rejects ALL ROWS PER MATCH (not yet supported)
+  sql: |
+    create table t(id int, ts int, v int, watermark for ts as ts - 10) append only;
+    select * from t match_recognize (
+      partition by id
+      order by ts
+      measures b.v as dip
+      all rows per match
+      pattern (a b)
+      define a as a.v > 0, b as b.v < 0
+    );
+  expected_outputs:
+    - binder_error
+- name: MATCH_RECOGNIZE rejects a range quantifier whose lower bound exceeds its upper bound (silently became {5})
+  sql: |
+    create table t(id int, ts int, v int, watermark for ts as ts - 10) append only;
+    select * from t match_recognize (
+      partition by id
+      order by ts
+      measures a.v as m
+      one row per match
+      after match skip past last row
+      pattern (a{5,3} b)
+      define a as a.v > 0, b as b.v < 0
+    );
+  expected_outputs:
+    - binder_error
+- name: MATCH_RECOGNIZE rejects a range quantifier above the expansion cap (the NFA is expanded eagerly at actor build time)
+  sql: |
+    create table t(id int, ts int, v int, watermark for ts as ts - 10) append only;
+    select * from t match_recognize (
+      partition by id
+      order by ts
+      measures a.v as m
+      one row per match
+      after match skip past last row
+      pattern (a{2000} b)
+      define a as a.v > 0, b as b.v < 0
+    );
+  expected_outputs:
+    - binder_error
+- name: MATCH_RECOGNIZE rejects an at-least quantifier above the expansion cap
+  sql: |
+    create table t(id int, ts int, v int, watermark for ts as ts - 10) append only;
+    select * from t match_recognize (
+      partition by id
+      order by ts
+      measures a.v as m
+      one row per match
+      after match skip past last row
+      pattern (a{2000,} b)
+      define a as a.v > 0, b as b.v < 0
+    );
+  expected_outputs:
+    - binder_error
+- name: MATCH_RECOGNIZE rejects nested quantifiers whose product exceeds the total NFA state budget
+  sql: |
+    create table t(id int, ts int, v int, watermark for ts as ts - 10) append only;
+    select * from t match_recognize (
+      partition by id
+      order by ts
+      measures a.v as m
+      one row per match
+      after match skip past last row
+      pattern ((a{900}){900} b)
+      define a as a.v > 0, b as b.v < 0
+    );
+  expected_outputs:
+    - binder_error
+- name: MATCH_RECOGNIZE DEFINE rejects extra arguments to PREV (they were silently ignored)
+  sql: |
+    create table t(id int, ts int, v int, watermark for ts as ts - 10) append only;
+    select * from t match_recognize (
+      partition by id
+      order by ts
+      measures a.v as m
+      one row per match
+      after match skip past last row
+      pattern (a b)
+      define a as a.v > 0, b as b.v < prev(b.v, 1, 999)
+    );
+  expected_outputs:
+    - binder_error
+- name: MATCH_RECOGNIZE DEFINE rejects a PREV offset above u32 (it truncated to 0, i.e. the candidate row)
+  sql: |
+    create table t(id int, ts int, v int, watermark for ts as ts - 10) append only;
+    select * from t match_recognize (
+      partition by id
+      order by ts
+      measures a.v as m
+      one row per match
+      after match skip past last row
+      pattern (a b)
+      define a as a.v > 0, b as b.v < prev(b.v, 4294967296)
+    );
+  expected_outputs:
+    - binder_error
+- name: MATCH_RECOGNIZE DEFINE rejects FILTER on navigation (it was silently dropped)
+  sql: |
+    create table t(id int, ts int, v int, watermark for ts as ts - 10) append only;
+    select * from t match_recognize (
+      partition by id
+      order by ts
+      measures a.v as m
+      one row per match
+      after match skip past last row
+      pattern (a b)
+      define a as a.v > 0, b as b.v < last(a.v) filter (where a.v > 0)
+    );
+  expected_outputs:
+    - binder_error
+- name: MATCH_RECOGNIZE DEFINE rejects an OVER clause on navigation (it was silently dropped)
+  sql: |
+    create table t(id int, ts int, v int, watermark for ts as ts - 10) append only;
+    select * from t match_recognize (
+      partition by id
+      order by ts
+      measures a.v as m
+      one row per match
+      after match skip past last row
+      pattern (a b)
+      define a as a.v > 0, b as b.v < last(a.v) over ()
+    );
+  expected_outputs:
+    - binder_error
+- name: MATCH_RECOGNIZE DEFINE rejects DISTINCT on navigation (it was silently dropped)
+  sql: |
+    create table t(id int, ts int, v int, watermark for ts as ts - 10) append only;
+    select * from t match_recognize (
+      partition by id
+      order by ts
+      measures a.v as m
+      one row per match
+      after match skip past last row
+      pattern (a b)
+      define a as a.v > 0, b as b.v < last(distinct a.v)
+    );
+  expected_outputs:
+    - binder_error
+- name: MATCH_RECOGNIZE DEFINE rejects IGNORE NULLS on navigation (it was silently dropped)
+  sql: |
+    create table t(id int, ts int, v int, watermark for ts as ts - 10) append only;
+    select * from t match_recognize (
+      partition by id
+      order by ts
+      measures a.v as m
+      one row per match
+      after match skip past last row
+      pattern (a b)
+      define a as a.v > 0, b as b.v < prev(b.v, 1 ignore nulls)
+    );
+  expected_outputs:
+    - binder_error
+- name: MATCH_RECOGNIZE isolates internal navigation columns between DEFINE items
+  sql: |
+    create table t(id int, ts int, v int, watermark for ts as ts - 10) append only;
+    select * from t match_recognize (
+      partition by id
+      order by ts
+      measures a.v as m
+      one row per match
+      after match skip past last row
+      pattern (a b)
+      define a as prev(a.v) = a.v, b as __mr_nav_a_0 > 0
+    );
+  expected_outputs:
+    - binder_error
+- name: MATCH_RECOGNIZE rejects AFTER MATCH SKIP TO a variable absent from PATTERN (it degraded on every match)
+  sql: |
+    create table t(id int, ts int, v int, watermark for ts as ts - 10) append only;
+    select * from t match_recognize (
+      partition by id
+      order by ts
+      measures a.v as m
+      one row per match
+      after match skip to last x
+      pattern (a b)
+      define a as a.v > 0, b as b.v < 0
+    );
+  expected_outputs:
+    - binder_error
+- name: MATCH_RECOGNIZE DEFINE navigation nested in a CASE expression
+  sql: |
+    create table t(id int, ts int, v int, watermark for ts as ts - 10) append only;
+    select * from t match_recognize (
+      partition by id
+      order by ts
+      measures a.v as m
+      one row per match
+      after match skip past last row
+      pattern (a b)
+      define a as a.v > 0, b as b.v < case when prev(b.v) > 0 then prev(b.v) else 0 end
+    );
+  expected_outputs:
+    - stream_plan
+- name: MATCH_RECOGNIZE DEFINE navigation nested in an IN list
+  sql: |
+    create table t(id int, ts int, v int, watermark for ts as ts - 10) append only;
+    select * from t match_recognize (
+      partition by id
+      order by ts
+      measures a.v as m
+      one row per match
+      after match skip past last row
+      pattern (a b)
+      define a as a.v > 0, b as b.v in (prev(b.v), last(a.v))
+    );
+  expected_outputs:
+    - stream_plan
+- name: MATCH_RECOGNIZE rejects PERMUTE over too many variables by its arity, not by the state budget
+  sql: |
+    create table t(id int, ts int, v int, watermark for ts as ts - 10) append only;
+    select * from t match_recognize (
+      partition by id
+      order by ts
+      measures a.v as m
+      one row per match
+      after match skip past last row
+      pattern (permute(a, b, c, d, e, f, g, h))
+      define a as a.v > 0, b as b.v < 0, c as c.v > 1, d as d.v > 2,
+             e as e.v > 3, f as f.v > 4, g as g.v > 5, h as h.v > 6
+    );
+  expected_outputs:
+    - binder_error
+- name: MATCH_RECOGNIZE DEFINE navigation on the left of IN (subquery) is extracted, not reported as an unknown function
+  sql: |
+    create table t(id int, ts int, v int, watermark for ts as ts - 10) append only;
+    select * from t match_recognize (
+      partition by id
+      order by ts
+      measures a.v as m
+      one row per match
+      after match skip past last row
+      pattern (a b)
+      define a as a.v > 0, b as prev(b.v) in (select v from t)
+    );
+  expected_outputs:
+    - binder_error
+- name: MATCH_RECOGNIZE DEFINE navigation nested in IS DISTINCT FROM, LIKE, an array constructor and a subscript (traversal reaches the PREV(b.v, 2) that reads before the match, so the start-distance rule rejects it)
+  sql: |
+    create table t(id int, ts int, v int, s varchar, watermark for ts as ts - 10) append only;
+    select * from t match_recognize (
+      partition by id
+      order by ts
+      measures a.v as m
+      one row per match
+      after match skip past last row
+      pattern (a b)
+      define a as a.v > 0,
+             b as (prev(b.v) is distinct from b.v)
+                  and (prev(s) like 'a%')
+                  and ((array[prev(b.v, 2), last(a.v)])[1] < b.v)
+    );
+  expected_outputs:
+    - binder_error
+- name: MATCH_RECOGNIZE DEFINE rejects a PREV offset above the operational cap (the offset demands that many mandatory pattern rows)
+  sql: |
+    create table t(id int, ts int, v int, watermark for ts as ts - 10) append only;
+    select * from t match_recognize (
+      partition by id
+      order by ts
+      measures a.v as m
+      one row per match
+      after match skip past last row
+      pattern (a b)
+      define a as a.v > 0, b as b.v < prev(b.v, 101)
+    );
+  expected_outputs:
+    - binder_error
+- name: MATCH_RECOGNIZE DEFINE rejects PREV on a variable that can start the match (the read would reach before the match)
+  sql: |
+    create table t(id int, ts int, v int, watermark for ts as ts - 10) append only;
+    select * from t match_recognize (
+      partition by id
+      order by ts
+      measures a.v as m
+      one row per match
+      after match skip past last row
+      pattern (a b)
+      define a as prev(a.v) is null, b as b.v < 0
+    );
+  expected_outputs:
+    - binder_error
+- name: MATCH_RECOGNIZE DEFINE accepts PREV on a variable always preceded by enough rows (the anchored V-shape)
+  sql: |
+    create table t(id int, ts int, v int, watermark for ts as ts - 10) append only;
+    select * from t match_recognize (
+      partition by id
+      order by ts
+      measures a.v as m
+      one row per match
+      after match skip past last row
+      pattern (a b+)
+      define b as b.v < prev(b.v)
+    );
+  expected_outputs:
+    - stream_plan
+- name: MATCH_RECOGNIZE DEFINE rejects PREV behind a zero-minimum quantifier prefix (the prefix can match no rows, so the variable can start the match)
+  sql: |
+    create table t(id int, ts int, v int, watermark for ts as ts - 10) append only;
+    select * from t match_recognize (
+      partition by id
+      order by ts
+      measures a.v as m
+      one row per match
+      after match skip past last row
+      pattern (a* b)
+      define a as a.v > 0, b as b.v < prev(b.v)
+    );
+  expected_outputs:
+    - binder_error
+- name: MATCH_RECOGNIZE DEFINE accepts PREV behind a one-minimum quantifier prefix
+  sql: |
+    create table t(id int, ts int, v int, watermark for ts as ts - 10) append only;
+    select * from t match_recognize (
+      partition by id
+      order by ts
+      measures a.v as m
+      one row per match
+      after match skip past last row
+      pattern (a+ b)
+      define a as a.v > 0, b as b.v < prev(b.v)
+    );
+  expected_outputs:
+    - stream_plan
+- name: MATCH_RECOGNIZE DEFINE rejects PREV inside PERMUTE (any variable can be ordered first)
+  sql: |
+    create table t(id int, ts int, v int, watermark for ts as ts - 10) append only;
+    select * from t match_recognize (
+      partition by id
+      order by ts
+      measures a.v as m
+      one row per match
+      after match skip past last row
+      pattern (permute(a, b))
+      define a as a.v > 0, b as b.v < prev(b.v)
+    );
+  expected_outputs:
+    - binder_error
+- name: MATCH_RECOGNIZE DEFINE accepts PREV whose distance is met through an alternation (both branches consume a row first)
+  sql: |
+    create table t(id int, ts int, v int, watermark for ts as ts - 10) append only;
+    select * from t match_recognize (
+      partition by id
+      order by ts
+      measures a.v as m
+      one row per match
+      after match skip past last row
+      pattern (s (a | b) c)
+      define s as s.v > 0, a as a.v > 0, b as b.v < 0, c as c.v < prev(c.v, 2)
+    );
+  expected_outputs:
+    - stream_plan
+- name: MATCH_RECOGNIZE DEFINE rejects physical NEXT (a global decision horizon can starve an idle partition; per-path decidability is future work)
+  sql: |
+    create table t(id int, ts int, v int, watermark for ts as ts - 10) append only;
+    select * from t match_recognize (
+      partition by id
+      order by ts
+      measures a.v as m
+      one row per match
+      after match skip past last row
+      pattern (a b)
+      define a as next(a.v) < 0, b as b.v < 0
+    );
+  expected_outputs:
+    - binder_error
+- name: MATCH_RECOGNIZE WITHIN rejects a non-positive bound (nothing could ever match; the MV would be silently empty forever)
+  sql: |
+    create table t(id int, ts int, v int, watermark for ts as ts - 10) append only;
+    select * from t match_recognize (
+      partition by id
+      order by ts
+      measures b.v as dip
+      one row per match
+      after match skip past last row
+      pattern (a b) within -1
+      define a as a.v > 0, b as b.v < 0
+    );
+  expected_outputs:
+    - binder_error
+- name: MATCH_RECOGNIZE WITHIN rejects a zero bound
+  sql: |
+    create table t(id int, ts int, v int, watermark for ts as ts - 10) append only;
+    select * from t match_recognize (
+      partition by id
+      order by ts
+      measures b.v as dip
+      one row per match
+      after match skip past last row
+      pattern (a b) within 0
+      define a as a.v > 0, b as b.v < 0
+    );
+  expected_outputs:
+    - binder_error
+- name: MATCH_RECOGNIZE WITHIN rejects a NULL bound (the span predicate would silently never hold rows to a window)
+  sql: |
+    create table t(id int, ts int, v int, watermark for ts as ts - 10) append only;
+    select * from t match_recognize (
+      partition by id
+      order by ts
+      measures b.v as dip
+      one row per match
+      after match skip past last row
+      pattern (a b) within null
+      define a as a.v > 0, b as b.v < 0
+    );
+  expected_outputs:
+    - binder_error
+- name: MATCH_RECOGNIZE MEASURES rejects physical PREV/NEXT (navigation over rows outside the match; not the misleading "function does not exist")
+  sql: |
+    create table t(id int, ts int, v int, watermark for ts as ts - 10) append only;
+    select * from t match_recognize (
+      partition by id
+      order by ts
+      measures prev(a.v) as before_first
+      one row per match
+      after match skip past last row
+      pattern (a b)
+      define a as a.v > 0, b as b.v < 0
+    );
+  expected_outputs:
+    - binder_error
+- name: MATCH_RECOGNIZE zero-repetition quantifier collapses to its suffix (a{0} b matches like plain b)
+  sql: |
+    create table t(id int, ts int, v int, watermark for ts as ts - 10) append only;
+    select * from t match_recognize (
+      partition by id
+      order by ts
+      measures b.v as dip
+      one row per match
+      after match skip past last row
+      pattern (a{0} b)
+      define a as a.v > 0, b as b.v < 0
+    );
+  expected_outputs:
+    - stream_plan
+- name: multi-column PARTITION BY in non-ascending column order exchanges by the EXACT key order (the matcher's state table hashes its distribution key in PARTITION BY order, so a subset- or ascending-order exchange would route rows to vnodes the table does not compute)
+  sql: |
+    create table t(id int, cat varchar, ts int, v int, watermark for ts as ts - 10) append only;
+    select * from t match_recognize (
+      partition by cat, id
+      order by ts
+      measures b.v as dip
+      one row per match
+      after match skip past last row
+      pattern (a b)
+      define a as a.v > 0, b as b.v < 0
+    );
+  expected_outputs:
+    - stream_plan
+- name: PERMUTE rejects duplicate variables (silently redundant NFA branches otherwise)
+  sql: |
+    create table t(id int, ts int, v int, watermark for ts as ts - 10) append only;
+    select * from t match_recognize (
+      partition by id
+      order by ts
+      measures count(*) as n
+      one row per match
+      after match skip past last row
+      pattern (permute(a, a, b))
+      define a as a.v > 0, b as b.v < 0
+    );
+  expected_outputs:
+    - binder_error
+- name: SUBSET alias colliding with a pattern variable is rejected (it would silently shadow)
+  sql: |
+    create table t(id int, ts int, v int, watermark for ts as ts - 10) append only;
+    select * from t match_recognize (
+      partition by id
+      order by ts
+      measures count(*) as n
+      one row per match
+      after match skip past last row
+      pattern (a b)
+      subset a = (b)
+      define a as a.v > 0, b as b.v < 0
+    );
+  expected_outputs:
+    - binder_error
+- name: duplicate SUBSET aliases are rejected
+  sql: |
+    create table t(id int, ts int, v int, watermark for ts as ts - 10) append only;
+    select * from t match_recognize (
+      partition by id
+      order by ts
+      measures count(*) as n
+      one row per match
+      after match skip past last row
+      pattern (a b)
+      subset u = (a), u = (b)
+      define a as a.v > 0, b as b.v < 0
+    );
+  expected_outputs:
+    - binder_error
+- name: non-append-only input is rejected at planning (updates/deletes cannot revise emitted matches; a plain table cannot even declare a watermark, and the append-only check fires first)
+  sql: |
+    create table t(id int, ts int, v int);
+    select * from t match_recognize (
+      partition by id
+      order by ts
+      measures b.v as dip
+      one row per match
+      after match skip past last row
+      pattern (a b)
+      define a as a.v > 0, b as b.v < 0
+    );
+  expected_outputs:
+    - stream_error
+- name: PARTITION BY expression gets an actionable NotSupported error, not a bare failure
+  sql: |
+    create table t(id int, ts int, v int, watermark for ts as ts - 10) append only;
+    select * from t match_recognize (
+      partition by id + 1
+      order by ts
+      measures b.v as dip
+      one row per match
+      after match skip past last row
+      pattern (a b)
+      define a as a.v > 0, b as b.v < 0
+    );
+  expected_outputs:
+    - stream_error
+- name: multi-column ORDER BY shows the secondary order the sort enforces (EXPLAIN visibility)
+  sql: |
+    create table t(id int, ts int, v int, watermark for ts as ts - 10) append only;
+    select * from t match_recognize (
+      partition by id
+      order by ts, v
+      measures b.v as dip
+      one row per match
+      after match skip past last row
+      pattern (a b)
+      define a as a.v > 0, b as b.v < 0
+    );
+  expected_outputs:
+    - stream_plan
+- name: SUBSET referencing an unknown pattern variable is a user error, not a missing feature
+  sql: |
+    create table t(id int, ts int, v int, watermark for ts as ts - 10) append only;
+    select * from t match_recognize (
+      partition by id
+      order by ts
+      measures count(*) as n
+      one row per match
+      after match skip past last row
+      pattern (a b)
+      subset u = (a, typo)
+      define a as a.v > 0, b as b.v < 0
+    );
+  expected_outputs:
+    - binder_error
+- name: a pattern variable defined twice is rejected, not silently last-wins
+  sql: |
+    create table t(id int, ts int, v int, watermark for ts as ts - 10) append only;
+    select * from t match_recognize (
+      partition by id
+      order by ts
+      measures count(*) as n
+      one row per match
+      after match skip past last row
+      pattern (a b)
+      define a as a.v > 0, b as b.v < 0, a as a.v < 0
+    );
+  expected_outputs:
+    - binder_error
+- name: an aggregate nested inside a larger MEASURES expression is rejected at bind time
+  sql: |
+    create table t(id int, ts int, v int, watermark for ts as ts - 10) append only;
+    select * from t match_recognize (
+      partition by id
+      order by ts
+      measures sum(a.v) + 1 as m
+      one row per match
+      after match skip past last row
+      pattern (a b)
+      define a as a.v > 0, b as b.v < 0
+    );
+  expected_outputs:
+    - binder_error
+- name: a correlated reference inside DEFINE is traversed, not silently dropped
+  sql: |
+    create table t1(x int) append only;
+    create table t2(id int, ts int, v int, watermark for ts as ts - 10) append only;
+    select * from t1 where exists (
+      select 1 from t2 match_recognize (
+        partition by id
+        order by ts
+        measures count(*) as n
+        one row per match
+        after match skip past last row
+        pattern (a b)
+        define a as a.v > t1.x, b as b.v < 0
+      )
+    );
+  expected_outputs:
+    - stream_error
+- name: a pattern variable colliding with the input table name is a naming error, not an internal one
+  sql: |
+    create table t(id int, ts int, v int, watermark for ts as ts - 10) append only;
+    select * from t match_recognize (
+      partition by id
+      order by ts
+      measures count(*) as n
+      one row per match
+      after match skip past last row
+      pattern (t b)
+      define t as t.v > 0, b as b.v < 0
+    );
+  expected_outputs:
+    - binder_error
+- name: a case-folded reference to a quoted pattern variable names the variables actually in scope
+  sql: |
+    create table t(id int, ts int, v int, watermark for ts as ts - 10) append only;
+    select * from t match_recognize (
+      partition by id
+      order by ts
+      measures count(*) as n
+      one row per match
+      after match skip past last row
+      pattern ("A" b)
+      define "A" as A.v > 0, b as b.v < 0
+    );
+  expected_outputs:
+    - binder_error
+- name: MATCH_RECOGNIZE rejects a DEFINE for a symbol that does not appear in PATTERN
+  sql: |
+    create table t(id int, ts int, v int, watermark for ts as ts - 10) append only;
+    select * from t match_recognize (
+      partition by id
+      order by ts
+      measures count(*) as n
+      one row per match
+      after match skip past last row
+      pattern (a b)
+      define a as a.v > 0, b as b.v < 0, ghost as ghost.v = 0
+    );
+  expected_outputs:
+    - binder_error
+- name: MATCH_RECOGNIZE DEFINE rejects PREV over an undeclared variable qualifier
+  sql: |
+    create table t(id int, ts int, v int, watermark for ts as ts - 10) append only;
+    select * from t match_recognize (
+      partition by id
+      order by ts
+      measures count(*) as n
+      one row per match
+      after match skip past last row
+      pattern (a b)
+      define a as a.v > 0, b as b.v < prev(zzz.v)
+    );
+  expected_outputs:
+    - binder_error
+- name: MATCH_RECOGNIZE DEFINE rejects PREV anchored to another declared variable
+  sql: |
+    create table t(id int, ts int, v int, watermark for ts as ts - 10) append only;
+    select * from t match_recognize (
+      partition by id
+      order by ts
+      measures count(*) as n
+      one row per match
+      after match skip past last row
+      pattern (a b)
+      define a as a.v > 0, b as b.v < prev(a.v)
+    );
+  expected_outputs:
+    - binder_error
+- name: MATCH_RECOGNIZE DEFINE allows PREV qualified by the symbol being defined
+  sql: |
+    create table t(id int, ts int, v int, watermark for ts as ts - 10) append only;
+    select * from t match_recognize (
+      partition by id
+      order by ts
+      measures count(*) as n
+      one row per match
+      after match skip past last row
+      pattern (a b)
+      define a as a.v > 0, b as b.v < prev(b.v)
+    );
+  expected_outputs:
+    - logical_plan
+    - stream_plan
+- name: MATCH_RECOGNIZE plans with a timestamp ORDER BY key and an interval WITHIN bound
+  sql: |
+    create table t(id int, ts timestamp, v int, watermark for ts as ts - interval '10' second) append only;
+    select * from t match_recognize (
+      partition by id
+      order by ts
+      measures count(*) as n
+      one row per match
+      after match skip past last row
+      pattern (a b) within interval '5' minute
+      define a as a.v > 0, b as b.v < 0
+    );
+  expected_outputs:
+    - logical_plan
+    - stream_plan

@@ -1,0 +1,43 @@
+# Streaming MATCH_RECOGNIZE reluctant quantifiers: `a+?` prefers the fewest matches. With an
+# overlapping DEFINE (every positive row is both `a` and `b`), reluctant (a+? b) yields short
+# two-row matches where greedy (a+ b) would consume one long match.
+
+statement ok
+set streaming_parallelism = 1;
+
+statement ok
+set rw_implicit_flush to true;
+
+statement ok
+create table t (id int, ts int, v int, watermark for ts as ts - 100) append only;
+
+statement ok
+create materialized view mv_reluctant as
+select * from t match_recognize (
+  partition by id
+  order by ts
+  measures count(*) as n, first(a.v) as a0, b.v as bv
+  one row per match
+  after match skip past last row
+  pattern (a+? b)
+  define a as a.v > 0, b as b.v > 0
+);
+
+# id=1: 10,20,30,40 (all positive -> each is both a and b) then 50 to finalize; sentinel advances wm.
+# reluctant: minimal `a+` then `b` -> matches (10,20) and (30,40), each of length 2.
+statement ok
+insert into t values
+  (1, 1, 10), (1, 2, 20), (1, 3, 30), (1, 4, 40), (1, 5, 50),
+  (0, 1000, 0);
+
+query IIII rowsort
+select * from mv_reluctant;
+----
+1 2 10 20
+1 2 30 40
+
+statement ok
+drop materialized view mv_reluctant;
+
+statement ok
+drop table t;

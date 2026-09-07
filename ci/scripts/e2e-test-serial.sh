@@ -102,6 +102,18 @@ risedev slt -p 4566 -d dev './e2e_test/streaming/**/*.slt' --junit "streaming-${
 echo "--- Kill cluster"
 cluster_stop
 
+# Recovery suites, on their own cluster. Named `.slt.serial` so the `**/*.slt` globs never reach
+# them: these call `recover`, which restarts every streaming job on the cluster, so in the parallel
+# job they would recover it out from under the suites sharing it, and the madsim jobs inject their
+# own recovery on top. A separate cluster here also keeps them from disturbing the streaming suite
+# above. (`onlyif`/`skipif` cannot express this: conditions attach to statements, not to `halt`.)
+echo "--- e2e, $mode, streaming recovery"
+cluster_start
+risedev slt -p 4566 -d dev './e2e_test/streaming/**/*.slt.serial' --junit "streaming-recovery-${profile}" --label "serial"
+
+echo "--- Kill cluster"
+cluster_stop
+
 echo "--- e2e, $mode, batch"
 cluster_start
 risedev slt -p 4566 -d dev './e2e_test/ddl/**/*.slt' --junit "batch-ddl-${profile}" --label "can-use-recover"

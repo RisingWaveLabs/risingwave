@@ -1,0 +1,52 @@
+# PERMUTE preference is pinned, not just match existence: SQL:2016 expands PERMUTE(a, b) to the
+# alternation of all orderings in LEXICOGRAPHICAL ORDER OF THE LISTING — (a b | b a) — so when the
+# data satisfies more than one ordering, the first-listed one must win. A count-only assertion
+# passes under an arbitrary (or wrong) ordering choice; CLASSIFIER() distinguishes them.
+
+control substitution on
+
+statement ok
+set streaming_parallelism = 1;
+
+statement ok
+set rw_implicit_flush to true;
+
+statement ok
+drop materialized view if exists mv_permute_pref;
+
+statement ok
+drop table if exists t_perm;
+
+statement ok
+create table t_perm (id int, ts int, v int, watermark for ts as ts - 1) append only;
+
+statement ok
+create materialized view mv_permute_pref as
+select * from t_perm match_recognize (
+  partition by id
+  order by ts
+  measures classifier() as last_var
+  one row per match
+  after match skip past last row
+  pattern (permute(a, b))
+  define a as a.v > 0, b as b.v < 10
+);
+
+# Both rows satisfy BOTH variables (0 < 5 < 10), so both orderings (a b) and (b a) match the same
+# two rows. The listing order prefers (a b): the last row must be classified b, not a. PERMUTE is
+# fixed-length, so the match is terminal once the watermark releases both rows; the third row
+# (v = 0, satisfies only b) is not needed for finality — it starts a lone (b ...) partial that is
+# simply retained.
+statement ok
+insert into t_perm values (1, 10, 5), (1, 11, 5), (1, 12, 0), (9, 14, 5);
+
+query IT rowsort
+select * from mv_permute_pref;
+----
+1 b
+
+statement ok
+drop materialized view mv_permute_pref;
+
+statement ok
+drop table t_perm;

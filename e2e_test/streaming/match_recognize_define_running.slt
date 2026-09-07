@@ -1,0 +1,146 @@
+# Streaming MATCH_RECOGNIZE: RUNNING navigation over a variable's *own* DEFINE. While `a`'s predicate
+# is being tested, the candidate row is tentatively an `a`, so `LAST(a.v)` / `FIRST(a.v)` (and the
+# same navigation through a SUBSET containing `a`) must see it. SQL:2016 defines a
+# pattern-variable-qualified column reference as RUNNING LAST of that column, and the binder already
+# lowers the bare `a.v` inside `a`'s own DEFINE to the candidate row, so `LAST(a.v) = a.v` is a
+# tautology — it must accept every row, including the match's first, where no earlier `a` exists.
+
+statement ok
+set streaming_parallelism = 1;
+
+statement ok
+set rw_implicit_flush to true;
+
+# ---- LAST of the defined variable: the tautology ----
+statement ok
+create table t_last (id int, ts int, v int, watermark for ts as ts - 10) append only;
+
+statement ok
+create materialized view mv_last as
+select * from t_last match_recognize (
+  partition by id
+  order by ts
+  measures a.v as av, b.v as bv
+  one row per match
+  after match skip past last row
+  pattern (a b)
+  define a as last(a.v) = a.v, b as b.v > a.v
+);
+
+# id=1 values 10, 20, 5; the 5 is the trailing safe row that puts the match's end strictly inside the
+# safe prefix so it is emitted rather than held, and the id=0 sentinel advances the watermark past
+# every id=1 row.
+# `a` accepts 10 because LAST(a.v) is the candidate itself; `b` compares against the running `a`
+# (a variable it does not belong to), so 20 > 10 matches. Match = (a=10, b=20).
+statement ok
+insert into t_last values
+  (1, 1, 10), (1, 2, 20), (1, 3, 5),
+  (0, 1000, 0);
+
+query III rowsort
+select * from mv_last;
+----
+1 10 20
+
+# ---- FIRST of the defined variable: runs of equal values ----
+statement ok
+create table t_first (id int, ts int, v int, watermark for ts as ts - 10) append only;
+
+statement ok
+create materialized view mv_first as
+select * from t_first match_recognize (
+  partition by id
+  order by ts
+  measures first(a.v) as v_first, last(a.v) as v_last, count(*) as n
+  one row per match
+  after match skip past last row
+  pattern (a+)
+  define a as first(a.v) = a.v
+);
+
+# `FIRST(a.v) = a.v` pins every row of the run to the run's first value: the match's first row is its
+# own FIRST, later rows must repeat it. id=1 values 7, 7, 9, 11 therefore split into the runs
+# [7, 7] and [9]; the trailing 11 opens a run that stays open (no following safe row to confirm it).
+statement ok
+insert into t_first values
+  (1, 1, 7), (1, 2, 7), (1, 3, 9), (1, 4, 11),
+  (0, 1000, 0);
+
+query IIII rowsort
+select * from mv_first;
+----
+1 7 7 2
+1 9 9 1
+
+# ---- SUBSET containing the defined variable: both spellings must agree ----
+statement ok
+create table t_subset (id int, ts int, v int, watermark for ts as ts - 10) append only;
+
+# `LAST(u.v)` where u = (a, b): the candidate is tentatively an `a` and `a` is a member of `u`, so it
+# is the running last of `u`, making `a`'s predicate a tautology again. The MEASURES `LAST(u.v)` is
+# unaffected (FINAL semantics over the completed match): it is the match's last row, the `b`.
+statement ok
+create materialized view mv_subset_nav as
+select * from t_subset match_recognize (
+  partition by id
+  order by ts
+  measures a.v as av, b.v as bv, last(u.v) as u_last
+  one row per match
+  after match skip past last row
+  pattern (a b)
+  subset u = (a, b)
+  define a as last(u.v) = a.v, b as b.v < 0
+);
+
+# The bare form of the same navigation. The binder's self-reference exemption is name-exact, so `u.v`
+# lowers to RUNNING LAST over u's members rather than to the candidate row directly — it must still
+# resolve to the candidate, exactly like the `LAST(u.v)` spelling above.
+statement ok
+create materialized view mv_subset_bare as
+select * from t_subset match_recognize (
+  partition by id
+  order by ts
+  measures a.v as av, b.v as bv, last(u.v) as u_last
+  one row per match
+  after match skip past last row
+  pattern (a b)
+  subset u = (a, b)
+  define a as u.v = a.v, b as b.v < 0
+);
+
+# id=1 values 10, -5, 3: match = (a=10, b=-5), with 3 as the trailing safe row.
+statement ok
+insert into t_subset values
+  (1, 1, 10), (1, 2, -5), (1, 3, 3),
+  (0, 1000, 0);
+
+query IIII rowsort
+select * from mv_subset_nav;
+----
+1 10 -5 -5
+
+query IIII rowsort
+select * from mv_subset_bare;
+----
+1 10 -5 -5
+
+statement ok
+drop materialized view mv_last;
+
+statement ok
+drop materialized view mv_first;
+
+statement ok
+drop materialized view mv_subset_nav;
+
+statement ok
+drop materialized view mv_subset_bare;
+
+statement ok
+drop table t_last;
+
+statement ok
+drop table t_first;
+
+statement ok
+drop table t_subset;

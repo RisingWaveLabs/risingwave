@@ -1,0 +1,201 @@
+# Recovery tests for streaming MATCH_RECOGNIZE. The operator splits state across two tables — the
+# upstream WatermarkSort buffers rows the watermark has not released, the matcher retains rows its
+# live partials reference — so each scenario advances the watermark PAST the buffered rows before
+# `recover`: without that, the partial sits in the sort's buffer, the matcher's state is empty,
+# and the test exercises only the sort's (pre-existing) recovery machinery.
+
+# Single source parallelism so the watermark advances deterministically: with a parallel source the
+# watermark is the min across partitions, and the single high-ts sentinel below would not advance it
+# on a multi-node cluster, so the match would never finalise. (All the other MATCH_RECOGNIZE e2e
+# tests set this for the same reason.)
+statement ok
+set streaming_parallelism = 1;
+
+statement ok
+set rw_implicit_flush to true;
+
+statement ok
+create table tr (id int, ts int, v int, watermark for ts as ts - 10) append only;
+
+statement ok
+create materialized view mvr as
+select * from tr match_recognize (
+  partition by id
+  order by ts
+  measures b.v as dip
+  one row per match
+  after match skip past last row
+  pattern (a b)
+  define a as a.v > 0, b as b.v < 0
+);
+
+# Buffer the up-row AND release it into the matcher: the sentinel advances the watermark to 5,
+# past ts 1, so the `a` is retained by the MATCHER as a live (a b) partial — the state the rebuild
+# must reconstruct.
+statement ok
+insert into tr values (1, 1, 10), (0, 15, 0);
+
+query II rowsort
+select * from mvr;
+----
+
+# Trigger recovery: the executor rebuilds its per-partition matcher by re-feeding the retained row.
+statement ok
+recover;
+
+# Wait for recovery to fully complete before feeding the completing rows. A fixed sleep races
+# recovery on a loaded multi-node cluster: if the down-row arrives before the buffered `a` is
+# restored, the match can never form. `wait` blocks until the recovered jobs are running again.
+statement ok
+wait;
+
+# `recover` resets session state, so re-enable implicit flush for synchronous inserts below —
+# and single source parallelism, which the stream objects created after this point need for the
+# deterministic-watermark guarantee documented at the top of this file.
+statement ok
+set rw_implicit_flush to true;
+
+statement ok
+set streaming_parallelism = 1;
+
+# Complete the match after recovery (ts 6 sits above the pre-recovery watermark 5, so it is not
+# dropped as late) and advance the watermark to release it.
+statement ok
+insert into tr values (1, 6, -5), (0, 100, 0);
+
+sleep 5s
+
+# The `a` survived recovery inside the matcher, so the (a b) match completes and emits.
+query II rowsort
+select * from mvr;
+----
+1 -5
+
+statement ok
+drop materialized view mvr;
+
+statement ok
+drop table tr;
+
+# Scenario 2: a MULTI-row partial with TIED order keys retained by the matcher across recovery.
+# The rebuild re-feeds rows in state-table key order, where `seq` breaks ties — seq must therefore
+# be monotonic in arrival order, or the rebuilt matcher binds a different row per variable than
+# the live matcher did and the completed match silently carries the other row's measures. The
+# sentinel releases the tied rows into the matcher BEFORE the recovery, so the re-feed is what is
+# being tested; the three-variable pattern with per-variable value measures pins the exact binding.
+
+statement ok
+create table tr2 (id int, ts int, v int, watermark for ts as ts - 10) append only;
+
+statement ok
+create materialized view mvr2 as
+select * from tr2 match_recognize (
+  partition by id
+  order by ts
+  measures a.v as a_v, b.v as b_v, c.v as c_v
+  one row per match
+  after match skip past last row
+  pattern (a b c)
+  define a as a.v = 1, b as b.v = 2, c as c.v = 3
+);
+
+# Two rows at the SAME ts (tied full ORDER BY key, ordered only by seq = arrival order), released
+# into the matcher by the sentinel (watermark 10 > 5): a live (a b) partial held by the matcher.
+statement ok
+insert into tr2 values (1, 5, 1), (1, 5, 2), (0, 20, 0);
+
+query IIII rowsort
+select * from mvr2;
+----
+
+statement ok
+recover;
+
+statement ok
+wait;
+
+statement ok
+set rw_implicit_flush to true;
+
+# Complete after recovery: the c-row (above the pre-recovery watermark) and a sentinel.
+statement ok
+insert into tr2 values (1, 11, 3), (0, 100, 0);
+
+sleep 5s
+
+# The rebuilt matcher re-fed the tied rows in arrival order: a bound to v=1, b to v=2. A tie
+# re-fed in the other order forms no match at all here (a.v = 1 fails on the v=2 row) —
+# emptiness or wrong values both fail this query.
+query IIII rowsort
+select * from mvr2;
+----
+1 1 2 3
+
+statement ok
+drop materialized view mvr2;
+
+statement ok
+drop table tr2;
+
+# Scenario 3: seq re-mint across recovery. A completed match's rows are CONSUMED (deleted), so a
+# seq counter re-seeded from retained rows alone would restart at 0 after recovery and re-mint the
+# consumed match's seqs — and `_match_id` is the match's start-row seq, so the second match's
+# output row would silently REPLACE the first in the materialized view (same stream key). The
+# epoch floor on the counter is what prevents this; this scenario is its regression pin: both
+# matches must be present at the end.
+
+statement ok
+create table tr3 (id int, ts int, v int, watermark for ts as ts - 10) append only;
+
+statement ok
+create materialized view mvr3 as
+select * from tr3 match_recognize (
+  partition by id
+  order by ts
+  measures b.v as dip
+  one row per match
+  after match skip past last row
+  pattern (a b)
+  define a as a.v > 0, b as b.v < 0
+);
+
+# First match: completes and is consumed; the matcher's state table is empty afterwards.
+statement ok
+insert into tr3 values (1, 1, 10), (1, 2, -5), (0, 20, 0);
+
+query II rowsort
+select * from mvr3;
+----
+1 -5
+
+statement ok
+recover;
+
+statement ok
+wait;
+
+statement ok
+set rw_implicit_flush to true;
+
+statement ok
+set streaming_parallelism = 1;
+
+# Second match in the SAME partition after recovery. Its start-row seq must not collide with the
+# consumed first match's.
+statement ok
+insert into tr3 values (1, 21, 10), (1, 22, -7), (0, 200, 0);
+
+sleep 5s
+
+# Both matches present: a re-minted seq would have replaced the first row instead.
+query II rowsort
+select * from mvr3;
+----
+1 -5
+1 -7
+
+statement ok
+drop materialized view mvr3;
+
+statement ok
+drop table tr3;

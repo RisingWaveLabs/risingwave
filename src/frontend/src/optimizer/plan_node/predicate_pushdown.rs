@@ -27,11 +27,19 @@ pub trait PredicatePushdown {
     ///
     /// There are three kinds of predicates:
     ///
-    /// 1. those can't be pushed down. We just create a `LogicalFilter` for them above the current
-    ///    `PlanNode`. i.e.,
+    /// 1. those can't be pushed down. We create a `LogicalFilter` for them above the current
+    ///    `PlanNode`. A leaf node can do this directly:
     ///
     ///     ```ignore
     ///     LogicalFilter::create(self.clone().into(), predicate)
+    ///     ```
+    ///
+    ///    A non-leaf node must still recurse into every input with [`Condition::true_cond`] so each
+    ///    parent of a [`LogicalShare`] contributes to predicate collection. Unary nodes should use
+    ///    [`gen_filter_and_pushdown`]:
+    ///
+    ///     ```ignore
+    ///     gen_filter_and_pushdown(self, predicate, Condition::true_cond(), ctx)
     ///     ```
     ///
     /// 2. those can be merged with current `PlanNode` (e.g., `LogicalJoin`). We just merge
@@ -198,17 +206,13 @@ impl PredicatePushdownContext {
     pub(in crate::optimizer) fn run(&mut self, root: PlanRef, predicate: Condition) -> PlanRef {
         self.phase = PredicatePushdownPhase::Collect;
         let collected = root.predicate_pushdown_inner(predicate.clone(), self);
-        // `ShareParentCounter` counts parents via the visitor walk, but the transformation
-        // walk is not guaranteed to reach a share from every parent: some `PredicatePushdown`
-        // impls (e.g. `LogicalOverWindow`, `LogicalGapFill`) legitimately stop recursing into
-        // their inputs. A predicate merged from a subset of parents must not be pushed below
-        // the share — it would drop rows required by the parents that never contributed — so
-        // such shares are skipped and keep their original definition, like on the base plan.
-        //
-        // Every non-leaf `PredicatePushdown` impl is expected to recurse into all of its
-        // inputs, pushing `Condition::true_cond()` when nothing can be pushed (like
-        // `LogicalExpand`), so this should never happen: fail loudly in debug builds and
-        // degrade to skipping the share in release builds.
+        // `ShareParentCounter` counts parents via the visitor walk, so every non-leaf
+        // `PredicatePushdown` impl must recurse into all of its inputs, pushing
+        // `Condition::true_cond()` when nothing can be pushed. Otherwise a share may receive
+        // predicates from only a subset of its parents. Such a partial predicate must not be
+        // pushed below the share because it could drop rows required by parents that did not
+        // contribute. This should never happen: fail loudly in debug builds and degrade to
+        // skipping the share (keeping its original definition) in release builds.
         debug_assert!(
             self.pending_predicates.is_empty(),
             "shares {:?} did not receive predicates from every parent; some \

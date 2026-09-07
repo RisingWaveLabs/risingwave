@@ -1,0 +1,42 @@
+# Streaming MATCH_RECOGNIZE with a NULL in the ORDER BY (event-time) column. Such a row has no event
+# time and cannot be ordered or finalized against the watermark, so it is dropped on ingestion (as
+# event-time processing does with NULL-rowtime rows) and does not affect the surrounding matches.
+
+statement ok
+set streaming_parallelism = 1;
+
+statement ok
+set rw_implicit_flush to true;
+
+statement ok
+create table tn (id int, t int, v int, watermark for t as t - 10) append only;
+
+statement ok
+create materialized view mv_null as
+select * from tn match_recognize (
+  partition by id
+  order by t
+  measures b.v as dip
+  one row per match
+  after match skip past last row
+  pattern (a b)
+  define a as a.v > 0, b as b.v < 0
+);
+
+# The NULL-t row is dropped; the (up, down) match at t 1..2 still completes, finalized by t=3 with a
+# high-t sentinel advancing the watermark.
+statement ok
+insert into tn values
+  (1, 1, 5), (1, null, 7), (1, 2, -1), (1, 3, 0),
+  (0, 1000, 0);
+
+query II rowsort
+select * from mv_null;
+----
+1 -1
+
+statement ok
+drop materialized view mv_null;
+
+statement ok
+drop table tn;
