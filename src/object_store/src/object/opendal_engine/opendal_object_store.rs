@@ -407,7 +407,7 @@ impl OpendalNativeStreamingUploader {
     }
 
     async fn flush(&mut self) -> ObjectResult<()> {
-        let data: Vec<Bytes> = self.buf.drain(..).collect();
+        let data = std::mem::take(&mut self.buf);
         debug_assert_eq!(
             data.iter().map(|b| b.len()).sum::<usize>(),
             self.not_uploaded_len

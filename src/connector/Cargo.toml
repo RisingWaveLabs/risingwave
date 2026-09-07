@@ -76,8 +76,10 @@ easy-ext = "1"
 either = "1"
 elasticsearch = { version = "8.17.0-alpha.1", features = ["rustls-tls"] }
 enum-as-inner = "0.7"
+firestore = "0.47"
 futures = { version = "0.3", default-features = false, features = ["alloc"] }
 futures-async-stream = { workspace = true }
+gcloud-sdk = "0.28"
 gcp-bigquery-client = { version = "0.28.0", optional = true }
 glob = "0.3"
 google-cloud-bigquery = { package = "gcloud-bigquery", version = "1.6", features = [

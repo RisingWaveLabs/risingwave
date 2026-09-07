@@ -26,6 +26,7 @@ pub mod dynamodb;
 pub mod elasticsearch_opensearch;
 pub mod encoder;
 pub mod file_sink;
+pub mod firestore;
 pub mod formatter;
 feature_gated_sink_mod!(google_pubsub, GooglePubSub, "google_pubsub");
 pub mod http;
@@ -155,6 +156,7 @@ macro_rules! for_all_sinks {
                 { DeltaLake, $crate::sink::deltalake::DeltaLakeSink, $crate::sink::deltalake::DeltaLakeConfig },
                 { BigQuery, $crate::sink::big_query::BigQuerySink, $crate::sink::big_query::BigQueryConfig },
                 { DynamoDb, $crate::sink::dynamodb::DynamoDbSink, $crate::sink::dynamodb::DynamoDbConfig },
+                { Firestore, $crate::sink::firestore::FirestoreSink, $crate::sink::firestore::FirestoreConfig },
                 { Mongodb, $crate::sink::mongodb::MongodbSink, $crate::sink::mongodb::MongodbConfig },
                 { SqlServer, $crate::sink::sqlserver::SqlServerSink, $crate::sink::sqlserver::SqlServerConfig },
                 { Postgres, $crate::sink::postgres::PostgresSink, $crate::sink::postgres::PostgresConfig },
@@ -1160,6 +1162,12 @@ pub enum SinkError {
     ),
     #[error("DynamoDB error: {0}")]
     DynamoDb(
+        #[source]
+        #[backtrace]
+        anyhow::Error,
+    ),
+    #[error("Firestore error: {0}")]
+    Firestore(
         #[source]
         #[backtrace]
         anyhow::Error,

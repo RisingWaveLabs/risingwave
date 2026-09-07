@@ -407,7 +407,7 @@ impl OptimizerContext {
     }
 
     pub fn take_trace(&self) -> Vec<String> {
-        self.optimizer_trace.borrow_mut().drain(..).collect()
+        std::mem::take(&mut *self.optimizer_trace.borrow_mut())
     }
 
     pub fn with_options(&self) -> &WithOptions {

@@ -312,7 +312,7 @@ DynamoDbConfig:
   - name: dynamodb.max_future_send_nums
     field_type: usize
     required: false
-    default: '256'
+    default: DEFAULT_MAX_FUTURE_SEND_NUMS
   - name: dynamodb.batch_write_retry_times
     field_type: usize
     required: false
@@ -369,6 +369,43 @@ ElasticSearchConfig:
     field_type: String
     required: false
     default: '"upsert" . to_owned ()'
+FirestoreConfig:
+  fields:
+  - name: firestore.project_id
+    field_type: String
+    comments: Google Cloud project ID
+    required: true
+  - name: firestore.collection
+    field_type: String
+    comments: Firestore collection name
+    required: true
+  - name: firestore.database_id
+    field_type: String
+    comments: 'Optional: Firestore database ID (for multi-database projects)'
+    required: false
+  - name: firestore.credentials
+    field_type: String
+    comments: |-
+      A JSON string containing the service account credentials for authorization
+      see the [service-account](https://developers.google.com/workspace/guides/create-credentials#create_credentials_for_a_service_account) credentials guide.
+    required: false
+  - name: firestore.document_id_column
+    field_type: String
+    comments: |-
+      Column whose value is used as the Firestore document ID. Values must be unique and valid
+      Firestore document IDs. Duplicate values intentionally map multiple rows to the same
+      Firestore document.
+    required: false
+  - name: firestore.max_batch_size
+    field_type: usize
+    comments: 'Maximum batch size for batch writes (default: 500)'
+    required: false
+    default: DEFAULT_MAX_BATCH_SIZE
+  - name: firestore.max_future_send_nums
+    field_type: usize
+    comments: 'Maximum number of in-flight futures (default: 256)'
+    required: false
+    default: DEFAULT_MAX_FUTURE_SEND_NUMS
 FsConfig:
   fields:
   - name: fs.path
