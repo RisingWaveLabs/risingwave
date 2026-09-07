@@ -193,6 +193,8 @@ pub struct StorageOpts {
     pub iceberg_compaction_size_estimation_smoothing_factor: f64,
     /// Multiplier for pending waiting parallelism budget for iceberg compaction task queue.
     pub iceberg_compaction_pending_parallelism_budget_multiplier: f32,
+    /// Maximum number of Iceberg compaction tasks requested in one pull.
+    pub iceberg_compaction_max_pull_task_count: u32,
     /// Pull interval for iceberg compaction task requests in milliseconds.
     pub iceberg_compaction_pull_interval_ms: u64,
     /// Whether to enable prefetch for iceberg compaction.
@@ -368,6 +370,9 @@ impl From<(&RwConfig, &SystemParamsReader, &StorageMemoryConfig)> for StorageOpt
             iceberg_compaction_pending_parallelism_budget_multiplier: c
                 .storage
                 .iceberg_compaction_pending_parallelism_budget_multiplier,
+            iceberg_compaction_max_pull_task_count: c
+                .storage
+                .iceberg_compaction_max_pull_task_count,
             iceberg_compaction_pull_interval_ms: c.storage.iceberg_compaction_pull_interval_ms,
             iceberg_compaction_enable_prefetch: c.storage.iceberg_compaction_enable_prefetch,
             iceberg_compaction_target_binpack_group_size_mb: c

@@ -258,6 +258,9 @@ pub struct StorageConfig {
         default = "default::storage::iceberg_compaction_pending_parallelism_budget_multiplier"
     )]
     pub iceberg_compaction_pending_parallelism_budget_multiplier: f32,
+    /// Maximum number of Iceberg compaction tasks requested in one pull.
+    #[serde(default = "default::storage::iceberg_compaction_max_pull_task_count")]
+    pub iceberg_compaction_max_pull_task_count: u32,
     /// Pull interval for iceberg compaction task requests in milliseconds.
     #[serde(
         default = "default::storage::iceberg_compaction_pull_interval_ms",
@@ -1218,6 +1221,10 @@ pub mod default {
 
         pub fn iceberg_compaction_pending_parallelism_budget_multiplier() -> f32 {
             4.0
+        }
+
+        pub fn iceberg_compaction_max_pull_task_count() -> u32 {
+            1
         }
 
         pub fn iceberg_compaction_pull_interval_ms() -> u64 {

@@ -332,6 +332,7 @@ iceberg_compaction_max_concurrent_closes = 8
 iceberg_compaction_enable_dynamic_size_estimation = true
 iceberg_compaction_size_estimation_smoothing_factor = 0.3
 iceberg_compaction_pending_parallelism_budget_multiplier = 4.0
+iceberg_compaction_max_pull_task_count = 1
 iceberg_compaction_pull_interval_ms = 5000
 iceberg_compaction_enable_prefetch = false
 iceberg_compaction_target_binpack_group_size_mb = 102400
