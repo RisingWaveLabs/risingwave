@@ -49,7 +49,7 @@ use crate::hummock::iterator::{
 use crate::hummock::multi_builder::TableBuilderFactory;
 use crate::hummock::{
     CachePolicy, FilterBuilder, GetObjectId, HummockResult, MemoryLimiter, SstableBuilder,
-    SstableBuilderOptions, SstableWriterFactory, SstableWriterOptions,
+    SstableBuilderOptions, SstableMetaHandle, SstableWriterFactory, SstableWriterOptions,
 };
 use crate::monitor::StoreLocalStatistic;
 
@@ -264,7 +264,9 @@ pub async fn generate_splits(
                 .sstable_store
                 .sstable(sstable_info, &mut StoreLocalStatistic::default())
                 .await?;
-            indexes.extend(sstable.meta.block_metas.iter().map(|block| {
+            let meta_handle = SstableMetaHandle::v2(&sstable);
+            indexes.extend((0..meta_handle.block_count()).map(|block_idx| {
+                let block = meta_handle.block_meta(block_idx);
                 let data_size = block.len;
                 let full_key = FullKey {
                     user_key: FullKey::decode(&block.smallest_key).user_key,
@@ -559,19 +561,27 @@ pub fn optimize_by_copy_block(compact_task: &CompactTask, context: &CompactorCon
     optimize_by_copy_block_with_input(compact_task, context, &input_ssts, compaction_size)
 }
 
+fn sst_supports_fast_compaction_raw_copy(
+    sst: &SstableInfo,
+    expected_filter_type: PbSstableFilterType,
+) -> bool {
+    // Fast compaction copies raw data blocks together with their per-block filter bytes. Keep this
+    // gate deliberately narrow: it is only valid for the current full-meta SST format with blocked
+    // filters that match the output filter type. When partitioned SST metadata is introduced, its
+    // format marker must be checked here before enabling the raw-copy path for V3 SSTs.
+    sst.filter_layout == PbSstableFilterLayout::Blocked && sst.filter_type == expected_filter_type
+}
+
 fn optimize_by_copy_block_with_input(
     compact_task: &CompactTask,
     context: &CompactorContext,
     input_ssts: &[&SstableInfo],
     compaction_size: u64,
 ) -> bool {
-    let all_ssts_are_blocked_filter = input_ssts
-        .iter()
-        .all(|table_info| table_info.filter_layout == PbSstableFilterLayout::Blocked);
     let current_filter_type = compact_task.sstable_filter_type;
-    let all_ssts_match_filter_type = input_ssts
+    let all_ssts_support_fast_raw_copy = input_ssts
         .iter()
-        .all(|table_info| table_info.filter_type == current_filter_type);
+        .all(|table_info| sst_supports_fast_compaction_raw_copy(table_info, current_filter_type));
     // Fast compaction path can only preserve blocked filters by copying block payloads (and their
     // per-block filter bytes). If the output-SST-level heuristic now wants a plain filter, fall back
     // to the normal compaction path to rebuild filters. This intentionally lets tasks that were
@@ -597,8 +607,7 @@ fn optimize_by_copy_block_with_input(
             current_filter_type,
             PbSstableFilterType::SstableFilterXor8 | PbSstableFilterType::SstableFilterXor16
         )
-        && all_ssts_are_blocked_filter
-        && all_ssts_match_filter_type
+        && all_ssts_support_fast_raw_copy
         && output_filter_layout == PbSstableFilterLayout::Blocked
         && !compact_task.contains_range_tombstone()
         && !compact_task.contains_ttl()
@@ -749,6 +758,20 @@ mod tests {
         total_key_count: u64,
         filter_type: PbSstableFilterType,
     ) -> risingwave_hummock_sdk::sstable_info::SstableInfo {
+        test_sstable_with_layout(
+            table_id,
+            total_key_count,
+            filter_type,
+            PbSstableFilterLayout::Blocked,
+        )
+    }
+
+    fn test_sstable_with_layout(
+        table_id: TableId,
+        total_key_count: u64,
+        filter_type: PbSstableFilterType,
+        filter_layout: PbSstableFilterLayout,
+    ) -> risingwave_hummock_sdk::sstable_info::SstableInfo {
         SstableInfoInner {
             object_id: 1.into(),
             sst_id: 1.into(),
@@ -757,7 +780,7 @@ mod tests {
             sst_size: 1024,
             uncompressed_file_size: 1024,
             filter_type,
-            filter_layout: PbSstableFilterLayout::Blocked,
+            filter_layout,
             ..Default::default()
         }
         .into()
@@ -851,5 +874,34 @@ mod tests {
         );
 
         assert!(optimize_by_copy_block(&compact_task, &context));
+    }
+
+    #[tokio::test]
+    async fn test_optimize_by_copy_block_falls_back_for_non_raw_copy_input() {
+        let context = test_context().await;
+        let table_id = TableId::new(1);
+        let mut compact_task = test_compact_task(
+            PbSstableFilterLayout::Blocked,
+            Some(1024),
+            PbSstableFilterType::SstableFilterXor16,
+        );
+        compact_task.input_ssts[0].table_infos[0] = test_sstable_with_layout(
+            table_id,
+            10,
+            PbSstableFilterType::SstableFilterXor16,
+            PbSstableFilterLayout::Plain,
+        );
+
+        assert!(!optimize_by_copy_block(&compact_task, &context));
+
+        let mut compact_task = test_compact_task(
+            PbSstableFilterLayout::Blocked,
+            Some(1024),
+            PbSstableFilterType::SstableFilterXor16,
+        );
+        compact_task.input_ssts[0].table_infos[0] =
+            test_sstable(table_id, 10, PbSstableFilterType::SstableFilterXor8);
+
+        assert!(!optimize_by_copy_block(&compact_task, &context));
     }
 }

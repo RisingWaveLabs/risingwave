@@ -20,7 +20,7 @@ use risingwave_hummock_sdk::key::FullKey;
 use risingwave_hummock_sdk::sstable_info::SstableInfo;
 
 use crate::hummock::iterator::{Backward, HummockIterator, ValueMeta};
-use crate::hummock::sstable::SstableIteratorReadOptions;
+use crate::hummock::sstable::{SstableIteratorReadOptions, SstableMetaHandle};
 use crate::hummock::value::HummockValue;
 use crate::hummock::{
     BlockIterator, HummockResult, SstableIteratorType, SstableStoreRef, TableHolder,
@@ -52,8 +52,8 @@ impl BackwardSstableIterator {
         sstable_store: SstableStoreRef,
         sstable_info_ref: &SstableInfo,
     ) -> Self {
+        let meta_handle = SstableMetaHandle::v2(&sstable);
         let mut start_idx = 0;
-        let mut end_idx = sstable.meta.block_metas.len() - 1;
         assert!(
             !sstable_info_ref.table_ids.is_empty(),
             "BackwardSstableIterator: SST {} (object {}) has empty table_ids",
@@ -70,33 +70,28 @@ impl BackwardSstableIterator {
             read_table_id_range.0,
             read_table_id_range.1
         );
-        let block_meta_count = sstable.meta.block_metas.len();
+        let block_meta_count = meta_handle.block_count();
         assert!(block_meta_count > 0);
+        let mut end_idx = block_meta_count - 1;
         assert!(
-            sstable.meta.block_metas[0].table_id() <= read_table_id_range.0,
+            meta_handle.block_meta(0).table_id() <= read_table_id_range.0,
             "table id {} not found table_ids in block_meta {:?}",
             read_table_id_range.0,
-            sstable
-                .meta
-                .block_metas
-                .iter()
-                .map(|meta| meta.table_id())
+            (0..block_meta_count)
+                .map(|idx| meta_handle.block_meta(idx).table_id())
                 .collect::<Vec<_>>()
         );
         assert!(
-            sstable.meta.block_metas[block_meta_count - 1].table_id() >= read_table_id_range.1,
+            meta_handle.block_meta(block_meta_count - 1).table_id() >= read_table_id_range.1,
             "table id {} not found table_ids in block_meta {:?}",
             read_table_id_range.1,
-            sstable
-                .meta
-                .block_metas
-                .iter()
-                .map(|meta| meta.table_id())
+            (0..block_meta_count)
+                .map(|idx| meta_handle.block_meta(idx).table_id())
                 .collect::<Vec<_>>()
         );
 
         while start_idx < block_meta_count
-            && sstable.meta.block_metas[start_idx].table_id() < read_table_id_range.0
+            && meta_handle.block_meta(start_idx).table_id() < read_table_id_range.0
         {
             start_idx += 1;
         }
@@ -105,16 +100,13 @@ impl BackwardSstableIterator {
             start_idx < block_meta_count,
             "table id {} not found table_ids in block_meta {:?}",
             read_table_id_range.0,
-            sstable
-                .meta
-                .block_metas
-                .iter()
-                .map(|meta| meta.table_id())
+            (0..block_meta_count)
+                .map(|idx| meta_handle.block_meta(idx).table_id())
                 .collect::<Vec<_>>()
         );
 
         while end_idx > start_idx
-            && sstable.meta.block_metas[end_idx].table_id() > read_table_id_range.1
+            && meta_handle.block_meta(end_idx).table_id() > read_table_id_range.1
         {
             end_idx -= 1;
         }
@@ -142,7 +134,9 @@ impl BackwardSstableIterator {
         idx: isize,
         seek_key: Option<FullKey<&[u8]>>,
     ) -> HummockResult<()> {
-        if idx >= self.sst.block_count() as isize || idx < self.read_block_meta_range.0 as isize {
+        let meta_handle = SstableMetaHandle::v2(&self.sst);
+        if idx >= meta_handle.block_count() as isize || idx < self.read_block_meta_range.0 as isize
+        {
             self.block_iter = None;
         } else {
             let block = self
@@ -205,11 +199,9 @@ impl HummockIterator for BackwardSstableIterator {
     }
 
     async fn seek<'a>(&'a mut self, key: FullKey<&'a [u8]>) -> HummockResult<()> {
-        let block_idx = self
-            .sst
-            .meta
-            .block_metas
-            .partition_point(|block_meta| {
+        let meta_handle = SstableMetaHandle::v2(&self.sst);
+        let block_idx = meta_handle
+            .block_metas_partition_point(0..=meta_handle.block_count() - 1, |block_meta| {
                 // Compare by version comparator
                 // Note: we are comparing against the `smallest_key` of the `block`, thus the
                 // partition point should be `prev(<=)` instead of `<`.
@@ -281,7 +273,7 @@ mod tests {
                 .await;
         // We should have at least 10 blocks, so that sstable iterator test could cover more code
         // path.
-        assert!(handle.meta.block_metas.len() > 10);
+        assert!(handle.block_count() > 10);
         let mut sstable_iter = BackwardSstableIterator::new(handle, sstable_store, &sstable_info);
         let mut cnt = TEST_KEYS_COUNT;
         sstable_iter.rewind().await.unwrap();
@@ -306,7 +298,7 @@ mod tests {
                 .await;
         // We should have at least 10 blocks, so that sstable iterator test could cover more code
         // path.
-        assert!(sstable.meta.block_metas.len() > 10);
+        assert!(sstable.block_count() > 10);
         let mut sstable_iter = BackwardSstableIterator::new(sstable, sstable_store, &sstable_info);
         let mut all_key_to_test = (0..TEST_KEYS_COUNT).collect_vec();
         let mut rng = thread_rng();

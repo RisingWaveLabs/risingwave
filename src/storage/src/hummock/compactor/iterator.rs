@@ -30,9 +30,10 @@ use risingwave_hummock_sdk::sstable_info::SstableInfo;
 use crate::hummock::block_stream::BlockDataStream;
 use crate::hummock::compactor::task_progress::TaskProgress;
 use crate::hummock::iterator::{Forward, HummockIterator, ValueMeta};
+use crate::hummock::sstable::SstableMetaHandle;
 use crate::hummock::sstable_store::SstableStoreRef;
 use crate::hummock::value::HummockValue;
-use crate::hummock::{BlockHolder, BlockIterator, BlockMeta, HummockResult, TableHolder};
+use crate::hummock::{BlockHolder, BlockIterator, HummockResult, TableHolder};
 use crate::monitor::StoreLocalStatistic;
 
 const PROGRESS_KEY_INTERVAL: usize = 100;
@@ -99,14 +100,13 @@ impl SstableStreamIterator {
         let read_table_ids = HashSet::from_iter(sstable_info.table_ids.iter().copied());
         // Further filter the block_metas_range with sstable_info.key_range
         // This is necessary when the SST is split into multiple SstableInfo with different key ranges
-        let block_metas_range = {
-            let block_metas = &sstable.meta.block_metas[block_metas_range.clone()];
-            let inner_range =
-                filter_block_metas(block_metas, &read_table_ids, sstable_info.key_range.clone());
-            // Adjust the range to be relative to the original block_metas
-            (block_metas_range.start + inner_range.start)
-                ..(block_metas_range.start + inner_range.end)
-        };
+        let meta_handle = SstableMetaHandle::v2(&sstable);
+        let block_metas_range = filter_block_metas_with_handle(
+            &meta_handle,
+            block_metas_range,
+            &read_table_ids,
+            sstable_info.key_range.clone(),
+        );
 
         let key_range_left = FullKey::decode(&sstable_info.key_range.left).to_vec();
         let key_range_right = FullKey::decode(&sstable_info.key_range.right).to_vec();
@@ -131,12 +131,6 @@ impl SstableStreamIterator {
         }
     }
 
-    /// Returns the block metas slice for this iterator.
-    #[inline]
-    fn block_metas(&self) -> &[BlockMeta] {
-        &self.sstable.meta.block_metas[self.block_metas_range.clone()]
-    }
-
     /// Returns the number of blocks in this iterator.
     #[inline]
     fn block_count(&self) -> usize {
@@ -144,12 +138,12 @@ impl SstableStreamIterator {
     }
 
     async fn create_stream(&mut self) -> HummockResult<()> {
+        let block_metas = SstableMetaHandle::v2(&self.sstable).block_metas_vec(
+            self.block_metas_range.start + self.block_idx..self.block_metas_range.end,
+        );
         let block_stream = self
             .sstable_store
-            .get_stream_for_blocks(
-                self.sstable_info.object_id,
-                &self.block_metas()[self.block_idx..],
-            )
+            .get_stream_for_block_metas(self.sstable_info.object_id, block_metas)
             .instrument_await("stream_iter_get_stream".verbose())
             .await?;
         self.block_stream = Some(block_stream);
@@ -465,8 +459,13 @@ impl ConcatSstableIterator {
                 None => self.key_range.clone(),
             };
 
-            let block_metas_range =
-                filter_block_metas(&sstable.meta.block_metas, &read_table_ids, filter_key_range);
+            let meta_handle = SstableMetaHandle::v2(&sstable);
+            let block_metas_range = filter_block_metas_with_handle(
+                &meta_handle,
+                0..meta_handle.block_count(),
+                &read_table_ids,
+                filter_key_range,
+            );
 
             let mut found = true;
             if block_metas_range.is_empty() {
@@ -642,38 +641,41 @@ impl<I: HummockIterator<Direction = Forward>> HummockIterator for MonitoredCompa
     }
 }
 
-pub(crate) fn filter_block_metas(
-    block_metas: &[BlockMeta],
+fn filter_block_metas_with_handle(
+    meta_handle: &SstableMetaHandle<'_>,
+    block_metas_range: Range<usize>,
     read_table_ids: &HashSet<TableId>,
     key_range: KeyRange,
 ) -> Range<usize> {
-    if block_metas.is_empty() {
-        return 0..0;
+    if block_metas_range.is_empty() {
+        return block_metas_range.start..block_metas_range.start;
     }
 
+    let global_range = block_metas_range.start..=block_metas_range.end - 1;
     let mut start_index = if key_range.left.is_empty() {
-        0
+        block_metas_range.start
     } else {
         // start_index points to the greatest block whose smallest_key <= seek_key.
-        block_metas
-            .partition_point(|block| {
+        meta_handle
+            .block_metas_partition_point(global_range.clone(), |block| {
                 KeyComparator::compare_encoded_full_key(&key_range.left, &block.smallest_key)
                     != Ordering::Less
             })
             .saturating_sub(1)
+            .max(block_metas_range.start)
     };
 
     let mut end_index = if key_range.right.is_empty() {
-        block_metas.len()
+        block_metas_range.end
     } else {
-        let ret = block_metas.partition_point(|block| {
+        let ret = meta_handle.block_metas_partition_point(global_range, |block| {
             KeyComparator::compare_encoded_full_key(&block.smallest_key, &key_range.right)
                 != Ordering::Greater
         });
 
-        if ret == 0 {
+        if ret == block_metas_range.start {
             // not found
-            return 0..0;
+            return block_metas_range.start..block_metas_range.start;
         }
 
         ret
@@ -682,17 +684,17 @@ pub(crate) fn filter_block_metas(
 
     // Skip blocks that are not in the SST read table ids.
     while start_index <= end_index {
-        let start_block_table_id = block_metas[start_index].table_id();
+        let start_block_table_id = meta_handle.block_meta(start_index).table_id();
         if read_table_ids.contains(&start_block_table_id) {
             break;
         }
 
         // skip this table_id
         let old_start_index = start_index;
-        let block_metas_to_search = &block_metas[start_index..=end_index];
-
-        start_index += block_metas_to_search
-            .partition_point(|block_meta| block_meta.table_id() == start_block_table_id);
+        start_index = meta_handle
+            .block_metas_partition_point(start_index..=end_index, |block_meta| {
+                block_meta.table_id() == start_block_table_id
+            });
 
         if old_start_index == start_index {
             // no more blocks with the same table_id
@@ -701,18 +703,17 @@ pub(crate) fn filter_block_metas(
     }
 
     while start_index <= end_index {
-        let end_block_table_id = block_metas[end_index].table_id();
+        let end_block_table_id = meta_handle.block_meta(end_index).table_id();
         if read_table_ids.contains(&end_block_table_id) {
             break;
         }
 
         let old_end_index = end_index;
-        let block_metas_to_search = &block_metas[start_index..=end_index];
-
-        end_index = start_index
-            + block_metas_to_search
-                .partition_point(|block_meta| block_meta.table_id() < end_block_table_id)
-                .saturating_sub(1);
+        end_index = meta_handle
+            .block_metas_partition_point(start_index..=end_index, |block_meta| {
+                block_meta.table_id() < end_block_table_id
+            })
+            .saturating_sub(1);
 
         if end_index == old_end_index {
             // no more blocks with the same table_id
@@ -721,7 +722,7 @@ pub(crate) fn filter_block_metas(
     }
 
     if start_index > end_index {
-        return 0..0;
+        return block_metas_range.start..block_metas_range.start;
     }
 
     start_index..(end_index + 1)
@@ -731,6 +732,7 @@ pub(crate) fn filter_block_metas(
 mod tests {
     use std::cmp::Ordering;
     use std::collections::HashSet;
+    use std::ops::Range;
 
     use risingwave_common::catalog::TableId;
     use risingwave_common::util::epoch::test_epoch;
@@ -738,15 +740,16 @@ mod tests {
     use risingwave_hummock_sdk::key_range::KeyRange;
     use risingwave_hummock_sdk::sstable_info::{SstableInfo, SstableInfoInner};
 
-    use crate::hummock::BlockMeta;
     use crate::hummock::compactor::ConcatSstableIterator;
     use crate::hummock::iterator::test_utils::mock_sstable_store;
     use crate::hummock::iterator::{HummockIterator, MergeIterator};
+    use crate::hummock::sstable::SstableMetaHandle;
     use crate::hummock::test_utils::{
         TEST_KEYS_COUNT, default_builder_opt_for_test, gen_test_sstable_info,
         gen_test_sstable_with_table_ids, test_key_of, test_value_of,
     };
     use crate::hummock::value::HummockValue;
+    use crate::hummock::{BlockMeta, Sstable, SstableMeta};
 
     #[tokio::test]
     async fn test_concat_iterator() {
@@ -930,12 +933,32 @@ mod tests {
 
     #[tokio::test]
     async fn test_filter_block_metas() {
-        use crate::hummock::compactor::iterator::filter_block_metas;
+        fn filter_block_metas_for_test(
+            block_metas: &[BlockMeta],
+            read_table_ids: &HashSet<TableId>,
+            key_range: KeyRange,
+        ) -> Range<usize> {
+            let sstable = Sstable::new(
+                0.into(),
+                SstableMeta {
+                    block_metas: block_metas.to_vec(),
+                    ..Default::default()
+                },
+                false,
+            );
+            super::filter_block_metas_with_handle(
+                &SstableMetaHandle::v2(&sstable),
+                0..sstable.block_count(),
+                read_table_ids,
+                key_range,
+            )
+        }
 
         {
             let block_metas = Vec::default();
 
-            let ret = filter_block_metas(&block_metas, &HashSet::default(), KeyRange::default());
+            let ret =
+                filter_block_metas_for_test(&block_metas, &HashSet::default(), KeyRange::default());
 
             assert!(ret.is_empty());
         }
@@ -956,7 +979,7 @@ mod tests {
                 },
             ];
 
-            let ret = filter_block_metas(
+            let ret = filter_block_metas_for_test(
                 &block_metas,
                 &HashSet::from_iter(vec![1_u32.into(), 2.into(), 3.into()].into_iter()),
                 KeyRange::default(),
@@ -996,7 +1019,7 @@ mod tests {
                 },
             ];
 
-            let ret = filter_block_metas(
+            let ret = filter_block_metas_for_test(
                 &block_metas,
                 &HashSet::from_iter(vec![2_u32.into(), 3.into()].into_iter()),
                 KeyRange::default(),
@@ -1036,7 +1059,7 @@ mod tests {
                 },
             ];
 
-            let ret = filter_block_metas(
+            let ret = filter_block_metas_for_test(
                 &block_metas,
                 &HashSet::from_iter(vec![1_u32.into(), 2_u32.into()].into_iter()),
                 KeyRange::default(),
@@ -1075,7 +1098,7 @@ mod tests {
                     ..Default::default()
                 },
             ];
-            let ret = filter_block_metas(
+            let ret = filter_block_metas_for_test(
                 &block_metas,
                 &HashSet::from_iter(vec![2_u32.into()].into_iter()),
                 KeyRange::default(),
@@ -1115,7 +1138,7 @@ mod tests {
                     ..Default::default()
                 },
             ];
-            let ret = filter_block_metas(
+            let ret = filter_block_metas_for_test(
                 &block_metas,
                 &HashSet::from_iter(vec![2_u32.into()].into_iter()),
                 KeyRange::default(),
@@ -1156,7 +1179,7 @@ mod tests {
                 },
             ];
 
-            let ret = filter_block_metas(
+            let ret = filter_block_metas_for_test(
                 &block_metas,
                 &HashSet::from_iter(vec![2_u32.into()].into_iter()),
                 KeyRange::default(),
@@ -1189,7 +1212,7 @@ mod tests {
                 },
             ];
 
-            let ret = filter_block_metas(
+            let ret = filter_block_metas_for_test(
                 &block_metas,
                 &HashSet::from_iter(vec![1_u32.into(), 3_u32.into()].into_iter()),
                 KeyRange::default(),

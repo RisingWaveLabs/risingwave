@@ -28,6 +28,7 @@ use risingwave_pb::hummock::HummockVersionArchive;
 use risingwave_pb::hummock::group_delta::DeltaType;
 use risingwave_pb::id::HummockSstableId;
 use risingwave_rpc_client::HummockMetaClient;
+use risingwave_storage::hummock::sstable::SstableMetaHandle;
 use risingwave_storage::hummock::value::HummockValue;
 use risingwave_storage::hummock::{Block, BlockHolder, BlockIterator, SstableStoreRef};
 use risingwave_storage::monitor::StoreLocalStatistic;
@@ -126,12 +127,12 @@ async fn print_user_key_in_sst(
     let sst_metadata = sstable_store.sstable(sst, &mut dummy).await?;
     dummy.ignore();
     let data_path = sstable_store.get_sst_data_path(sst_metadata.id);
+    let meta_handle = SstableMetaHandle::v2(&sst_metadata);
     let mut is_first = true;
-    for block_meta in &sst_metadata.meta.block_metas {
-        let range =
-            block_meta.offset as usize..block_meta.offset as usize + block_meta.len as usize;
+    for block_idx in 0..meta_handle.block_count() {
+        let (range, uncompressed_capacity) = meta_handle.block_range(block_idx);
         let block_data = sstable_store.store().read(&data_path, range).await?;
-        let block = Box::new(Block::decode(block_data, block_meta.uncompressed_size as _).unwrap());
+        let block = Box::new(Block::decode(block_data, uncompressed_capacity).unwrap());
         let holder = BlockHolder::from_owned_block(block);
         let mut block_iter = BlockIterator::new(holder);
         block_iter.seek_to_first();

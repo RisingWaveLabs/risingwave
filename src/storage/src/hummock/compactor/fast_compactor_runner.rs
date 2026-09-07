@@ -29,7 +29,7 @@ use risingwave_hummock_sdk::key::FullKey;
 use risingwave_hummock_sdk::key_range::KeyRange;
 use risingwave_hummock_sdk::sstable_info::SstableInfo;
 use risingwave_hummock_sdk::table_stats::TableStats;
-use risingwave_hummock_sdk::{EpochWithGap, LocalSstableInfo, can_concat, compact_task_to_string};
+use risingwave_hummock_sdk::{LocalSstableInfo, can_concat, compact_task_to_string};
 use risingwave_pb::hummock::PbSstableFilterLayout;
 
 use crate::compaction_catalog_manager::CompactionCatalogAgentRef;
@@ -55,6 +55,10 @@ use crate::hummock::{
     SstableBuilderOptions, StreamingSstableWriterFactory, TableHolder,
 };
 use crate::monitor::{CompactorMetrics, StoreLocalStatistic};
+
+mod raw_copy;
+
+use self::raw_copy::RawCopyPlanner;
 
 /// Iterates over the KV-pairs of an SST while downloading it.
 pub struct BlockStreamIterator {
@@ -113,14 +117,20 @@ impl BlockStreamIterator {
         }
     }
 
+    fn raw_copy(&self) -> RawCopyPlanner<'_> {
+        RawCopyPlanner::for_current_v2(&self.sstable)
+    }
+
     async fn create_stream(&mut self) -> HummockResult<()> {
         // Fast compaction streams the physical SST blocks directly. Table-id pruning is handled
         // later by `CompactTaskExecutor` before raw block copy or decoded block compaction.
         let block_stream = self
             .sstable_store
-            .get_stream_for_blocks(
+            .get_stream_for_block_metas(
                 self.sstable_info.object_id,
-                &self.sstable.meta.block_metas[self.next_block_index..],
+                self.raw_copy()
+                    .block_metas_from(self.next_block_index)
+                    .to_vec(),
             )
             .instrument_await("stream_iter_get_stream".verbose())
             .await?;
@@ -147,11 +157,9 @@ impl BlockStreamIterator {
             };
             match ret {
                 Ok(Some((data, _))) => {
-                    let meta = self.sstable.meta.block_metas[self.next_block_index].clone();
-                    let filter_block = self
-                        .sstable
-                        .filter_reader
-                        .get_block_raw_filter(self.next_block_index);
+                    let raw_copy_planner = self.raw_copy();
+                    let meta = raw_copy_planner.raw_block_meta(self.next_block_index);
+                    let filter_block = raw_copy_planner.raw_block_filter(self.next_block_index);
                     self.next_block_index += 1;
                     return Ok(Some((data, filter_block, meta)));
                 }
@@ -182,7 +190,7 @@ impl BlockStreamIterator {
             }
         }
 
-        self.next_block_index = self.sstable.meta.block_metas.len();
+        self.next_block_index = self.raw_copy().block_count();
         self.iter.take();
         Ok(None)
     }
@@ -200,49 +208,31 @@ impl BlockStreamIterator {
     }
 
     fn next_block_smallest(&self) -> &[u8] {
-        self.sstable.meta.block_metas[self.next_block_index]
-            .smallest_key
-            .as_ref()
+        self.raw_copy().block_smallest_key(self.next_block_index)
     }
 
     fn next_block_largest(&self) -> &[u8] {
-        if self.next_block_index + 1 < self.sstable.meta.block_metas.len() {
-            self.sstable.meta.block_metas[self.next_block_index + 1]
-                .smallest_key
-                .as_ref()
-        } else {
-            self.sstable.meta.largest_key.as_ref()
-        }
+        self.raw_copy().block_largest_key(self.next_block_index)
     }
 
     fn current_block_largest(&self) -> Vec<u8> {
-        if self.next_block_index < self.sstable.meta.block_metas.len() {
-            let mut largest_key = FullKey::decode(
-                self.sstable.meta.block_metas[self.next_block_index]
-                    .smallest_key
-                    .as_ref(),
-            );
-            // do not include this key because it is the smallest key of next block.
-            largest_key.epoch_with_gap = EpochWithGap::new_max_epoch();
-            largest_key.encode()
-        } else {
-            self.sstable.meta.largest_key.clone()
-        }
+        self.raw_copy()
+            .raw_block_exclusive_largest_key(self.next_block_index)
+    }
+
+    fn sstable_largest_key_vec(&self) -> Vec<u8> {
+        self.raw_copy().sstable_largest_key_vec()
     }
 
     fn key(&self) -> FullKey<&[u8]> {
         match self.iter.as_ref() {
             Some(iter) => iter.key(),
-            None => FullKey::decode(
-                self.sstable.meta.block_metas[self.next_block_index]
-                    .smallest_key
-                    .as_ref(),
-            ),
+            None => FullKey::decode(self.next_block_smallest()),
         }
     }
 
     pub(crate) fn is_valid(&self) -> bool {
-        self.iter.is_some() || self.next_block_index < self.sstable.meta.block_metas.len()
+        self.iter.is_some() || self.next_block_index < self.raw_copy().block_count()
     }
 
     #[cfg(test)]
@@ -584,7 +574,8 @@ impl<B: FilterBuilder, C: CompactionFilter> CompactorRunner<B, C> {
         if rest_data.is_valid() {
             // compact rest keys of the current block.
             let sstable_iter = rest_data.sstable_iter.as_mut().unwrap();
-            let target_key = FullKey::decode(&sstable_iter.sstable.meta.largest_key);
+            let largest_key = sstable_iter.sstable_largest_key_vec();
+            let target_key = FullKey::decode(&largest_key);
             if let Some(iter) = sstable_iter.iter.as_mut() {
                 self.executor.reset_watermark();
                 self.executor.run(iter, target_key).await?;
@@ -610,7 +601,7 @@ impl<B: FilterBuilder, C: CompactionFilter> CompactorRunner<B, C> {
                     || need_deleted
                     || !self.executor.shall_copy_raw_block(&smallest_key.to_ref())
                 {
-                    let largest_key = sstable_iter.sstable.meta.largest_key.clone();
+                    let largest_key = sstable_iter.sstable_largest_key_vec();
                     let target_key = FullKey::decode(&largest_key);
                     sstable_iter.init_block_iter(block, block_meta.uncompressed_size as usize)?;
                     let mut iter = sstable_iter.iter.take().unwrap();

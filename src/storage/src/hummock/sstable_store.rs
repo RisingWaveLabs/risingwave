@@ -45,7 +45,7 @@ use tokio::time::Instant;
 
 use super::{
     BatchUploadWriter, Block, BlockMeta, BlockResponse, RecentFilter, Sstable, SstableMeta,
-    SstableWriterOptions,
+    SstableMetaHandle, SstableWriterOptions,
 };
 use crate::hummock::block_stream::{
     BlockDataStream, BlockStream, MemoryUsageTracker, PrefetchBlockStream,
@@ -345,7 +345,8 @@ impl SstableStore {
         policy: CachePolicy,
         stats: &mut StoreLocalStatistic,
     ) -> HummockResult<Box<dyn BlockStream>> {
-        let object_id = sst.id;
+        let meta_handle = SstableMetaHandle::v2(sst);
+        let object_id = meta_handle.object_id();
         if self.prefetch_buffer_usage.load(Ordering::Acquire) > self.prefetch_buffer_capacity {
             let block = self.get(sst, block_index, policy, stats).await?;
             return Ok(Box::new(PrefetchBlockStream::new(
@@ -375,8 +376,8 @@ impl SstableStore {
             )));
         }
         let end_index = std::cmp::min(end_index, block_index + self.max_prefetch_block_number);
-        let mut end_index = std::cmp::min(end_index, sst.meta.block_metas.len());
-        let start_offset = sst.meta.block_metas[block_index].offset as usize;
+        let mut end_index = std::cmp::min(end_index, meta_handle.block_count());
+        let start_offset = meta_handle.block_meta(block_index).offset as usize;
         let mut min_hit_index = end_index;
         let mut hit_count = 0;
         for idx in block_index..end_index {
@@ -398,9 +399,8 @@ impl SstableStore {
         stats.cache_data_prefetch_count += 1;
         stats.cache_data_prefetch_block_count += (end_index - block_index) as u64;
         let end_offset = start_offset
-            + sst.meta.block_metas[block_index..end_index]
-                .iter()
-                .map(|meta| meta.len as usize)
+            + (block_index..end_index)
+                .map(|idx| meta_handle.block_meta(idx).len as usize)
                 .sum::<usize>();
         let data_path = self.get_sst_data_path(object_id);
         let memory_usage = end_offset - start_offset;
@@ -421,7 +421,7 @@ impl SstableStore {
                     start_offset,
                     end_offset,
                     object_id,
-                    sst.meta.estimated_size,
+                    meta_handle.estimated_size(),
                 );
                 return Err(e.into());
             }
@@ -432,14 +432,15 @@ impl SstableStore {
         let mut offset = 0;
         let mut blocks = VecDeque::default();
         for idx in block_index..end_index {
-            let end = offset + sst.meta.block_metas[idx].len as usize;
+            let block_meta = meta_handle.block_meta(idx);
+            let end = offset + block_meta.len as usize;
             if end > buf.len() {
                 return Err(ObjectError::internal("read unexpected EOF").into());
             }
             // copy again to avoid holding a large data in memory.
             let block = Block::decode_with_copy(
                 buf.slice(offset..end),
-                sst.meta.block_metas[idx].uncompressed_size as usize,
+                block_meta.uncompressed_size as usize,
                 true,
             )?;
             let holder = if let CachePolicy::Fill(hint) = policy {
@@ -473,11 +474,12 @@ impl SstableStore {
         block_index: usize,
         policy: CachePolicy,
     ) -> HummockResult<BlockResponse> {
-        let object_id = sst.id;
-        let (range, uncompressed_capacity) = sst.calculate_block_info(block_index);
+        let meta_handle = SstableMetaHandle::v2(sst);
+        let object_id = meta_handle.object_id();
+        let (range, uncompressed_capacity) = meta_handle.block_range(block_index);
         let store = self.store.clone();
 
-        let file_size = sst.meta.estimated_size;
+        let file_size = meta_handle.estimated_size();
         let data_path = Arc::new(self.get_sst_data_path(object_id));
 
         let disable_cache: fn() -> bool = || {
@@ -797,10 +799,10 @@ impl SstableStore {
         self.prefetch_buffer_usage.load(Ordering::Acquire)
     }
 
-    pub async fn get_stream_for_blocks(
+    pub async fn get_stream_for_block_metas(
         &self,
         object_id: HummockSstableObjectId,
-        metas: &[BlockMeta],
+        metas: Vec<BlockMeta>,
     ) -> HummockResult<BlockDataStream> {
         fail_point!("get_stream_err");
         let data_path = self.get_sst_data_path(object_id);
@@ -822,7 +824,7 @@ impl SstableStore {
                 )));
             }
         };
-        Ok(BlockDataStream::new(reader, metas.to_vec()))
+        Ok(BlockDataStream::new(reader, metas))
     }
 
     pub fn meta_cache(&self) -> &HybridCache<HummockSstableObjectId, Box<Sstable>> {

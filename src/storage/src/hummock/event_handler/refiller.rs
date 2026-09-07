@@ -46,6 +46,7 @@ use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
 
 use crate::hummock::local_version::pinned_version::PinnedVersion;
+use crate::hummock::sstable::SstableMetaHandle;
 use crate::hummock::{
     Block, HummockError, HummockResult, RecentFilterTrait, Sstable, SstableBlockIndex,
     SstableStoreRef, TableHolder,
@@ -338,9 +339,12 @@ impl TableCacheRefillContext {
 }
 
 fn block_vnode_range(sstable: &Sstable, block_index: usize) -> (usize, usize) {
-    let block_meta = &sstable.meta.block_metas[block_index];
+    let meta_handle = SstableMetaHandle::v2(sstable);
+    let block_meta = meta_handle.block_meta(block_index);
     let block_smallest_key = FullKey::decode(&block_meta.smallest_key);
-    let table_key_end = match sstable.meta.block_metas.get(block_index + 1) {
+    let table_key_end = match (block_index + 1 < meta_handle.block_count())
+        .then(|| meta_handle.block_meta(block_index + 1))
+    {
         // A table switch always starts a new block. The next table's smallest key has an
         // unrelated vnode, so use the current table's terminal range instead.
         Some(next_block_meta) if next_block_meta.table_id() != block_meta.table_id() => {
@@ -357,7 +361,7 @@ fn block_vnode_range(sstable: &Sstable, block_index: usize) -> (usize, usize) {
         // key above. Keep it inclusive, especially for singleton tables whose key contains only
         // the vnode prefix.
         None => Bound::Included(
-            FullKey::decode(&sstable.meta.largest_key)
+            FullKey::decode(meta_handle.largest_key())
                 .user_key
                 .table_key,
         ),
@@ -697,15 +701,16 @@ impl DataCacheRefillTaskGenerator<'_> {
         for (sst_info, sst) in self.delta.insert_sst_infos.iter().zip_eq_fast(self.ssts) {
             debug_assert_eq!(sst_info.object_id, sst.id);
             debug_assert!(sst_info.table_ids.is_sorted());
+            let meta_handle = SstableMetaHandle::v2(sst);
             let mut blk_start = 0;
-            while blk_start < sst.block_count() {
+            while blk_start < meta_handle.block_count() {
                 // SstableBuilder ends a block before the table ID changes, so block metadata
                 // defines the exact physical boundary. `table_ids` below only admits logical
                 // projections and must not make a unit span another table.
-                let table_id = sst.meta.block_metas[blk_start].table_id();
-                let mut blk_end = std::cmp::min(sst.block_count(), blk_start + unit);
+                let table_id = meta_handle.block_meta(blk_start).table_id();
+                let mut blk_end = std::cmp::min(meta_handle.block_count(), blk_start + unit);
                 if let Some(table_boundary) = (blk_start + 1..blk_end)
-                    .find(|&block_index| sst.meta.block_metas[block_index].table_id() != table_id)
+                    .find(|&block_index| meta_handle.block_meta(block_index).table_id() != table_id)
                 {
                     blk_end = table_boundary;
                 }
@@ -824,14 +829,11 @@ impl DataCacheRefillTaskGenerator<'_> {
         let mut filtered: HashSet<SstableUnit> = HashSet::default();
         let recent_filter = self.context.sstable_store.recent_filter();
         for psst in parent_ssts {
-            for pblk in 0..psst.block_count() {
-                let pleft = &psst.meta.block_metas[pblk].smallest_key;
-                let pright = if pblk + 1 == psst.block_count() {
-                    // `largest_key` can be included or excluded, both are treated as included here
-                    &psst.meta.largest_key
-                } else {
-                    &psst.meta.block_metas[pblk + 1].smallest_key
-                };
+            let meta_handle = SstableMetaHandle::v2(&psst);
+            for pblk in 0..meta_handle.block_count() {
+                let pleft = &meta_handle.block_meta(pblk).smallest_key;
+                // `largest_key` can be included or excluded, both are treated as included here.
+                let pright = meta_handle.block_upper_bound_key(pblk + 1);
 
                 // partition point: unit.right < pblk.left
                 let uleft = originals.partition_point(|task| {
@@ -888,15 +890,13 @@ impl DataCacheRefillTask {
     }
 
     fn smallest_key(&self) -> &[u8] {
-        &self.sst.meta.block_metas[self.blks.start].smallest_key
+        &SstableMetaHandle::v2(&self.sst)
+            .block_meta(self.blks.start)
+            .smallest_key
     }
 
     fn largest_key(&self) -> &[u8] {
-        if self.blks.end == self.sst.block_count() {
-            &self.sst.meta.largest_key
-        } else {
-            &self.sst.meta.block_metas[self.blks.end].smallest_key
-        }
+        SstableMetaHandle::v2(&self.sst).block_upper_bound_key(self.blks.end)
     }
 }
 
@@ -991,8 +991,9 @@ impl CacheRefillTask {
             let mut contexts = Vec::with_capacity(blocks);
             let mut admits = 0;
 
-            let (range_first, _) = task.sst.calculate_block_info(task.blks.start);
-            let (range_last, _) = task.sst.calculate_block_info(task.blks.end - 1);
+            let meta_handle = SstableMetaHandle::v2(&task.sst);
+            let (range_first, _) = meta_handle.block_range(task.blks.start);
+            let (range_last, _) = meta_handle.block_range(task.blks.end - 1);
             let range = range_first.start..range_last.end;
 
             let size = range.size().unwrap();
@@ -1002,7 +1003,7 @@ impl CacheRefillTask {
                 .inc_by(size as _);
 
             for blk in task.blks {
-                let (range, uncompressed_capacity) = task.sst.calculate_block_info(blk);
+                let (range, uncompressed_capacity) = meta_handle.block_range(blk);
                 let key = SstableBlockIndex {
                     sst_id: task.sst.id,
                     block_idx: blk as u64,

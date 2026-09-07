@@ -867,7 +867,7 @@ mod tests {
             .await
             .unwrap();
         if let XorFilter::BlockXor16(reader) = &sstable.filter_reader.filter {
-            for idx in 0..sstable.meta.block_metas.len() {
+            for idx in 0..sstable.block_count() {
                 let resp = sstable_store
                     .get_block_response(&sstable, idx, CachePolicy::Fill(Hint::Normal))
                     .await

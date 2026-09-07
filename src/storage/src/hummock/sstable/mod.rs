@@ -19,7 +19,7 @@ mod block;
 
 use std::collections::HashSet;
 use std::fmt::{Debug, Formatter};
-use std::ops::{BitXor, Bound, Range};
+use std::ops::{BitXor, Bound, Range, RangeInclusive};
 
 pub use block::*;
 mod block_iterator;
@@ -192,14 +192,6 @@ impl Sstable {
         !self.filter_reader.is_empty()
     }
 
-    pub fn calculate_block_info(&self, block_index: usize) -> (Range<usize>, usize) {
-        let block_meta = &self.meta.block_metas[block_index];
-        let range =
-            block_meta.offset as usize..block_meta.offset as usize + block_meta.len as usize;
-        let uncompressed_capacity = block_meta.uncompressed_size as usize;
-        (range, uncompressed_capacity)
-    }
-
     #[inline(always)]
     pub fn hash_for_filter(dist_key: &[u8], table_id: u32) -> u64 {
         let dist_key_hash = xxh64::xxh64(dist_key, 0);
@@ -225,6 +217,97 @@ impl Sstable {
         std::mem::size_of::<Self>()
             + self.meta.estimated_heap_size()
             + self.filter_reader.estimated_heap_size()
+    }
+}
+
+/// Per-SST metadata capability handle.
+///
+/// This is not a public wrapper around full [`SstableMeta`]. Callers should ask
+/// for operations such as single-block metadata or block ranges. The V2
+/// implementation still uses the existing full meta internally.
+#[derive(Clone, Copy, Debug)]
+pub enum SstableMetaHandle<'a> {
+    V2(&'a Sstable),
+}
+
+impl<'a> SstableMetaHandle<'a> {
+    pub fn v2(sst: &'a Sstable) -> Self {
+        Self::V2(sst)
+    }
+
+    pub fn object_id(&self) -> HummockSstableObjectId {
+        match self {
+            Self::V2(sst) => sst.id,
+        }
+    }
+
+    pub fn block_count(&self) -> usize {
+        match self {
+            Self::V2(sst) => sst.block_count(),
+        }
+    }
+
+    pub fn estimated_size(&self) -> u32 {
+        match self {
+            Self::V2(sst) => sst.meta.estimated_size,
+        }
+    }
+
+    pub fn smallest_key(&self) -> &'a Vec<u8> {
+        match self {
+            Self::V2(sst) => &sst.meta.smallest_key,
+        }
+    }
+
+    pub fn block_meta(&self, global_block_idx: usize) -> &'a BlockMeta {
+        match self {
+            Self::V2(sst) => &sst.meta.block_metas[global_block_idx],
+        }
+    }
+
+    pub fn largest_key(&self) -> &'a Vec<u8> {
+        match self {
+            Self::V2(sst) => &sst.meta.largest_key,
+        }
+    }
+
+    /// Returns the exclusive upper key boundary for a block range ending at
+    /// `block_end_idx`.
+    ///
+    /// When the range reaches the last block, the SST largest key is used as
+    /// the boundary. Otherwise, the smallest key of the next block is used.
+    pub fn block_upper_bound_key(&self, block_end_idx: usize) -> &'a Vec<u8> {
+        if block_end_idx == self.block_count() {
+            self.largest_key()
+        } else {
+            &self.block_meta(block_end_idx).smallest_key
+        }
+    }
+
+    pub fn block_metas_partition_point(
+        &self,
+        range: RangeInclusive<usize>,
+        pred: impl FnMut(&BlockMeta) -> bool,
+    ) -> usize {
+        let start = *range.start();
+        let end = *range.end();
+        match self {
+            Self::V2(sst) => start + sst.meta.block_metas[start..=end].partition_point(pred),
+        }
+    }
+
+    pub fn block_metas_vec(&self, range: Range<usize>) -> Vec<BlockMeta> {
+        match self {
+            Self::V2(sst) => sst.meta.block_metas[range].to_vec(),
+        }
+    }
+
+    pub fn block_range(&self, global_block_idx: usize) -> (Range<usize>, usize) {
+        let block_meta = self.block_meta(global_block_idx);
+        let range =
+            block_meta.offset as usize..block_meta.offset as usize + block_meta.len as usize;
+        let uncompressed_capacity = block_meta.uncompressed_size as usize;
+        (range, uncompressed_capacity)
     }
 }
 

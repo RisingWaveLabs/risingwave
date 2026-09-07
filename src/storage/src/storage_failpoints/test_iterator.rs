@@ -407,7 +407,7 @@ async fn test_failpoints_compactor_iterator_recreate() {
     let mut stats = StoreLocalStatistic::default();
 
     let table = sstable_store.sstable(&info, &mut stats).await.unwrap();
-    let block_metas_range = 0..table.meta.block_metas.len();
+    let block_metas_range = 0..table.block_count();
     let mut sstable_iter = SstableStreamIterator::new(
         table,
         block_metas_range,
