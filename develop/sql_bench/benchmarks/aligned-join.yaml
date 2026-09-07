@@ -1,0 +1,51 @@
+# Benchmark configuration
+benchmark_name: sample_benchmark
+
+# SQL to set up the initial schema and data (run once)
+setup_sql: |
+  set streaming_enable_unaligned_join = false;
+  create table dim(v1 int);
+  INSERT INTO dim VALUES(1), (2);
+  create table fact(v0 int primary key, v1 int, v2 varchar, v3 varchar);
+  create materialized view m1 as
+    select v0, count(*), sum(v0), string_agg(v2, ',')
+    from fact join dim on fact.v1 = dim.v1
+    group by v0;
+
+
+  INSERT INTO fact
+    SELECT
+      x as v0,
+      1 as v1,
+      'abcdefgakjandjkw' as v2,
+      'jkb1ku1bu' as v3
+    FROM generate_series(1, 2000000) t(x);
+  INSERT INTO fact
+    SELECT
+      x as v0,
+      2 as v1,
+      'abcdefgakjandjkw' as v2,
+      'jkb1ku1bu' as v3
+    FROM generate_series(2000001, 4000000) t(x);
+  flush;
+
+# SQL to prepare the data before each run
+prepare_sql: |
+
+# SQL to clean up after each run
+conclude_sql: |
+  INSERT INTO dim VALUES(1), (2);
+  flush;
+
+# SQL to clean up everything after all runs are complete
+cleanup_sql: |
+  DROP MATERIALIZED VIEW IF EXISTS m1;
+  DROP TABLE IF EXISTS dim;
+  DROP TABLE IF EXISTS fact;
+# SQL to benchmark (optimized version)
+benchmark_sql: |
+  DELETE FROM dim;
+  flush;
+
+# Number of times to run the benchmark
+runs: 3
