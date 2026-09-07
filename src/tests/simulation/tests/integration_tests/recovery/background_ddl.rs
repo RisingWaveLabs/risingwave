@@ -558,7 +558,7 @@ async fn test_ddl_cancel() -> Result<()> {
         let result = create_mv(&mut session).await;
         match result {
             Ok(_) => break,
-            Err(e) if e.to_string().contains("under creation") => {
+            Err(e) if e.to_string().contains("still being created") => {
                 tracing::info!("create mv failed, retrying: {}", e);
             }
             Err(e) => {
@@ -812,7 +812,7 @@ async fn test_late_foreground_ddl_recovery() -> Result<()> {
         .await
         .expect_err("duplicate CREATE should observe the recovered job");
     assert!(
-        err.to_string().contains("exists but under creation"),
+        err.to_string().contains("still being created"),
         "unexpected duplicate CREATE error: {err}"
     );
 

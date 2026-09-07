@@ -154,7 +154,7 @@ pub fn insert_privatelink_broker_rewrite_map(
         )?;
     } else {
         if svc.is_none() {
-            bail!("Privatelink endpoint not found.");
+            bail!("PrivateLink endpoint not found");
         }
         let svc = svc.unwrap();
         for (link, broker) in link_targets.iter().zip_eq_fast(broker_addrs.into_iter()) {
@@ -205,7 +205,7 @@ fn handle_privatelink_endpoint(
             .map(|v| {
                 serde_json::from_value(v.clone()).map_err(|_| {
                     anyhow!(
-                        "expect json schema {{\"host\": \"endpoint url\"}} but got {}",
+                        "expected JSON in the form {{\"host\": \"endpoint url\"}}, but got {}",
                         v
                     )
                 })
@@ -306,7 +306,7 @@ mod tests {
         .unwrap_err();
         assert_eq!(
             err.to_string(),
-            "expect json schema {\"host\": \"endpoint url\"} but got {\"somekey_1\":\"aaaa\"}"
+            "expected JSON in the form {\"host\": \"endpoint url\"}, but got {\"somekey_1\":\"aaaa\"}"
         );
 
         // illegal json

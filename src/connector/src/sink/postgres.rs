@@ -464,7 +464,7 @@ impl PostgresSinkWriter {
                 }
                 _ => {
                     tracing::error!(
-                        "row ignored, append-only sink should not receive update insert, update delete and delete operations"
+                        "row ignored: an append-only sink should not receive update-insert, update-delete, or delete operations"
                     );
                 }
             }
@@ -476,7 +476,7 @@ impl PostgresSinkWriter {
         if let Some(transaction) = Arc::into_inner(transaction) {
             transaction.commit().await?;
         } else {
-            tracing::error!("transaction lost!");
+            tracing::error!("transaction handle was lost");
         }
 
         Ok(())
@@ -536,7 +536,7 @@ impl PostgresSinkWriter {
         if let Some(transaction) = Arc::into_inner(transaction) {
             transaction.commit().await?;
         } else {
-            tracing::error!("transaction lost!");
+            tracing::error!("transaction handle was lost");
         }
         Ok(())
     }

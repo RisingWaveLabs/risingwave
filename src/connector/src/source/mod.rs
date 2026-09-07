@@ -88,7 +88,7 @@ use async_nats::jetstream::context::Context as JetStreamContext;
 pub use manager::{SourceColumnDesc, SourceColumnType};
 use risingwave_common::array::{Array, ArrayRef};
 use risingwave_common::row::OwnedRow;
-use risingwave_pb::id::SourceId;
+use risingwave_pb::id::{ActorId, SourceId};
 use thiserror_ext::AsReport;
 pub use util::fill_adaptive_split;
 
@@ -209,7 +209,8 @@ impl WaitCheckpointTask {
                         return;
                     };
 
-                    let Some(ack_tx) = PULSAR_ACK_CHANNEL.get(ack_channel_id).await else {
+                    let Some(ack_tx) = PULSAR_ACK_CHANNEL.lock().get(ack_channel_id).cloned()
+                    else {
                         GLOBAL_SOURCE_METRICS.inc_connector_ack_failure_count(
                             source_name,
                             "pulsar",
@@ -408,7 +409,33 @@ pub struct CdcTableSnapshotSplitCommon<T: Clone> {
 pub type CdcTableSnapshotSplit = CdcTableSnapshotSplitCommon<OwnedRow>;
 pub type CdcTableSnapshotSplitRaw = CdcTableSnapshotSplitCommon<Vec<u8>>;
 
+/// Build the identifier of the ACK channel for a Pulsar reader.
+///
+/// Multiple actors can consume the same source split in one process, so the actor ID is required
+/// to prevent one reader from replacing another reader's channel.
 #[inline]
-pub fn build_pulsar_ack_channel_id(source_id: SourceId, split_id: &SplitId) -> String {
-    format!("{}-{}", source_id, split_id)
+pub fn build_pulsar_ack_channel_id(
+    source_id: SourceId,
+    split_id: &SplitId,
+    actor_id: ActorId,
+) -> String {
+    format!("{}-{}-{}", source_id, split_id, actor_id)
+}
+
+#[cfg(test)]
+mod tests {
+    use risingwave_pb::id::{ActorId, SourceId};
+
+    use super::{SplitId, build_pulsar_ack_channel_id};
+
+    #[test]
+    fn test_pulsar_ack_channel_id_is_actor_scoped() {
+        let source_id = SourceId::new(7);
+        let split_id: SplitId = "persistent://public/default/topic".into();
+
+        let first = build_pulsar_ack_channel_id(source_id, &split_id, ActorId::new(11));
+        let second = build_pulsar_ack_channel_id(source_id, &split_id, ActorId::new(12));
+
+        assert_ne!(first, second);
+    }
 }

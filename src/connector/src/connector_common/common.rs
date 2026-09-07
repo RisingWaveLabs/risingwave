@@ -136,7 +136,7 @@ impl AwsAuthProps {
                 .build()
                 .region()
                 .await
-                .context("region should be provided")?)
+                .context("region must be provided")?)
         }
     }
 
@@ -156,7 +156,7 @@ impl AwsAuthProps {
                 aws_config::default_provider::credentials::default_provider().await,
             ))
         } else {
-            bail!("Both \"access_key\" and \"secret_key\" are required.")
+            bail!("Both `access_key` and `secret_key` must be provided")
         }
     }
 
@@ -975,7 +975,9 @@ impl NatsCommon {
                     connect_options =
                         connect_options.user_and_password(v_user.into(), v_password.into())
                 } else {
-                    bail!("nats connect mode is user_and_password, but user or password is empty");
+                    bail!(
+                        "NATS connect mode `user_and_password` requires both `user` and `password`"
+                    );
                 }
             }
 
@@ -985,12 +987,14 @@ impl NatsCommon {
                         .credentials(&self.create_credential(v_nkey, v_jwt)?)
                         .expect("failed to parse static creds")
                 } else {
-                    bail!("nats connect mode is credential, but nkey or jwt is empty");
+                    bail!("NATS connect mode `credential` requires both `nkey` and `jwt`");
                 }
             }
             "plain" => {}
             _ => {
-                bail!("nats connect mode only accepts user_and_password/credential/plain");
+                bail!(
+                    "NATS connect mode must be one of `user_and_password`, `credential`, or `plain`"
+                );
             }
         };
 
@@ -1003,7 +1007,7 @@ impl NatsCommon {
                     .collect::<Result<Vec<async_nats::ServerAddr>, _>>()?,
             )
             .await
-            .context("build nats client error")
+            .context("failed to build the NATS client")
             .map_err(SinkError::Nats)?;
         Ok(client)
     }
@@ -1023,21 +1027,21 @@ impl NatsCommon {
                 {
                     match existing_client.connection_state() {
                         async_nats::connection::State::Connected => {
-                            tracing::info!("reuse existing nats client for {}", self.server_url);
+                            tracing::info!("reusing existing NATS client for {}", self.server_url);
                             client = Some(existing_client);
                             return Ok(Op::Nop);
                         }
                         _ => {
                             tracing::warn!(
                                 server_url = self.server_url,
-                                "existing nats client is not connected",
+                                "existing NATS client is not connected",
                             );
                         }
                     }
                 }
                 tracing::info!(
                     server_url = self.server_url,
-                    "no cached client, or client disconnected, building new nats client"
+                    "no cached NATS client was found, or the cached client disconnected; building a new client"
                 );
                 let new_client = Arc::new(self.build_client_inner().await?);
                 client = Some(new_client.clone());
@@ -1206,7 +1210,7 @@ pub(crate) fn load_certs(
 
     CertificateDer::pem_slice_iter(&cert_bytes)
         .collect::<Result<Vec<_>, _>>()
-        .context("Failed to parse certificates")
+        .context("failed to parse certificates")
         .map_err(Into::into)
 }
 
@@ -1222,7 +1226,7 @@ pub(crate) fn load_private_key(
     let cert = PrivatePkcs8KeyDer::pem_slice_iter(&cert_bytes)
         .next()
         .ok_or_else(|| anyhow!("No private key found"))?
-        .context("Failed to parse private key")?;
+        .context("failed to parse the private key")?;
     Ok(cert.into())
 }
 

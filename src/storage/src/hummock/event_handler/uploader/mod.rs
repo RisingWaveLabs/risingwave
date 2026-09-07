@@ -331,7 +331,7 @@ impl UploadingTask {
                 }),
 
             Err(err) => Err(HummockError::other(format!(
-                "fail to join upload join handle: {}",
+                "failed to join the upload task handle: {}",
                 err.as_report()
             ))),
         })

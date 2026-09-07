@@ -737,7 +737,11 @@ impl SinkMetaClient {
                 {
                     Ok(_) => {}
                     Err(e) => {
-                        tracing::warn!(error = %e.as_report(), %sink_id, "Failed to add sink fail event to event log.");
+                        tracing::warn!(
+                            error = %e.as_report(),
+                            %sink_id,
+                            "failed to add the sink failure event to the event log",
+                        );
                     }
                 }
             }

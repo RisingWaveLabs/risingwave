@@ -264,6 +264,7 @@ pub fn start(
                 tls_config,
                 redact_sql_option_keywords: Some(redact_sql_option_keywords),
                 message_memory_manager,
+                stream_flush_threshold_bytes: frontend_config.stream_flush_threshold_bytes,
             },
             shutdown,
         )

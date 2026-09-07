@@ -462,7 +462,10 @@ impl PostgresExternalTable {
                         Some(scalar),
                     ),
                     Err(err) => {
-                        tracing::warn!(error=%err.as_report(), "failed to parse postgres default value expression, only constant is supported");
+                        tracing::warn!(
+                            error=%err.as_report(),
+                            "failed to parse the PostgreSQL default value expression; only constants are supported",
+                        );
                         ColumnDesc::named(col.name.clone(), ColumnId::placeholder(), rw_data_type)
                     }
                 }
@@ -737,14 +740,14 @@ pub fn sea_type_to_rw_type(col_type: &SeaType) -> ConnectorResult<DataType> {
         | SeaType::VarBit(_)
         | SeaType::TsVector
         | SeaType::TsQuery => {
-            bail!("{:?} type not supported", col_type);
+            bail!("{:?} data type is not supported", col_type);
         }
         SeaType::Unknown(name) => {
             if let Some(dim) = parse_pgvector_dimension(name)? {
                 DataType::Vector(dim)
             } else {
                 // NOTES: user-defined enum type is classified as `Unknown`
-                tracing::warn!("Unknown Postgres data type: {name}, map to varchar");
+                tracing::warn!("unknown PostgreSQL data type `{name}`; mapping it to varchar");
                 DataType::Varchar
             }
         }

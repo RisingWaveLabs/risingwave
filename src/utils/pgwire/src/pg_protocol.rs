@@ -249,6 +249,7 @@ pub struct ConnectionContext {
     pub tls_config: Option<TlsConfig>,
     pub redact_sql_option_keywords: Option<RedactSqlOptionKeywordsRef>,
     pub message_memory_manager: MessageMemoryManagerRef,
+    pub stream_flush_threshold_bytes: usize,
 }
 
 impl<S, SM> PgProtocol<S, SM>
@@ -266,9 +267,10 @@ where
             tls_config,
             redact_sql_option_keywords,
             message_memory_manager,
+            stream_flush_threshold_bytes,
         } = context;
         Self {
-            stream: PgStream::new(stream),
+            stream: PgStream::new(stream, stream_flush_threshold_bytes),
             is_terminate: false,
             state: PgProtocolState::Startup,
             session_mgr,
@@ -906,7 +908,9 @@ where
             while let Some(row_set) = res.values_stream().next().await {
                 let row_set = row_set.map_err(PsqlError::SimpleQueryError)?;
                 for row in row_set {
-                    self.stream.write_no_flush(BeMessage::CopyData(&row))?;
+                    self.stream
+                        .write_streaming(BeMessage::CopyData(&row))
+                        .await?;
                     count += 1;
                 }
             }
@@ -930,7 +934,9 @@ where
             while let Some(row_set) = res.values_stream().next().await {
                 let row_set = row_set.map_err(PsqlError::SimpleQueryError)?;
                 for row in row_set {
-                    self.stream.write_no_flush(BeMessage::DataRow(&row))?;
+                    self.stream
+                        .write_streaming(BeMessage::DataRow(&row))
+                        .await?;
                     rows_cnt += 1;
                 }
             }
@@ -1323,17 +1329,19 @@ pub struct PgStream<S> {
     stream: Arc<Mutex<PgStreamInner<S>>>,
     /// Write into buffer before flush to stream.
     write_buf: BytesMut,
+    stream_flush_threshold_bytes: usize,
     read_header: Option<FeMessageHeader>,
 }
 
 impl<S> PgStream<S> {
-    /// Create a new `PgStream` with the given stream and default write buffer capacity.
-    pub fn new(stream: S) -> Self {
+    /// Create a new `PgStream` with the given stream and streaming flush threshold.
+    pub fn new(stream: S, stream_flush_threshold_bytes: usize) -> Self {
         const DEFAULT_WRITE_BUF_CAPACITY: usize = 10 * 1024;
 
         Self {
             stream: Arc::new(Mutex::new(PgStreamInner::Unencrypted(stream))),
             write_buf: BytesMut::with_capacity(DEFAULT_WRITE_BUF_CAPACITY),
+            stream_flush_threshold_bytes,
             read_header: None,
         }
     }
@@ -1350,6 +1358,7 @@ impl<S> Clone for PgStream<S> {
         Self {
             stream: Arc::clone(&self.stream),
             write_buf: BytesMut::with_capacity(self.write_buf.capacity()),
+            stream_flush_threshold_bytes: self.stream_flush_threshold_bytes,
             read_header: self.read_header.clone(),
         }
     }
@@ -1450,6 +1459,16 @@ where
 
     pub fn write_no_flush(&mut self, message: BeMessage<'_>) -> io::Result<()> {
         BeMessage::write(&mut self.write_buf, message)
+    }
+
+    /// Write a message that is part of a potentially large response, flushing periodically to
+    /// bound the write buffer and propagate network backpressure to the result stream.
+    pub(crate) async fn write_streaming(&mut self, message: BeMessage<'_>) -> io::Result<()> {
+        self.write_no_flush(message)?;
+        if self.write_buf.len() >= self.stream_flush_threshold_bytes {
+            self.flush().await?;
+        }
+        Ok(())
     }
 
     async fn write(&mut self, message: BeMessage<'_>) -> io::Result<()> {
@@ -1674,7 +1693,36 @@ fn parse_options(options: &str) -> PsqlResult<Vec<(String, String)>> {
 mod tests {
     use std::collections::HashSet;
 
+    use tokio::io::AsyncReadExt;
+
     use super::*;
+    use crate::types::Row;
+
+    #[tokio::test]
+    async fn test_streaming_write_flushes_at_threshold() {
+        const STREAM_FLUSH_THRESHOLD: usize = 64 * 1024;
+
+        let (server, mut client) = tokio::io::duplex(STREAM_FLUSH_THRESHOLD * 2);
+        let mut stream = PgStream::new(server, STREAM_FLUSH_THRESHOLD);
+
+        let small_row = Row::new(vec![Some(Bytes::from_static(b"small"))]);
+        stream
+            .write_streaming(BeMessage::DataRow(&small_row))
+            .await
+            .unwrap();
+        assert!(!stream.write_buf.is_empty());
+
+        let large_row = Row::new(vec![Some(Bytes::from(vec![0; STREAM_FLUSH_THRESHOLD]))]);
+        stream
+            .write_streaming(BeMessage::DataRow(&large_row))
+            .await
+            .unwrap();
+        assert!(stream.write_buf.is_empty());
+
+        let mut message_tag = [0];
+        client.read_exact(&mut message_tag).await.unwrap();
+        assert_eq!(message_tag[0], b'D');
+    }
 
     #[test]
     fn test_redact_parsable_sql() {

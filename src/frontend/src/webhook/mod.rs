@@ -175,7 +175,7 @@ pub(super) mod handlers {
             Ok(())
         } else {
             Err(err(
-                anyhow!("Failed to fast insert: {}", res.error_message),
+                anyhow!("Fast insert failed: {}", res.error_message),
                 StatusCode::INTERNAL_SERVER_ERROR,
             ))
         }
@@ -188,7 +188,7 @@ pub(super) mod handlers {
             // Use builder to obtain a single column & single row DataChunk
             let json_value = Value::from_text(body).map_err(|e| {
                 err(
-                    anyhow!(e).context("Failed to parse body"),
+                    anyhow!(e).context("failed to parse request body"),
                     StatusCode::UNPROCESSABLE_ENTITY,
                 )
             })?;
@@ -206,7 +206,7 @@ pub(super) mod handlers {
             for row in &rows {
                 let json_value = Value::from_text(row).map_err(|e| {
                     err(
-                        anyhow!(e).context("Failed to parse body"),
+                        anyhow!(e).context("failed to parse request body"),
                         StatusCode::UNPROCESSABLE_ENTITY,
                     )
                 })?;
@@ -260,7 +260,7 @@ pub(super) mod handlers {
                 .as_ref()
                 .ok_or_else(|| {
                     err(
-                        anyhow!("Table `{}` is not with webhook source", table),
+                        anyhow!("Table `{}` is not backed by a webhook source", table),
                         StatusCode::FORBIDDEN,
                     )
                 })?
@@ -294,7 +294,7 @@ pub(super) mod handlers {
     ) -> Result<FastInsertResponse> {
         let response = client.fast_insert(request).await.map_err(|e| {
             err(
-                anyhow!(e).context("Failed to execute on compute node"),
+                anyhow!(e).context("failed to execute on the compute node"),
                 StatusCode::INTERNAL_SERVER_ERROR,
             )
         })?;
@@ -343,18 +343,18 @@ impl WebhookService {
         {
             if let Some(tls_config) = &srv.tls_config {
                 let config = OpenSSLConfig::from_pem_file(&tls_config.cert, &tls_config.key)
-                    .context("Failed to load TLS config for webhook service")?;
+                    .context("failed to load the TLS config for the webhook service")?;
                 axum_server::bind_openssl(srv.webhook_addr, config)
                     .serve(app.into_make_service())
                     .await
-                    .context("Failed to serve webhook service over TLS")?;
+                    .context("failed to serve the webhook service over TLS")?;
             } else {
                 let listener = TcpListener::bind(&srv.webhook_addr)
                     .await
-                    .context("Failed to bind dashboard address")?;
+                    .context("failed to bind the webhook address")?;
                 axum::serve(listener, app)
                     .await
-                    .context("Failed to serve dashboard service")?;
+                    .context("failed to serve the webhook service")?;
             }
         }
 

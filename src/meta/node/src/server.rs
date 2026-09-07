@@ -204,7 +204,7 @@ pub async fn rpc_serve_with_store(
                 .run_once(lease_interval_secs as i64, election_shutdown_rx.clone())
                 .await
             {
-                tracing::error!(error = %e.as_report(), "election error happened");
+                tracing::error!(error = %e.as_report(), "an election error occurred");
             }
             // Leader lost, shutdown the service.
             shutdown.cancel();
@@ -235,7 +235,7 @@ pub async fn rpc_serve_with_store(
 
                 res = is_leader_watcher.changed() => {
                     if res.is_err() {
-                        tracing::error!("leader watcher recv failed");
+                        tracing::error!("failed to receive a leader watcher update");
                     }
                 }
             }
@@ -678,7 +678,10 @@ pub async fn start_service_as_election_leader(
                         .await
                         .map(Some)
                         .unwrap_or_else(|e| {
-                            tracing::warn!(err = %e.as_report(), "failed to collect pinned snapshot epochs. pause vacuum time travel");
+                            tracing::warn!(
+                                err = %e.as_report(),
+                                "failed to collect pinned snapshot epochs; pausing time-travel vacuum",
+                            );
                             None
                         })
                 })

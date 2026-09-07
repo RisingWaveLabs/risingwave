@@ -15,22 +15,22 @@ system ok
 python3 e2e_test/webhook/sender.py --secret TEST_WEBHOOK
 
 system ok
-python3 e2e_test/webhook/expect_failure.py --secret TEST_WEBHOOK --table multi_column_validate --payload '{"id":1234,"customer_name":"Alice","amount":99.99}' --expected-status '400' --expected-error 'unsupported webhook payload encode' --header 'x-rw-webhook-encode: csv'
+python3 e2e_test/webhook/expect_failure.py --secret TEST_WEBHOOK --table multi_column_validate --payload '{"id":1234,"customer_name":"Alice","amount":99.99}' --expected-status '400' --expected-error 'unsupported webhook payload encoding' --header 'x-rw-webhook-encode: csv'
 
 system ok
-python3 e2e_test/webhook/expect_failure.py --secret TEST_WEBHOOK --table multi_column_validate --payload '{"id":1234,"customer_name":"Alice","amount":99.99}' --expected-status '400' --expected-error 'unrecognized `x-rw-webhook-json-timestamp-handling-mode` value' --header 'x-rw-webhook-json-timestamp-handling-mode: invalid'
+python3 e2e_test/webhook/expect_failure.py --secret TEST_WEBHOOK --table multi_column_validate --payload '{"id":1234,"customer_name":"Alice","amount":99.99}' --expected-status '400' --expected-error 'unrecognized value `invalid` for `x-rw-webhook-json-timestamp-handling-mode`' --header 'x-rw-webhook-json-timestamp-handling-mode: invalid'
 
 system ok
 python3 e2e_test/webhook/expect_failure.py --secret TEST_WEBHOOK --table multi_column_validate --payload '{"id":1234,"customer_name":"Alice","amount":99.99}' --expected-status '400' --expected-error 'invalid webhook JSON decoder option' --header 'x-rw-webhook-json-timestamptz-handling-mode: invalid'
 
 system ok
-python3 e2e_test/webhook/expect_failure.py --secret TEST_WEBHOOK --table multi_column_validate --payload '{"id":1234,"customer_name":"Alice","amount":99.99}' --expected-status '400' --expected-error 'unrecognized `x-rw-webhook-json-time-handling-mode` value' --header 'x-rw-webhook-json-time-handling-mode: invalid'
+python3 e2e_test/webhook/expect_failure.py --secret TEST_WEBHOOK --table multi_column_validate --payload '{"id":1234,"customer_name":"Alice","amount":99.99}' --expected-status '400' --expected-error 'unrecognized value `invalid` for `x-rw-webhook-json-time-handling-mode`' --header 'x-rw-webhook-json-time-handling-mode: invalid'
 
 system ok
-python3 e2e_test/webhook/expect_failure.py --secret TEST_WEBHOOK --table multi_column_validate --payload '{"id":1234,"customer_name":"Alice","amount":99.99}' --expected-status '400' --expected-error 'unrecognized `x-rw-webhook-json-bigint-unsigned-handling-mode` value' --header 'x-rw-webhook-json-bigint-unsigned-handling-mode: invalid'
+python3 e2e_test/webhook/expect_failure.py --secret TEST_WEBHOOK --table multi_column_validate --payload '{"id":1234,"customer_name":"Alice","amount":99.99}' --expected-status '400' --expected-error 'unrecognized value `invalid` for `x-rw-webhook-json-bigint-unsigned-handling-mode`' --header 'x-rw-webhook-json-bigint-unsigned-handling-mode: invalid'
 
 system ok
-python3 e2e_test/webhook/expect_failure.py --secret TEST_WEBHOOK --table multi_column_validate --payload '{"id":1234,"customer_name":"Alice","amount":99.99}' --expected-status '400' --expected-error 'unrecognized `x-rw-webhook-json-handle-toast-columns` value' --header 'x-rw-webhook-json-handle-toast-columns: invalid'
+python3 e2e_test/webhook/expect_failure.py --secret TEST_WEBHOOK --table multi_column_validate --payload '{"id":1234,"customer_name":"Alice","amount":99.99}' --expected-status '400' --expected-error 'unrecognized value `invalid` for `x-rw-webhook-json-handle-toast-columns`' --header 'x-rw-webhook-json-handle-toast-columns: invalid'
 
 system ok
 python3 e2e_test/webhook/expect_failure.py --secret TEST_WEBHOOK --table multi_column_validate --payload '{"id":1234,"customer_name":"Alice",' --expected-status '422' --expected-error 'failed to decode webhook JSON payload'

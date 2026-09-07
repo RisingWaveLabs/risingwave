@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::sync::LazyLock;
 use std::task::Poll;
 
@@ -20,7 +21,7 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use futures_async_stream::try_stream;
 use itertools::Itertools;
-use moka::future::Cache as MokaCache;
+use parking_lot::Mutex;
 use prost_013::Message as _;
 use pulsar::consumer::{InitialPosition, Message};
 use pulsar::message::proto::MessageIdData;
@@ -38,9 +39,40 @@ use crate::source::{
     BoxSourceChunkStream, Column, SourceContextRef, SourceMessage, SplitId, SplitMetaData,
     SplitReader, build_pulsar_ack_channel_id, into_chunk_stream,
 };
-pub static PULSAR_ACK_CHANNEL: LazyLock<
-    MokaCache<String, tokio::sync::mpsc::UnboundedSender<Vec<u8>>>,
-> = LazyLock::new(|| moka::future::Cache::builder().build()); // mapping:
+type PulsarAckSender = tokio::sync::mpsc::UnboundedSender<Vec<u8>>;
+
+pub(crate) static PULSAR_ACK_CHANNEL: LazyLock<Mutex<HashMap<String, PulsarAckSender>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Owns one ACK channel registry entry and removes it when its reader is dropped.
+///
+/// The sender identity check prevents an old reader from removing the replacement channel when a
+/// stream is rebuilt with the same channel ID.
+struct PulsarAckChannelRegistration {
+    channel_id: String,
+    sender: PulsarAckSender,
+}
+
+impl PulsarAckChannelRegistration {
+    fn new(channel_id: String, sender: PulsarAckSender) -> Self {
+        PULSAR_ACK_CHANNEL
+            .lock()
+            .insert(channel_id.clone(), sender.clone());
+        Self { channel_id, sender }
+    }
+}
+
+impl Drop for PulsarAckChannelRegistration {
+    fn drop(&mut self) {
+        let mut channels = PULSAR_ACK_CHANNEL.lock();
+        if channels
+            .get(&self.channel_id)
+            .is_some_and(|sender| sender.same_channel(&self.sender))
+        {
+            channels.remove(&self.channel_id);
+        }
+    }
+}
 
 const PULSAR_DEFAULT_SUBSCRIPTION_PREFIX: &str = "rw-consumer";
 
@@ -280,7 +312,7 @@ impl PulsarBrokerReader {
             )
         });
         #[for_await]
-        for msgs in self.into_stream().await.ready_chunks(max_chunk_size) {
+        for msgs in self.into_stream().ready_chunks(max_chunk_size) {
             let msgs = msgs
                 .into_iter()
                 .collect::<Result<Vec<Message<Vec<u8>>>, _>>()?;
@@ -322,19 +354,21 @@ impl PulsarBrokerReader {
         }
     }
 
-    async fn into_stream(self) -> PulsarConsumeStream {
+    fn into_stream(self) -> PulsarConsumeStream {
         let (ack_tx, ack_rx) = tokio::sync::mpsc::unbounded_channel();
-        let channel_entry = build_pulsar_ack_channel_id(self.source_ctx.source_id, &self.split_id);
-        PULSAR_ACK_CHANNEL
-            .entry(channel_entry)
-            .and_upsert_with(|_| std::future::ready(ack_tx))
-            .await;
+        let channel_entry = build_pulsar_ack_channel_id(
+            self.source_ctx.source_id,
+            &self.split_id,
+            self.source_ctx.actor_id,
+        );
+        let ack_channel_registration = PulsarAckChannelRegistration::new(channel_entry, ack_tx);
 
         PulsarConsumeStream {
             source_ctx: self.source_ctx,
             split_id: self.split_id,
             pulsar_reader: self.consumer,
             ack_rx,
+            _ack_channel_registration: ack_channel_registration,
             topic: self.split.topic.to_string(),
         }
     }
@@ -345,6 +379,7 @@ struct PulsarConsumeStream {
     split_id: SplitId,
     pulsar_reader: Consumer<Vec<u8>, TokioExecutor>,
     ack_rx: tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
+    _ack_channel_registration: PulsarAckChannelRegistration,
     topic: String,
 }
 
@@ -383,7 +418,11 @@ impl PulsarConsumeStream {
         tracing::debug!(
             "ack message id: {:?} from channel {}",
             message_id,
-            build_pulsar_ack_channel_id(self.source_ctx.source_id, &self.split_id)
+            build_pulsar_ack_channel_id(
+                self.source_ctx.source_id,
+                &self.split_id,
+                self.source_ctx.actor_id,
+            )
         );
         #[cfg(not(madsim))]
         {
@@ -461,5 +500,31 @@ impl futures::Stream for PulsarConsumeStream {
         }
 
         Poll::Pending
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{PULSAR_ACK_CHANNEL, PulsarAckChannelRegistration};
+
+    #[test]
+    fn test_ack_channel_registration_cleanup_does_not_remove_replacement() {
+        let channel_id = "pulsar-ack-channel-registration-test".to_owned();
+        let (first_tx, _first_rx) = tokio::sync::mpsc::unbounded_channel();
+        let first = PulsarAckChannelRegistration::new(channel_id.clone(), first_tx);
+
+        let (second_tx, _second_rx) = tokio::sync::mpsc::unbounded_channel();
+        let second = PulsarAckChannelRegistration::new(channel_id.clone(), second_tx.clone());
+
+        drop(first);
+        assert!(
+            PULSAR_ACK_CHANNEL
+                .lock()
+                .get(&channel_id)
+                .is_some_and(|sender| sender.same_channel(&second_tx))
+        );
+
+        drop(second);
+        assert!(!PULSAR_ACK_CHANNEL.lock().contains_key(&channel_id));
     }
 }

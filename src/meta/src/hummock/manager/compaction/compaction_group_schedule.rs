@@ -1646,14 +1646,14 @@ impl GroupMergeValidator {
             let levels = &versioning_guard.current_version.levels;
             if !levels.contains_key(&group.group_id) {
                 return Err(Error::CompactionGroup(format!(
-                    "Cannot merge group {} not exist",
+                    "cannot merge compaction group {} because it does not exist",
                     group.group_id
                 )));
             }
 
             if !levels.contains_key(&next_group.group_id) {
                 return Err(Error::CompactionGroup(format!(
-                    "Cannot merge next group {} not exist",
+                    "cannot merge next compaction group {} because it does not exist",
                     next_group.group_id
                 )));
             }

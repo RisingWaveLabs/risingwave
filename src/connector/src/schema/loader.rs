@@ -62,7 +62,7 @@ impl ConfluentSchemaLoader {
     ) -> Result<Self, SchemaFetchError> {
         let schema_location = format_options
             .get(SCHEMA_REGISTRY_KEY)
-            .ok_or_else(|| invalid_option_error!("{SCHEMA_REGISTRY_KEY} required"))?;
+            .ok_or_else(|| invalid_option_error!("`{SCHEMA_REGISTRY_KEY}` is required"))?;
         let client_config = format_options.into();
         let urls = handle_sr_list(schema_location)?;
         let client = Client::new(urls, &client_config)?;
@@ -70,8 +70,9 @@ impl ConfluentSchemaLoader {
         let name_strategy = format_options
             .get(NAME_STRATEGY_KEY)
             .map(|s| {
-                name_strategy_from_str(s)
-                    .ok_or_else(|| invalid_option_error!("unrecognized strategy {s}"))
+                name_strategy_from_str(s).ok_or_else(|| {
+                    invalid_option_error!("unrecognized schema registry naming strategy: {s}")
+                })
             })
             .transpose()?
             .unwrap_or_default();

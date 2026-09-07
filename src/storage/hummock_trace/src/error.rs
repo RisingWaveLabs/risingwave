@@ -21,10 +21,10 @@ pub type Result<T> = std::result::Result<T, TraceError>;
 
 #[derive(Error, Debug)]
 pub enum TraceError {
-    #[error("failed to encode, {0}")]
+    #[error("failed to encode: {0}")]
     Encode(#[from] EncodeError),
 
-    #[error("failed to decode, {0}")]
+    #[error("failed to decode: {0}")]
     Decode(#[from] DecodeError),
 
     #[error("failed to read or write {0}")]
@@ -33,25 +33,25 @@ pub enum TraceError {
     #[error("invalid magic bytes, expected {expected}, found {found}")]
     MagicBytes { expected: u32, found: u32 },
 
-    #[error("try to close a non-existing record {0}")]
+    #[error("tried to close a non-existent record {0}")]
     FinRecord(RecordId),
 
-    #[error("failed to create a iter {0}")]
+    #[error("failed to create an iterator: {0}")]
     IterFailed(String),
 
-    #[error("failed to get key  {0}")]
+    #[error("failed to get key: {0}")]
     GetFailed(String),
 
-    #[error("failed to ingest  {0}")]
+    #[error("failed to ingest: {0}")]
     IngestFailed(String),
 
-    #[error("failed to sync  {0}")]
+    #[error("failed to sync: {0}")]
     SyncFailed(String),
 
     #[error("{0}")]
     Other(&'static str),
 
-    #[error("failed to try wait epoch")]
+    #[error("failed to wait for the epoch non-blockingly")]
     TryWaitEpochFailed,
 
     #[error("failed to clear shared buffer")]

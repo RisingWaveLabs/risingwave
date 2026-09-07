@@ -513,15 +513,15 @@ pub fn to_batch_query_epoch(a: &Option<AsOf>) -> Result<Option<PbBatchQueryEpoch
     let timestamp = match a {
         AsOf::ProcessTime => {
             return Err(ErrorCode::NotSupported(
-                "do not support as of proctime".to_owned(),
-                "please use as of timestamp".to_owned(),
+                "AS OF PROCTIME is not supported".to_owned(),
+                "please use AS OF TIMESTAMP".to_owned(),
             )
             .into());
         }
         AsOf::TimestampNum(ts) => *ts,
         AsOf::TimestampString(ts) => {
             let date_time = speedate::DateTime::parse_str_rfc3339(ts)
-                .map_err(|_e| anyhow!("fail to parse timestamp"))?;
+                .map_err(|_e| anyhow!("failed to parse the timestamp"))?;
             if date_time.time.tz_offset.is_none() {
                 // If the input does not specify a time zone, use the time zone set by the "SET TIME ZONE" command.
                 risingwave_expr::expr_context::TIME_ZONE::try_with(|set_time_zone| {
@@ -549,8 +549,8 @@ pub fn to_batch_query_epoch(a: &Option<AsOf>) -> Result<Option<PbBatchQueryEpoch
         }
         AsOf::VersionNum(_) | AsOf::VersionString(_) => {
             return Err(ErrorCode::NotSupported(
-                "do not support as of version".to_owned(),
-                "please use as of timestamp".to_owned(),
+                "AS OF VERSION is not supported".to_owned(),
+                "please use AS OF TIMESTAMP".to_owned(),
             )
             .into());
         }
@@ -559,7 +559,7 @@ pub fn to_batch_query_epoch(a: &Option<AsOf>) -> Result<Option<PbBatchQueryEpoch
                 value,
                 Some(crate::Binder::bind_date_time_field(*leading_field)),
             )
-            .map_err(|_| anyhow!("fail to parse interval"))?;
+            .map_err(|_| anyhow!("failed to parse the interval"))?;
             let interval_sec = (interval.epoch_in_micros() / 1_000_000) as i64;
             chrono::Utc::now()
                 .timestamp()
@@ -586,7 +586,7 @@ pub fn to_iceberg_time_travel_as_of(
         }
         Some(AsOf::TimestampString(ts)) => {
             let date_time = speedate::DateTime::parse_str_rfc3339(ts)
-                .map_err(|_e| anyhow!("fail to parse timestamp"))?;
+                .map_err(|_e| anyhow!("failed to parse the timestamp"))?;
             let timestamp = if date_time.time.tz_offset.is_none() {
                 // If the input does not specify a time zone, use the time zone set by the "SET TIME ZONE" command.
                 let tz = Timestamptz::lookup_time_zone(timezone).map_err(|e| anyhow!(e))?;

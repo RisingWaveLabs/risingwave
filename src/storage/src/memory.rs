@@ -835,7 +835,7 @@ impl<R: RangeKv> StateStoreReadLog for RangeKvStateStore<R> {
                 let tables = self.tables.lock();
                 let Some(tables) = tables.get(&options.table_id) else {
                     return Err(HummockError::next_epoch(format!(
-                        "table {} not exist",
+                        "table {} does not exist",
                         options.table_id
                     ))
                     .into());

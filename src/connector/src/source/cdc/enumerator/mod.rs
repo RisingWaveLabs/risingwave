@@ -141,9 +141,7 @@ where
                 )?;
 
                 if let Some(error) = validate_source_response.error {
-                    return Err(
-                        anyhow!(error.error_message).context("source cannot pass validation")
-                    );
+                    return Err(anyhow!(error.error_message).context("source validation failed"));
                 }
 
                 Ok(())
@@ -228,7 +226,7 @@ impl<T: CdcSourceTypeTrait> DebeziumSplitEnumerator<T> {
             }
             None => {
                 tracing::warn!(
-                    "No replication slot found when querying LSNs for source {}",
+                    "no replication slot was found while querying LSNs for source {}",
                     self.source_id
                 );
             }
@@ -243,19 +241,19 @@ impl<T: CdcSourceTypeTrait> DebeziumSplitEnumerator<T> {
         let slot_name = self
             .properties
             .get("slot.name")
-            .ok_or_else(|| anyhow::anyhow!("slot.name not found in CDC properties"))?;
+            .ok_or_else(|| anyhow::anyhow!("missing `slot.name` in CDC properties"))?;
 
         // No TCP keepalive for CDC enumerator
         let client = create_pg_client(&pg_conn, None)
             .await
-            .context("Failed to create PostgreSQL client")?;
+            .context("failed to create the PostgreSQL client")?;
 
         let query = "SELECT confirmed_flush_lsn, pg_current_wal_lsn() \
             FROM pg_replication_slots WHERE slot_name = $1";
         let row = client
             .query_opt(query, &[&slot_name])
             .await
-            .context("PostgreSQL query LSNs error")?;
+            .context("failed to query PostgreSQL LSNs")?;
         match row {
             Some(row) => {
                 let confirmed_flush_lsn: Option<PgLsn> = row.get(0);
@@ -267,7 +265,7 @@ impl<T: CdcSourceTypeTrait> DebeziumSplitEnumerator<T> {
                 )))
             }
             None => {
-                tracing::warn!("No replication slot found with name: {}", slot_name);
+                tracing::warn!("no replication slot found with name: {}", slot_name);
                 Ok(None)
             }
         }
@@ -278,25 +276,25 @@ impl<T: CdcSourceTypeTrait> DebeziumSplitEnumerator<T> {
         let hostname = self
             .properties
             .get("hostname")
-            .ok_or_else(|| anyhow!("hostname not found in CDC properties"))?;
+            .ok_or_else(|| anyhow!("missing `hostname` in CDC properties"))?;
         let port = self
             .properties
             .get("port")
-            .ok_or_else(|| anyhow!("port not found in CDC properties"))?
+            .ok_or_else(|| anyhow!("missing `port` in CDC properties"))?
             .parse::<u16>()
-            .context("failed to parse port as u16")?;
+            .context("failed to parse `port` as a u16")?;
         let username = self
             .properties
             .get("username")
-            .ok_or_else(|| anyhow!("username not found in CDC properties"))?;
+            .ok_or_else(|| anyhow!("missing `username` in CDC properties"))?;
         let password = self
             .properties
             .get("password")
-            .ok_or_else(|| anyhow!("password not found in CDC properties"))?;
+            .ok_or_else(|| anyhow!("missing `password` in CDC properties"))?;
         let database = self
             .properties
             .get("database.name")
-            .ok_or_else(|| anyhow!("database.name not found in CDC properties"))?;
+            .ok_or_else(|| anyhow!("missing `database.name` in CDC properties"))?;
 
         let mut config = Config::new();
         config.host(hostname);
@@ -374,7 +372,6 @@ impl<T: CdcSourceTypeTrait> DebeziumSplitEnumerator<T> {
                 )
                 .set(value);
             }
-
             if let Some(value) = Self::sql_server_lsn_to_i64(&max_lsn) {
                 get_or_create_guarded_int_gauge(
                     &mut self.sqlserver_cdc_upstream_max_lsn,
@@ -489,25 +486,25 @@ impl DebeziumSplitEnumerator<Mysql> {
         let hostname = self
             .properties
             .get("hostname")
-            .ok_or_else(|| anyhow::anyhow!("hostname not found in CDC properties"))?;
+            .ok_or_else(|| anyhow::anyhow!("missing `hostname` in CDC properties"))?;
         let port = self
             .properties
             .get("port")
-            .ok_or_else(|| anyhow::anyhow!("port not found in CDC properties"))?
+            .ok_or_else(|| anyhow::anyhow!("missing `port` in CDC properties"))?
             .parse::<u16>()
-            .context("failed to parse port as u16")?;
+            .context("failed to parse `port` as a u16")?;
         let username = self
             .properties
             .get("username")
-            .ok_or_else(|| anyhow::anyhow!("username not found in CDC properties"))?;
+            .ok_or_else(|| anyhow::anyhow!("missing `username` in CDC properties"))?;
         let password = self
             .properties
             .get("password")
-            .ok_or_else(|| anyhow::anyhow!("password not found in CDC properties"))?;
+            .ok_or_else(|| anyhow::anyhow!("missing `password` in CDC properties"))?;
         let database = self
             .properties
             .get("database.name")
-            .ok_or_else(|| anyhow::anyhow!("database.name not found in CDC properties"))?;
+            .ok_or_else(|| anyhow::anyhow!("missing `database.name` in CDC properties"))?;
 
         // Get SSL mode configuration (default to Disabled if not specified)
         let ssl_mode = self
@@ -522,7 +519,7 @@ impl DebeziumSplitEnumerator<Mysql> {
         let mut conn = pool
             .get_conn()
             .await
-            .context("Failed to connect to MySQL")?;
+            .context("failed to connect to MySQL")?;
 
         // Query binlog files using SHOW BINARY LOGS.
         // MySQL 8.0+ may return 3 columns (Log_name, File_size, Encrypted), while some variants
@@ -531,20 +528,20 @@ impl DebeziumSplitEnumerator<Mysql> {
         let rows: Vec<Row> = conn
             .query("SHOW BINARY LOGS")
             .await
-            .context("Failed to execute SHOW BINARY LOGS")?;
+            .context("failed to execute `SHOW BINARY LOGS`")?;
         let query_result = rows
             .into_iter()
             .map(|mut row| -> ConnectorResult<(String, u64)> {
                 let log_name = row
                     .take_opt::<String, _>(0)
                     .transpose()
-                    .context("SHOW BINARY LOGS: failed to decode Log_name")?
-                    .ok_or_else(|| anyhow!("SHOW BINARY LOGS: missing Log_name column"))?;
+                    .context("`SHOW BINARY LOGS`: failed to decode `Log_name`")?
+                    .ok_or_else(|| anyhow!("`SHOW BINARY LOGS`: missing `Log_name` column"))?;
                 let file_size = row
                     .take_opt::<u64, _>(1)
                     .transpose()
-                    .context("SHOW BINARY LOGS: failed to decode File_size")?
-                    .ok_or_else(|| anyhow!("SHOW BINARY LOGS: missing File_size column"))?;
+                    .context("`SHOW BINARY LOGS`: failed to decode `File_size`")?
+                    .ok_or_else(|| anyhow!("`SHOW BINARY LOGS`: missing `File_size` column"))?;
                 Ok((log_name, file_size))
             })
             .collect::<ConnectorResult<Vec<_>>>()?;

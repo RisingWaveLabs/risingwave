@@ -217,8 +217,8 @@ fn check_generated_column_constraints(
             .any(|c| c == referred_generated_column)
         {
             return Err(ErrorCode::BindError(format!(
-                "Generated can not reference another generated column. \
-                But here generated column \"{}\" referenced another generated column \"{}\"",
+                "A generated column cannot reference another generated column. \
+                Generated column \"{}\" references generated column \"{}\"",
                 column_name, referred_generated_column
             ))
             .into());
@@ -279,7 +279,7 @@ pub fn bind_sql_column_constraints(
 
                     let expr_impl = binder.bind_expr(expr).with_context(|| {
                         format!(
-                            "fail to bind expression in generated column \"{}\"",
+                            "failed to bind the expression in generated column \"{}\"",
                             column.name.real_value()
                         )
                     })?;

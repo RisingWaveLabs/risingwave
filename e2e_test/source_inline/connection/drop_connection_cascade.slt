@@ -50,11 +50,11 @@ create sink sink_cascade from data_cascade with (
 sleep 3s
 
 # Verify that normal DROP CONNECTION fails when objects depend on it
-statement error Permission denied: PermissionDenied: connection used by 2 other objects.
+statement error Permission denied: connection used by 2 other objects.
 drop connection conn_cascade;
 
 # Test that restrict mode also fails explicitly
-statement error Permission denied: PermissionDenied: connection used by 2 other objects.
+statement error Permission denied: connection used by 2 other objects.
 drop connection conn_cascade restrict;
 
 # Test DROP CONNECTION CASCADE - should succeed and drop dependent objects

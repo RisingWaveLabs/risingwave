@@ -130,7 +130,7 @@ alter table cf set config (
 db error: ERROR: Failed to run the query
 
 Caused by:
-  Invalid Parameter Value: Invalid parameter: unrecognized configs: ["streaming.unknown", "streaming.developer.dev_unknown"]
+  Invalid parameter value: Invalid parameter: unrecognized configs: ["streaming.unknown", "streaming.developer.dev_unknown"]
 
 
 # Error: using deprecated prefixed config key

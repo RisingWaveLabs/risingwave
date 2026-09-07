@@ -1020,6 +1020,7 @@ impl<S: StateStore> SourceExecutor<S> {
                         if let Some(pulsar_message_id_idx) = pulsar_message_id_idx {
                             let pulsar_message_id_col = chunk.column_at(pulsar_message_id_idx);
                             task_builder.update_task_on_chunk(
+                                self.actor_ctx.id,
                                 source_id,
                                 &latest_state,
                                 pulsar_message_id_col.clone(),
@@ -1027,6 +1028,7 @@ impl<S: StateStore> SourceExecutor<S> {
                         } else {
                             let offset_col = chunk.column_at(offset_idx);
                             task_builder.update_task_on_chunk(
+                                self.actor_ctx.id,
                                 source_id,
                                 &latest_state,
                                 offset_col.clone(),
@@ -1116,6 +1118,7 @@ struct WaitCheckpointTaskBuilder {
 impl WaitCheckpointTaskBuilder {
     fn update_task_on_chunk(
         &mut self,
+        actor_id: ActorId,
         source_id: SourceId,
         latest_state: &HashMap<SplitId, SplitImpl>,
         offset_col: ArrayRef,
@@ -1130,7 +1133,8 @@ impl WaitCheckpointTaskBuilder {
             WaitCheckpointTask::AckPulsarMessage(arrays) => {
                 // each pulsar chunk will only contain one split
                 let split_id = latest_state.keys().next().unwrap();
-                let pulsar_ack_channel_id = build_pulsar_ack_channel_id(source_id, split_id);
+                let pulsar_ack_channel_id =
+                    build_pulsar_ack_channel_id(source_id, split_id, actor_id);
                 arrays.push((pulsar_ack_channel_id, offset_col));
             }
             WaitCheckpointTask::CommitCdcOffset(_) => {}

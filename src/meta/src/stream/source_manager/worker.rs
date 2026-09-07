@@ -395,19 +395,19 @@ impl ConnectorSourceWorker {
                             SourceWorkerCommand::DropFragments(fragment_ids) => {
                                 if let Err(e) = self.drop_fragments(fragment_ids).await {
                                     // when error happens, we just log it and ignore
-                                    tracing::warn!(error = %e.as_report(), "error happened when drop fragment");
+                                    tracing::warn!(error = %e.as_report(), "failed to drop fragments");
                                 }
                             }
                             SourceWorkerCommand::FinishBackfill(fragment_ids) => {
                                 if let Err(e) = self.finish_backfill(fragment_ids).await {
                                     // when error happens, we just log it and ignore
-                                    tracing::warn!(error = %e.as_report(), "error happened when finish backfill");
+                                    tracing::warn!(error = %e.as_report(), "failed to finish backfill");
                                 }
                             }
                             SourceWorkerCommand::UpdateProps(new_props) => {
                                 self.connector_properties = new_props;
                                 if let Err(e) = self.refresh().await {
-                                    tracing::error!(error = %e.as_report(), "error happened when refresh from connector source worker");
+                                    tracing::error!(error = %e.as_report(), "failed to refresh the connector source worker");
                                 }
                                 tracing::debug!("source {} worker properties updated", self.source_name);
                             }
@@ -420,10 +420,10 @@ impl ConnectorSourceWorker {
                 _ = interval.tick() => {
                     if self.fail_cnt > MAX_FAIL_CNT
                         && let Err(e) = self.refresh().await {
-                            tracing::error!(error = %e.as_report(), "error happened when refresh from connector source worker");
+                            tracing::error!(error = %e.as_report(), "failed to refresh the connector source worker");
                         }
                     if let Err(e) = self.run_tick().await {
-                        tracing::error!(error = %e.as_report(), "error happened when tick from connector source worker");
+                        tracing::error!(error = %e.as_report(), "connector source worker tick failed");
                     }
                 }
             }

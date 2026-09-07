@@ -263,12 +263,18 @@ impl ControlStreamManager {
                     // It may happen that the dns information of newly registered worker node
                     // has not been propagated to the meta node and cause error. Wait for a while and retry
                     let delay = backoff.next().unwrap();
-                    error!(attempt = i, backoff_delay = ?delay, err = %e.as_report(), ?node_host, "fail to resolve worker node address");
+                    error!(
+                        attempt = i,
+                        backoff_delay = ?delay,
+                        err = %e.as_report(),
+                        ?node_host,
+                        "failed to resolve the worker node address",
+                    );
                     sleep(delay).await;
                 }
             }
         }
-        error!(?node_host, "fail to create worker node after retry");
+        error!(?node_host, "failed to create the worker node after retries");
         assert!(
             self.workers
                 .insert(
@@ -321,7 +327,7 @@ impl ControlStreamManager {
                         return handle;
                     }
                     Err(e) => {
-                        warn!(e = %e.as_report(), ?node, attempt, "fail to create control stream worker");
+                        warn!(e = %e.as_report(), ?node, attempt, "failed to create the control stream worker");
                     }
                 }
             }
@@ -1404,7 +1410,7 @@ impl ControlStreamManager {
                     ),
                 }).is_err() {
                 let (database_id, creating_job_id) = from_partial_graph_id(partial_graph_id);
-                warn!(%database_id, ?creating_job_id, worker_id = %node.worker_id, "fail to add partial graph to worker")
+                warn!(%database_id, ?creating_job_id, worker_id = %node.worker_id, "failed to add the partial graph to the worker")
             }
         });
     }

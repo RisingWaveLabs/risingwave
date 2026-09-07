@@ -290,10 +290,10 @@ impl CoordinationHandleManager {
             let handle = self
                 .writer_handles
                 .get_mut(&handle_id)
-                .ok_or_else(|| anyhow!("fail to find handle for {} to start", handle_id,))?;
+                .ok_or_else(|| anyhow!("failed to find handle {} to start", handle_id,))?;
             handle.start(log_store_rewind_start_epoch).map_err(|_| {
                 anyhow!(
-                    "fail to start {:?} for handle {}",
+                    "failed to start {:?} for handle {}",
                     log_store_rewind_start_epoch,
                     handle_id
                 )
@@ -308,7 +308,7 @@ impl CoordinationHandleManager {
                 .ack_aligned_initial_epoch(aligned_initial_epoch)
                 .map_err(|_| {
                     anyhow!(
-                        "fail to ack_aligned_initial_epoch {:?} for handle {}",
+                        "failed to ack aligned initial epoch {:?} for handle {}",
                         aligned_initial_epoch,
                         handle_id
                     )
@@ -325,14 +325,14 @@ impl CoordinationHandleManager {
         for handle_id in handle_ids {
             let handle = self.writer_handles.get_mut(&handle_id).ok_or_else(|| {
                 anyhow!(
-                    "fail to find handle for {} when ack commit on epoch {}",
+                    "failed to find handle {} when acknowledging the commit for epoch {}",
                     handle_id,
                     epoch
                 )
             })?;
             handle.ack_commit(epoch).map_err(|_| {
                 anyhow!(
-                    "fail to ack commit on epoch {} for handle {}",
+                    "failed to acknowledge the commit for epoch {} on handle {}",
                     epoch,
                     handle_id
                 )

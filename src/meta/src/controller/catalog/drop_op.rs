@@ -225,7 +225,7 @@ impl CatalogController {
                     info!("dropping creating sink job, it will be cancelled");
                 } else {
                     return Err(MetaError::permission_denied(format!(
-                        "can not drop {creating} creating streaming job, please cancel them firstly"
+                        "cannot drop {creating} streaming job(s) that are still being created; please cancel them first"
                     )));
                 }
             }

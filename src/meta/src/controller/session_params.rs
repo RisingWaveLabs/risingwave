@@ -417,7 +417,7 @@ mod tests {
         };
         assert!(err
             .to_string()
-            .contains("SessionParams error: Invalid value `bounded(2)` for `streaming_parallelism_for_backfill`"));
+            .contains("Session parameters error: Invalid value `bounded(2)` for `streaming_parallelism_for_backfill`"));
 
         let persisted = SessionParameter::find()
             .all(&meta_store.conn)

@@ -20,7 +20,7 @@ system ok
 
 sleep 1s
 
-statement error table with name t2 exists but under creation
+statement error table named t2 already exists and is still being created
 create table t2(v1 int);
 
 system ok

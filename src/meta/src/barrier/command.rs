@@ -1098,7 +1098,7 @@ impl Command {
                         let new_sink_actors = stream_actors
                             .get(sink_fragment_id)
                             .unwrap_or_else(|| {
-                                panic!("upstream sink fragment {sink_fragment_id} not exist")
+                                panic!("upstream sink fragment {sink_fragment_id} does not exist")
                             })
                             .iter()
                             .map(|actor| {

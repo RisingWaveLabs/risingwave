@@ -21,7 +21,7 @@ select count(*) from rw_catalog.rw_ddl_progress;
 ----
 1
 
-statement error materialized view with name m1 exists but under creation
+statement error materialized view named m1 already exists and is still being created
 CREATE MATERIALIZED VIEW m1 as SELECT * FROM t;
 
 statement ok

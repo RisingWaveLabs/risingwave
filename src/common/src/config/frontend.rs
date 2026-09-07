@@ -31,6 +31,12 @@ pub struct FrontendConfig {
     #[serde(default = "default::frontend::max_single_query_size_bytes")]
     pub max_single_query_size_bytes: u64,
 
+    /// Flush threshold in bytes for streaming pgwire responses. A value of `0` flushes after every
+    /// row. A single pgwire message can exceed this threshold because messages are encoded
+    /// atomically.
+    #[serde(default = "default::frontend::stream_flush_threshold_bytes")]
+    pub stream_flush_threshold_bytes: usize,
+
     /// Host-based authentication configuration
     #[serde(default = "HbaConfig::default")]
     pub hba_config: HbaConfig,
@@ -59,6 +65,10 @@ pub mod default {
 
         pub fn max_single_query_size_bytes() -> u64 {
             1024 * 1024 * 1024
+        }
+
+        pub fn stream_flush_threshold_bytes() -> usize {
+            64 * 1024
         }
 
         pub fn webhook_auth_max_clock_skew_ms() -> u64 {

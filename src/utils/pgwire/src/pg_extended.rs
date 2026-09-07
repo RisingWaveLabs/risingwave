@@ -76,7 +76,9 @@ where
             while let Some(row_set) = self.result.values_stream().next().await {
                 let row_set = row_set.map_err(PsqlError::SimpleQueryError)?;
                 for row in row_set {
-                    msg_stream.write_no_flush(BeMessage::CopyData(&row))?;
+                    msg_stream
+                        .write_streaming(BeMessage::CopyData(&row))
+                        .await?;
                     count += 1;
                 }
             }
@@ -101,7 +103,7 @@ where
             while row_limit == 0 || query_row_count < row_limit {
                 if self.row_cache.len() > 0 {
                     for row in self.row_cache.by_ref() {
-                        msg_stream.write_no_flush(BeMessage::DataRow(&row))?;
+                        msg_stream.write_streaming(BeMessage::DataRow(&row)).await?;
                         query_row_count += 1;
                         if row_limit > 0 && query_row_count >= row_limit {
                             break;

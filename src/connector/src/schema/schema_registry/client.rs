@@ -170,7 +170,10 @@ impl Client {
             .collect_vec();
         if valid_urls.is_empty() {
             return Err(SchemaRegistryClientError::InvalidOption(
-                invalid_option_error!("non-base: {}", url.iter().join(" ")),
+                invalid_option_error!(
+                    "the following schema registry URLs are not valid base URLs: {}",
+                    url.iter().join(" ")
+                ),
             ));
         } else {
             tracing::debug!(

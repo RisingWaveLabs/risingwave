@@ -202,7 +202,7 @@ impl ControlStreamHandle {
                 .is_err()
             {
                 self.pair = None;
-                warn!("fail to send response. control stream reset");
+                warn!("failed to send the response; the control stream was reset");
             }
         } else {
             debug!(?response, "control stream has been reset. ignore response");

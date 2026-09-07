@@ -115,7 +115,13 @@ pub async fn try_resolve_dns(host: &str, port: i32) -> Result<SocketAddr, String
         // It may happen that the dns information of newly registered worker node
         // has not been propagated to the meta node and cause error. Wait for a while and retry
         let delay = backoff.next().unwrap();
-        error!(attempt = i, backoff_delay = ?delay, err, addr, "fail to resolve worker node address");
+        error!(
+            attempt = i,
+            backoff_delay = ?delay,
+            err,
+            addr,
+            "failed to resolve the worker node address",
+        );
         sleep(delay).await;
     }
     Err(format!("failed to resolve dns: {}", addr))

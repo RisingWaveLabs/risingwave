@@ -236,7 +236,10 @@ impl ActiveStreamingWorkerNodes {
                 }
             }
             Err(e) => {
-                warn!(e = ?e.as_report(), "fail to list_active_streaming_compute_nodes to compare with local snapshot");
+                warn!(
+                    e = ?e.as_report(),
+                    "failed to list active streaming compute nodes for comparison with the local snapshot",
+                );
             }
         }
     }

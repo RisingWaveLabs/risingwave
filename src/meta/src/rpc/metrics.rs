@@ -1142,7 +1142,7 @@ pub fn start_worker_info_monitor(
             let node_map = match metadata_manager.count_worker_node().await {
                 Ok(node_map) => node_map,
                 Err(err) => {
-                    tracing::warn!(error = %err.as_report(), "fail to count worker node");
+                    tracing::warn!(error = %err.as_report(), "failed to count worker nodes");
                     continue;
                 }
             };
@@ -1188,35 +1188,35 @@ pub async fn refresh_fragment_info_metrics(
     {
         Ok(worker_nodes) => worker_nodes,
         Err(err) => {
-            tracing::warn!(error=%err.as_report(), "fail to list worker node");
+            tracing::warn!(error=%err.as_report(), "failed to list worker nodes");
             return;
         }
     };
     let actor_locations = match catalog_controller.list_actor_locations() {
         Ok(actor_locations) => actor_locations,
         Err(err) => {
-            tracing::warn!(error=%err.as_report(), "fail to get actor locations");
+            tracing::warn!(error=%err.as_report(), "failed to get actor locations");
             return;
         }
     };
     let sink_actor_mapping = match catalog_controller.list_sink_actor_mapping().await {
         Ok(sink_actor_mapping) => sink_actor_mapping,
         Err(err) => {
-            tracing::warn!(error=%err.as_report(), "fail to get sink actor mapping");
+            tracing::warn!(error=%err.as_report(), "failed to get sink actor mappings");
             return;
         }
     };
     let fragment_state_tables = match catalog_controller.list_fragment_state_tables().await {
         Ok(fragment_state_tables) => fragment_state_tables,
         Err(err) => {
-            tracing::warn!(error=%err.as_report(), "fail to get fragment state tables");
+            tracing::warn!(error=%err.as_report(), "failed to get fragment state tables");
             return;
         }
     };
     let table_name_and_type_mapping = match catalog_controller.get_table_name_type_mapping().await {
         Ok(mapping) => mapping,
         Err(err) => {
-            tracing::warn!(error=%err.as_report(), "fail to get table name mapping");
+            tracing::warn!(error=%err.as_report(), "failed to get the table name mapping");
             return;
         }
     };
@@ -1302,7 +1302,7 @@ pub async fn refresh_relation_info_metrics(
     let table_objects = match catalog_controller.list_table_objects().await {
         Ok(table_objects) => table_objects,
         Err(err) => {
-            tracing::warn!(error=%err.as_report(), "fail to get table objects");
+            tracing::warn!(error=%err.as_report(), "failed to get table objects");
             return;
         }
     };
@@ -1310,7 +1310,7 @@ pub async fn refresh_relation_info_metrics(
     let source_objects = match catalog_controller.list_source_objects().await {
         Ok(source_objects) => source_objects,
         Err(err) => {
-            tracing::warn!(error=%err.as_report(), "fail to get source objects");
+            tracing::warn!(error=%err.as_report(), "failed to get source objects");
             return;
         }
     };
@@ -1318,7 +1318,7 @@ pub async fn refresh_relation_info_metrics(
     let sink_objects = match catalog_controller.list_sink_objects().await {
         Ok(sink_objects) => sink_objects,
         Err(err) => {
-            tracing::warn!(error=%err.as_report(), "fail to get sink objects");
+            tracing::warn!(error=%err.as_report(), "failed to get sink objects");
             return;
         }
     };
@@ -1407,7 +1407,7 @@ pub async fn refresh_database_info_metrics(
     let databases = match catalog_controller.list_databases().await {
         Ok(databases) => databases,
         Err(err) => {
-            tracing::warn!(error=%err.as_report(), "fail to get databases");
+            tracing::warn!(error=%err.as_report(), "failed to get databases");
             return;
         }
     };
@@ -1490,7 +1490,7 @@ pub async fn refresh_backfill_progress_metrics(
     let fragment_descs = match catalog_controller.list_fragment_descs_with_node(true).await {
         Ok(fragment_descs) => fragment_descs,
         Err(err) => {
-            tracing::warn!(error=%err.as_report(), "fail to list creating fragment descs");
+            tracing::warn!(error=%err.as_report(), "failed to list fragment descriptions for creating jobs");
             return;
         }
     };
@@ -1504,7 +1504,7 @@ pub async fn refresh_backfill_progress_metrics(
     let fragment_progresses = match barrier_manager.get_fragment_backfill_progress().await {
         Ok(progress) => progress,
         Err(err) => {
-            tracing::warn!(error=%err.as_report(), "fail to get fragment backfill progress");
+            tracing::warn!(error=%err.as_report(), "failed to get fragment backfill progress");
             return;
         }
     };
@@ -1534,7 +1534,7 @@ pub async fn refresh_backfill_progress_metrics(
     {
         Ok(relation_objects) => relation_objects,
         Err(err) => {
-            tracing::warn!(error=%err.as_report(), "fail to get relation objects");
+            tracing::warn!(error=%err.as_report(), "failed to get relation objects");
             return;
         }
     };

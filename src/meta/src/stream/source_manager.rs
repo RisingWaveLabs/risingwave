@@ -527,7 +527,7 @@ impl SourceManager {
             if let Err(e) = self.tick().await {
                 tracing::error!(
                     error = %e.as_report(),
-                    "error happened while running source manager tick",
+                    "source manager tick failed",
                 );
             }
         }

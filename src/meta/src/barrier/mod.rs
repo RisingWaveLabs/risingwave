@@ -167,7 +167,7 @@ impl BarrierWorkerRuntimeInfoSnapshot {
                         .contains_key(&actor.worker_id)
                     {
                         return Err(anyhow!(
-                            "worker_id {} of actor {} do not exist",
+                            "worker_id {} for actor {} does not exist",
                             actor.worker_id,
                             actor_id
                         )

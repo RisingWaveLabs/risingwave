@@ -36,7 +36,7 @@ pub async fn fetch_descriptor(
 ) -> Result<(MessageDescriptor, Option<i32>), SchemaFetchError> {
     let message_name = format_options
         .get(MESSAGE_NAME_KEY)
-        .ok_or_else(|| invalid_option_error!("{MESSAGE_NAME_KEY} required"))?
+        .ok_or_else(|| invalid_option_error!("`{MESSAGE_NAME_KEY}` is required"))?
         .clone();
     let schema_location = format_options.get(SCHEMA_LOCATION_KEY);
     let schema_registry = format_options.get(SCHEMA_REGISTRY_KEY);
@@ -61,7 +61,7 @@ pub async fn fetch_descriptor(
     };
 
     if row_schema_location.starts_with("s3") && aws_auth_props.is_none() {
-        return Err(invalid_option_error!("s3 URL not supported yet").into());
+        return Err(invalid_option_error!("`s3://` schema locations are not supported yet").into());
     }
 
     let enc = EncodingProperties::Protobuf(ProtobufProperties {
@@ -94,15 +94,18 @@ pub async fn fetch_from_registry(
     let vid = match vid {
         super::SchemaVersion::Confluent(vid) => vid,
         super::SchemaVersion::Glue(_) => {
-            return Err(
-                invalid_option_error!("Protobuf with Glue Schema Registry unsupported").into(),
-            );
+            return Err(invalid_option_error!(
+                "Protobuf with Glue Schema Registry is not supported"
+            )
+            .into());
         }
     };
     let message_descriptor = vpb
         .parent_pool()
         .get_message_by_name(message_name)
-        .ok_or_else(|| invalid_option_error!("message {message_name} not defined in proto"))?;
+        .ok_or_else(|| {
+            invalid_option_error!("message `{message_name}` is not defined in the Protobuf schema")
+        })?;
 
     Ok((message_descriptor, vid))
 }

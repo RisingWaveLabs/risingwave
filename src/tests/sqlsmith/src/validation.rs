@@ -58,7 +58,7 @@ fn is_nested_loop_join_error(db_error: &str) -> bool {
 }
 
 fn is_subquery_unnesting_error(db_error: &str) -> bool {
-    db_error.contains("Subquery can not be unnested")
+    db_error.contains("Subquery cannot be unnested")
         || db_error.contains("Scalar subquery might produce more than one row")
 }
 

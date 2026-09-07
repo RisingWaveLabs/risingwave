@@ -183,7 +183,7 @@ impl SinkCoordinatorManager {
             }
         );
         if rx.await.is_err() {
-            error!("fail to wait for resetting sink manager worker");
+            error!("failed to wait for the sink manager worker to reset");
         }
         info!("successfully stop coordinator: {:?}", sink_ids);
     }
@@ -273,7 +273,7 @@ impl ManagerWorker {
                                 for res in notify_res {
                                     if let Err(e) = res {
                                         error!(
-                                            "fail to wait for resetting sink manager worker: {}",
+                                            "failed to wait for the sink manager worker to reset: {}",
                                             e.as_report()
                                         );
                                     }

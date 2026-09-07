@@ -252,4 +252,4 @@ system ok
 python3 e2e_test/webhook/websocket_sender.py --secret TEST_WEBSOCKET --table ws_orders --scenario invalid_timestamp
 
 system ok
-python3 e2e_test/webhook/websocket_sender.py --secret TEST_WEBSOCKET --table ws_orders --scenario invalid_decoder_header --header 'x-rw-webhook-json-timestamp-handling-mode: invalid' --expected-fatal-substring 'unrecognized `x-rw-webhook-json-timestamp-handling-mode` value'
+python3 e2e_test/webhook/websocket_sender.py --secret TEST_WEBSOCKET --table ws_orders --scenario invalid_decoder_header --header 'x-rw-webhook-json-timestamp-handling-mode: invalid' --expected-fatal-substring 'unrecognized value `invalid` for `x-rw-webhook-json-timestamp-handling-mode`'

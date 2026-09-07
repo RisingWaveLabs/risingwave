@@ -188,6 +188,7 @@ pool_setup_concurrency = 0
 max_total_query_size_bytes = 1073741824
 min_single_query_size_bytes = 1048576
 max_single_query_size_bytes = 1073741824
+stream_flush_threshold_bytes = 65536
 webhook_auth_max_clock_skew_ms = 300000
 unsafe_enable_local_fs_connector = false
 

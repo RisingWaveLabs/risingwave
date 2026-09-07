@@ -67,7 +67,7 @@ pub enum Error {
         source: serde_json::Error,
     },
     #[error(
-        "ref `{ref_string}` can not be resolved as pointer, `{ref_fragment}` can not be found in the schema"
+        "ref `{ref_string}` cannot be resolved as a pointer, and `{ref_fragment}` cannot be found in the schema"
     )]
     JsonRefPointerNotFound {
         ref_string: String,
