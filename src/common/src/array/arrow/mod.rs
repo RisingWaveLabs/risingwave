@@ -19,6 +19,7 @@ mod arrow_58;
 // These mods import mods above and may override some methods.
 mod arrow_deltalake;
 mod arrow_iceberg;
+mod arrow_lancedb;
 mod arrow_udf;
 
 pub use arrow_deltalake::DeltaLakeConvert;
@@ -26,6 +27,7 @@ pub use arrow_iceberg::{
     ICEBERG_DECIMAL_PRECISION, ICEBERG_DECIMAL_SCALE, IcebergArrowConvert,
     IcebergCreateTableArrowConvert,
 };
+pub use arrow_lancedb::LanceDbConvert;
 pub use arrow_udf::UdfArrowConvert;
 pub use reexport::*;
 /// For other RisingWave crates, they can directly use arrow re-exported here, without adding
@@ -46,6 +48,11 @@ mod reexport {
         arrow_array as arrow_array_iceberg, arrow_buffer as arrow_buffer_iceberg,
         arrow_cast as arrow_cast_iceberg, arrow_schema as arrow_schema_iceberg,
         is_parquet_field_match_source_schema, is_parquet_schema_match_source_schema,
+    };
+    pub use super::arrow_lancedb::{
+        FromArrow as LanceDbFromArrow, ToArrow as LanceDbToArrow,
+        arrow_array as arrow_array_lancedb, arrow_buffer as arrow_buffer_lancedb,
+        arrow_cast as arrow_cast_lancedb, arrow_schema as arrow_schema_lancedb,
     };
     pub use super::arrow_udf::{
         FromArrow as UdfFromArrow, ToArrow as UdfToArrow, arrow_array as arrow_array_udf,

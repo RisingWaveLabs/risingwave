@@ -213,6 +213,17 @@ impl Sink for IcebergSink {
 
     crate::impl_validate_sink_unknown_fields!();
 
+    fn is_exactly_once(properties: &BTreeMap<String, String>) -> Result<bool> {
+        let Some(value) = properties.get("is_exactly_once") else {
+            return Ok(true);
+        };
+        value.parse::<bool>().map_err(|_| {
+            SinkError::Config(anyhow!(
+                "invalid value for `is_exactly_once`: expected `true` or `false`, got `{value}`"
+            ))
+        })
+    }
+
     async fn validate(&self) -> Result<()> {
         let catalog_kind = self.config.catalog_kind()?;
         if matches!(catalog_kind, IcebergCatalogKind::Snowflake) {
@@ -406,7 +417,7 @@ impl Sink for IcebergSink {
             commit_retry_num: self.config.commit_retry_num,
             iceberg_compact_stat_sender,
         };
-        if self.config.is_exactly_once.unwrap_or_default() {
+        if Self::is_exactly_once(&self.param.properties)? {
             Ok(SinkCommitCoordinator::TwoPhase(Box::new(coordinator)))
         } else {
             Ok(SinkCommitCoordinator::SinglePhase(Box::new(coordinator)))

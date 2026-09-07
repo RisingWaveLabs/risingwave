@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #![allow(clippy::derive_partial_eq_without_eq)]
+#![recursion_limit = "256"]
 #![feature(trait_alias)]
 #![feature(type_alias_impl_trait)]
 #![feature(map_try_insert)]

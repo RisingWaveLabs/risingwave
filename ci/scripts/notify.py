@@ -54,6 +54,7 @@ MAIN_CRON_TEST_MAP = {
     "e2e-single-node-binary-tests": ["pin", "peng", "noelkwan"],
     "e2e-test-opendal-parallel": ["congyi"],
     "e2e-deltalake-sink-rust-tests": ["xinhao"],
+    "e2e-lancedb-sink-tests": ["yiming"],
     "e2e-redis-sink-tests": ["xinhao"],
     "e2e-starrocks-sink-tests": ["xinhao"],
     "e2e-cassandra-sink-tests": ["xinhao"],

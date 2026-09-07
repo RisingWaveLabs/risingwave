@@ -1258,6 +1258,31 @@ KinesisSinkConfig:
     field_type: u64
     required: false
     default: '20000'
+LanceDbConfig:
+  fields:
+  - name: lancedb.uri
+    field_type: String
+    comments: URI of the `LanceDB` database (e.g., `/tmp/lancedb`, `<s3://bucket/path/db>`)
+    required: true
+  - name: lancedb.table
+    field_type: String
+    comments: Table name in the `LanceDB` database
+    required: true
+  - name: commit_checkpoint_interval
+    field_type: u64
+    comments: Commit every n(>0) checkpoints, default is 10.
+    required: false
+    default: DEFAULT_COMMIT_CHECKPOINT_INTERVAL_WITH_SINK_DECOUPLE
+    allow_alter_on_fly: true
+  - name: r#type
+    field_type: String
+    required: true
+  - name: is_exactly_once
+    field_type: bool
+    comments: |-
+      Whether to use RisingWave's two-phase commit framework for exactly-once commits.
+      Defaults to true. Set to false to use single-phase commits.
+    required: false
 MongodbConfig:
   fields:
   - name: mongodb.url

@@ -1,0 +1,56 @@
+# LanceDB sink e2e test.
+#
+# Prerequisites:
+#   - A LanceDB database must exist at the path specified in `lancedb.uri`
+#     with a table named "e2e_test" and schema: id INT, name VARCHAR, score DOUBLE, flag BOOLEAN
+#   - The table can be created via: python3 e2e_test/sink/lancedb/lancedb_helper.py setup /tmp/lancedb-e2e
+
+statement ok
+set sink_decouple = false;
+
+statement ok
+CREATE TABLE t_lance (id INT PRIMARY KEY, name VARCHAR, score DOUBLE, flag BOOLEAN);
+
+statement ok
+CREATE MATERIALIZED VIEW mv_lance AS SELECT * FROM t_lance;
+
+statement ok
+CREATE SINK s_lance AS SELECT * FROM mv_lance
+WITH (
+    connector = 'lancedb',
+    type = 'append-only',
+    force_append_only = 'true',
+    lancedb.uri = '/tmp/lancedb-e2e',
+    lancedb.table = 'e2e_test',
+    commit_checkpoint_interval = '1'
+);
+
+statement ok
+INSERT INTO t_lance VALUES
+    (1, 'Alice', 95.5, true),
+    (2, 'Bob', 87.0, false),
+    (3, 'Clare', 92.3, true);
+
+statement ok
+FLUSH;
+
+sleep 5s
+
+statement ok
+INSERT INTO t_lance VALUES
+    (4, 'Dave', 78.1, false),
+    (5, 'Eve', 99.9, true);
+
+statement ok
+FLUSH;
+
+sleep 5s
+
+statement ok
+DROP SINK s_lance;
+
+statement ok
+DROP MATERIALIZED VIEW mv_lance;
+
+statement ok
+DROP TABLE t_lance;

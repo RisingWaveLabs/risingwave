@@ -19,6 +19,7 @@ all-sinks = [
     "sink-google_pubsub",
     "sink-clickhouse",
     "sink-doris",
+    "sink-lancedb",
     "sink-starrocks",
 ]
 all-sources = ["source-adbc_snowflake"]
@@ -29,6 +30,7 @@ sink-bigquery = [
     "dep:google-cloud-googleapis",
 ]
 sink-deltalake = ["dep:deltalake"]
+sink-lancedb = ["dep:lancedb", "dep:lance", "dep:lance-table"]
 # TODO: pubsub source is not feature-gated, thus `google-cloud-pubsub` cannot be optional.
 sink-google_pubsub = ["dep:google-cloud-googleapis"]
 sink-clickhouse = ["dep:clickhouse"]
@@ -96,6 +98,9 @@ iceberg-storage-opendal = { workspace = true }
 indexmap = { workspace = true }
 itertools = { workspace = true }
 jni = { workspace = true }
+lance = { workspace = true, optional = true }
+lance-table = { workspace = true, optional = true }
+lancedb = { workspace = true, optional = true }
 maplit = "1.0.2"
 moka = { version = "0.12.10", features = ["future"] }
 mongodb = "3.5.1"
@@ -216,6 +221,9 @@ criterion = { workspace = true, features = ["async_tokio", "async"] }
 deltalake = { workspace = true }
 expect-test = "1"
 fs-err = "3"
+lance = { workspace = true }
+lance-table = { workspace = true }
+lancedb = { workspace = true }
 paste = "1"
 pretty_assertions = "1"
 proc-macro2 = "1.0"

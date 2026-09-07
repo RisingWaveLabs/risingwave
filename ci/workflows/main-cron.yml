@@ -985,6 +985,24 @@ steps:
     timeout_in_minutes: 20
     retry: *auto-retry
 
+  - label: "end-to-end lancedb sink test"
+    key: "e2e-lancedb-sink-tests"
+    command: "ci/scripts/e2e-lancedb-sink-test.sh -p ci-release"
+    if: |
+      !(build.pull_request.labels includes "ci/main-cron/run-selected") && build.env("CI_STEPS") == null
+      || build.pull_request.labels includes "ci/run-e2e-lancedb-sink-tests"
+      || build.env("CI_STEPS") =~ /(^|,)e2e-lancedb-sink-tests?(,|$$)/
+    depends_on:
+      - "build"
+      - "build-other"
+    plugins:
+      - docker-compose#v5.5.0:
+          <<: *docker-compose
+          run: sink-test-env
+      - ./ci/plugins/upload-failure-logs
+    timeout_in_minutes: 10
+    retry: *auto-retry
+
   - label: "end-to-end redis sink test"
     key: "e2e-redis-sink-tests"
     command: "ci/scripts/e2e-redis-sink-test.sh -p ci-release"

@@ -192,6 +192,12 @@ itertools = "0.14.0"
 jni = { version = "0.21.1", features = ["invocation"] }
 jsonbb = { version = "0.2.3", features = ["float_roundtrip"] }
 jsonwebtoken = { version = "10", features = ["aws_lc_rs"] }
+# Keep LanceDB on the Lance 6 stack for now. Lance 7 pulls in dependencies
+# that require serde_json >= 1.0.149, while RisingWave pins serde_json below
+# 1.0.147 to preserve SQL JSONB float formatting compatibility. See #25739.
+lance = { version = "6.0", default-features = false }
+lance-table = { version = "6.0", default-features = false }
+lancedb = { version = "0.29", default-features = false }
 linkme = { version = "0.3.32", features = ["used_linker"] }
 lru = "0.18"
 madsim = { git = "https://github.com/risingwavelabs/madsim.git", rev = "595455fd05058b3b48bf281bea3ada1bca3d6646" }

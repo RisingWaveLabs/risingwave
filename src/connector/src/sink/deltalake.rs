@@ -379,6 +379,17 @@ impl Sink for DeltaLakeSink {
 
     crate::impl_validate_sink_unknown_fields!();
 
+    fn is_exactly_once(properties: &BTreeMap<String, String>) -> Result<bool> {
+        let Some(value) = properties.get("is_exactly_once") else {
+            return Ok(false);
+        };
+        value.parse::<bool>().map_err(|_| {
+            SinkError::Config(anyhow!(
+                "invalid value for `is_exactly_once`: expected `true` or `false`, got `{value}`"
+            ))
+        })
+    }
+
     async fn new_log_sinker(&self, writer_param: SinkWriterParam) -> Result<Self::LogSinker> {
         let inner = DeltaLakeSinkWriter::new(
             self.config.clone(),
@@ -468,7 +479,7 @@ impl Sink for DeltaLakeSink {
         let coordinator = DeltaLakeSinkCommitter {
             table: self.config.common.create_deltalake_client().await?,
             app_id: format!("risingwave-deltalake-{}", self.param.sink_id),
-            exactly_once: self.config.is_exactly_once.unwrap_or_default(),
+            exactly_once: Self::is_exactly_once(&self.param.properties)?,
         };
         if coordinator.exactly_once {
             Ok(SinkCommitCoordinator::TwoPhase(Box::new(coordinator)))
