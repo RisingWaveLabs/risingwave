@@ -1159,13 +1159,168 @@ fn assert_consecutive_splits(actor_snapshot_splits: &[CdcTableSnapshotSplit]) {
 
 #[cfg(test)]
 mod tests {
-    use risingwave_common::array::StreamChunk;
-    use risingwave_common::row::OwnedRow;
-    use risingwave_common::types::ScalarImpl;
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+    use std::time::Duration;
 
-    use crate::executor::backfill::cdc::cdc_backill_v2::{
-        filter_stream_chunk, split_finished_and_current_chunk,
+    use futures::StreamExt;
+    use risingwave_common::array::StreamChunk;
+    use risingwave_common::catalog::{ColumnDesc, ColumnId, Field, Schema, TableId};
+    use risingwave_common::row::{OwnedRow, Row};
+    use risingwave_common::types::{DataType, ScalarImpl};
+    use risingwave_common::util::epoch::{EpochExt, test_epoch};
+    use risingwave_common::util::sort_util::OrderType;
+    use risingwave_connector::source::CdcTableSnapshotSplitRaw;
+    use risingwave_connector::source::cdc::external::{
+        ExternalCdcTableType, ExternalTableConfig, SchemaTableName,
     };
+    use risingwave_connector::source::cdc::{
+        CdcScanOptions, CdcTableSnapshotSplitAssignmentWithGeneration,
+    };
+    use risingwave_storage::memory::MemoryStateStore;
+
+    use super::*;
+    use crate::common::table::state_table::StateTable;
+    use crate::common::table::test_utils::gen_pbtable;
+    use crate::executor::monitor::StreamingMetrics;
+    use crate::executor::test_utils::MockSource;
+    use crate::executor::{AddMutation, Execute, Mutation};
+
+    #[tokio::test]
+    async fn test_rebuilds_reader_after_snapshot_error() {
+        let (mut tx, source) = MockSource::channel();
+        let source = source.into_executor(
+            Schema::new(vec![
+                Field::unnamed(DataType::Jsonb),
+                Field::unnamed(DataType::Varchar),
+            ]),
+            vec![0],
+        );
+        let table_schema = Schema::new(vec![
+            Field::with_name(DataType::Int64, "id"),
+            Field::with_name(DataType::Float64, "price"),
+        ]);
+        let external_table = ExternalStorageTable::new(
+            TableId::new(1234),
+            SchemaTableName {
+                schema_name: "public".to_owned(),
+                table_name: "mock_table".to_owned(),
+            },
+            "mydb".to_owned(),
+            ExternalTableConfig::default(),
+            ExternalCdcTableType::Mock,
+            table_schema,
+            vec![OrderType::ascending()],
+            vec![0],
+        )
+        .with_mock_snapshot_errors([1, 0]);
+        let external_table_for_assertion = external_table.clone();
+
+        let state_schema = Schema::new(vec![
+            Field::with_name(DataType::Int64, "split_id"),
+            Field::with_name(DataType::Boolean, "backfill_finished"),
+            Field::with_name(DataType::Int64, "row_count"),
+            Field::with_name(DataType::Jsonb, "cdc_offset_low"),
+            Field::with_name(DataType::Jsonb, "cdc_offset_high"),
+            Field::with_name(DataType::Int64, "id"),
+        ]);
+        let column_descs = state_schema
+            .fields
+            .iter()
+            .enumerate()
+            .map(|(idx, field)| {
+                ColumnDesc::unnamed(ColumnId::new(idx as i32), field.data_type.clone())
+            })
+            .collect();
+        let state_table = StateTable::from_table_catalog(
+            &gen_pbtable(
+                TableId::new(0x42),
+                column_descs,
+                vec![OrderType::ascending()],
+                vec![0],
+                0,
+            ),
+            MemoryStateStore::new(),
+            None,
+        )
+        .await;
+
+        let actor_id = 0x1a.into();
+        let mut executor = ParallelizedCdcBackfillExecutor::new(
+            ActorContext::for_test(actor_id),
+            external_table,
+            source,
+            vec![0, 1],
+            vec![
+                ColumnDesc::named("id", ColumnId::new(1), DataType::Int64),
+                ColumnDesc::named("price", ColumnId::new(2), DataType::Float64),
+            ],
+            Arc::new(StreamingMetrics::unused()),
+            state_table,
+            Some(4),
+            CdcScanOptions {
+                backfill_parallelism: 1,
+                backfill_num_rows_per_split: 100,
+                ..Default::default()
+            },
+            BTreeMap::new(),
+            None,
+        )
+        .boxed()
+        .execute();
+
+        let mut curr_epoch = test_epoch(1);
+        let snapshot_splits = [(
+            actor_id,
+            (
+                vec![CdcTableSnapshotSplitRaw {
+                    split_id: 1,
+                    left_bound_inclusive: OwnedRow::new(vec![Some(ScalarImpl::Int64(1))])
+                        .value_serialize(),
+                    right_bound_exclusive: OwnedRow::new(vec![Some(ScalarImpl::Int64(10))])
+                        .value_serialize(),
+                }],
+                10,
+            ),
+        )]
+        .into_iter()
+        .collect();
+        tx.send_barrier(
+            Barrier::new_test_barrier(curr_epoch).with_mutation(Mutation::Add(AddMutation {
+                actor_cdc_table_snapshot_splits: CdcTableSnapshotSplitAssignmentWithGeneration {
+                    splits: snapshot_splits,
+                },
+                ..Default::default()
+            })),
+        );
+        assert!(matches!(
+            executor.next().await.unwrap().unwrap(),
+            Message::Barrier(Barrier { epoch, .. }) if epoch.curr == curr_epoch
+        ));
+
+        // Drive the injected failure. No error or data should escape while the executor waits
+        // for a barrier at which it can safely checkpoint and replace the reader.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), executor.next())
+                .await
+                .is_err()
+        );
+        assert_eq!(external_table_for_assertion.mock_reader_create_count(), 1);
+
+        curr_epoch.inc_epoch();
+        tx.push_barrier(curr_epoch, false);
+        assert!(matches!(
+            executor.next().await.unwrap().unwrap(),
+            Message::Barrier(Barrier { epoch, .. }) if epoch.curr == curr_epoch
+        ));
+
+        // Polling after the barrier reconstructs the reader and resumes the same split.
+        assert!(matches!(
+            executor.next().await.unwrap().unwrap(),
+            Message::Chunk(_)
+        ));
+        assert_eq!(external_table_for_assertion.mock_reader_create_count(), 2);
+    }
 
     #[test]
     fn test_filter_stream_chunk() {
