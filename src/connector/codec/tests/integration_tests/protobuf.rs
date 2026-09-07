@@ -22,7 +22,11 @@ use std::collections::{HashMap, HashSet};
 
 use anyhow::Context;
 use prost::Message;
-use prost_reflect::{DescriptorPool, DynamicMessage, MessageDescriptor};
+use prost_reflect::{DescriptorPool, DynamicMessage, MapKey, MessageDescriptor, Value};
+use risingwave_common::array::StructValue;
+use risingwave_common::types::{
+    DataType, ListValue, MapType, MapValue, ScalarImpl, StructType, ToOwnedDatum,
+};
 use risingwave_connector_codec::common::protobuf::compile_pb;
 use risingwave_connector_codec::decoder::Access;
 use risingwave_connector_codec::decoder::protobuf::ProtobufAccess;
@@ -61,6 +65,7 @@ fn check(
     for data in pb_data {
         let access = ProtobufAccess::new(
             DynamicMessage::decode(pb_schema.clone(), *data).unwrap(),
+            pb_schema.clone(),
             &messages_as_jsonb,
         );
         let mut row = vec![];
@@ -107,6 +112,226 @@ fn load_message_descriptor(
             message_name, location,
         )
     })
+}
+
+fn compile_message_descriptor(schema: &str, message_name: &str) -> MessageDescriptor {
+    let descriptor_set = compile_pb(
+        ("test.proto".to_owned(), schema.to_owned()),
+        std::iter::empty::<(String, String)>(),
+    )
+    .unwrap();
+    DescriptorPool::from_file_descriptor_set(descriptor_set)
+        .unwrap()
+        .get_message_by_name(message_name)
+        .unwrap()
+}
+
+#[test]
+fn test_reader_writer_fields_are_matched_by_number() {
+    let writer_descriptor = compile_message_descriptor(
+        r#"
+            syntax = "proto3";
+            package test;
+
+            enum Status {
+                STATUS_UNSPECIFIED = 0;
+                STATUS_ACTIVE = 1;
+            }
+
+            message Address {
+                string old_city = 1;
+            }
+
+            message Event {
+                int32 old_age = 1;
+                string old_name = 2;
+                bool old_enabled = 3;
+                int64 old_count = 4;
+                double old_ratio = 5;
+                Status old_status = 6;
+                bytes old_payload = 7;
+                repeated int32 old_scores = 8;
+                Address old_address = 9;
+                repeated Address old_addresses = 10;
+                map<string, Address> old_locations = 11;
+                optional string old_note = 12;
+                optional string old_unset_note = 13;
+            }
+        "#,
+        "test.Event",
+    );
+    let reader_descriptor = compile_message_descriptor(
+        r#"
+            syntax = "proto3";
+            package test;
+
+            enum Status {
+                STATUS_UNSPECIFIED = 0;
+                STATUS_ACTIVE = 1;
+            }
+
+            message Address {
+                string city = 1;
+                string country = 2;
+            }
+
+            message Event {
+                int32 age = 1;
+                string name = 2;
+                bool enabled = 3;
+                int64 count = 4;
+                double ratio = 5;
+                Status status = 6;
+                bytes payload = 7;
+                repeated int32 scores = 8;
+                Address address = 9;
+                repeated Address addresses = 10;
+                map<string, Address> locations = 11;
+                optional string note = 12;
+                optional string unset_note = 13;
+                int32 added_field = 14;
+            }
+        "#,
+        "test.Event",
+    );
+
+    let address_descriptor = writer_descriptor
+        .parent_pool()
+        .get_message_by_name("test.Address")
+        .unwrap();
+    let address = |city: &str| {
+        let mut address = DynamicMessage::new(address_descriptor.clone());
+        address.set_field_by_name("old_city", Value::String(city.to_owned()));
+        address
+    };
+
+    let mut message = DynamicMessage::new(writer_descriptor);
+    message.set_field_by_name("old_age", Value::I32(42));
+    message.set_field_by_name("old_name", Value::String("Alice".to_owned()));
+    message.set_field_by_name("old_enabled", Value::Bool(true));
+    message.set_field_by_name("old_count", Value::I64(123456789));
+    message.set_field_by_name("old_ratio", Value::F64(1.25));
+    message.set_field_by_name("old_status", Value::EnumNumber(1));
+    message.set_field_by_name("old_payload", Value::Bytes(vec![0, 1, 2, 255].into()));
+    message.set_field_by_name(
+        "old_scores",
+        Value::List(vec![Value::I32(7), Value::I32(9)]),
+    );
+    message.set_field_by_name("old_address", Value::Message(address("Paris")));
+    message.set_field_by_name(
+        "old_addresses",
+        Value::List(vec![
+            Value::Message(address("Paris")),
+            Value::Message(address("Tokyo")),
+        ]),
+    );
+    message.set_field_by_name(
+        "old_locations",
+        Value::Map(HashMap::from([(
+            MapKey::String("home".to_owned()),
+            Value::Message(address("Berlin")),
+        )])),
+    );
+    message.set_field_by_name("old_note", Value::String("present".to_owned()));
+
+    let messages_as_jsonb = HashSet::new();
+    let access = ProtobufAccess::new(message, reader_descriptor, &messages_as_jsonb);
+
+    let scalar_cases = [
+        ("age", DataType::Int32, Some(ScalarImpl::Int32(42))),
+        (
+            "name",
+            DataType::Varchar,
+            Some(ScalarImpl::Utf8("Alice".into())),
+        ),
+        ("enabled", DataType::Boolean, Some(ScalarImpl::Bool(true))),
+        ("count", DataType::Int64, Some(ScalarImpl::Int64(123456789))),
+        (
+            "ratio",
+            DataType::Float64,
+            Some(ScalarImpl::Float64(1.25.into())),
+        ),
+        (
+            "status",
+            DataType::Varchar,
+            Some(ScalarImpl::Utf8("STATUS_ACTIVE".into())),
+        ),
+        (
+            "payload",
+            DataType::Bytea,
+            Some(ScalarImpl::Bytea(vec![0, 1, 2, 255].into())),
+        ),
+        (
+            "note",
+            DataType::Varchar,
+            Some(ScalarImpl::Utf8("present".into())),
+        ),
+        ("unset_note", DataType::Varchar, None),
+        ("added_field", DataType::Int32, None),
+    ];
+    for (name, data_type, expected) in scalar_cases {
+        assert_eq!(
+            access.access(&[name], &data_type).unwrap().to_owned_datum(),
+            expected,
+            "field {name}"
+        );
+    }
+
+    assert_eq!(
+        access
+            .access(&["scores"], &DataType::list(DataType::Int32))
+            .unwrap()
+            .to_owned_datum(),
+        Some(ScalarImpl::List(ListValue::from_iter([7, 9])))
+    );
+
+    let address_type = DataType::Struct(StructType::new(vec![
+        ("city".to_owned(), DataType::Varchar),
+        ("country".to_owned(), DataType::Varchar),
+    ]));
+    let address_value = |city: &str| {
+        ScalarImpl::Struct(StructValue::new(vec![
+            Some(ScalarImpl::Utf8(city.into())),
+            None,
+        ]))
+    };
+    assert_eq!(
+        access
+            .access(&["address"], &address_type)
+            .unwrap()
+            .to_owned_datum(),
+        Some(address_value("Paris"))
+    );
+
+    let addresses_type = DataType::list(address_type.clone());
+    assert_eq!(
+        access
+            .access(&["addresses"], &addresses_type)
+            .unwrap()
+            .to_owned_datum(),
+        Some(ScalarImpl::List(ListValue::from_datum_iter(
+            &address_type,
+            [Some(address_value("Paris")), Some(address_value("Tokyo")),],
+        )))
+    );
+
+    let locations_type = DataType::Map(MapType::from_kv(DataType::Varchar, address_type.clone()));
+    assert_eq!(
+        access
+            .access(&["locations"], &locations_type)
+            .unwrap()
+            .to_owned_datum(),
+        Some(ScalarImpl::Map(
+            MapValue::try_from_kv(
+                ListValue::from_datum_iter(
+                    &DataType::Varchar,
+                    [Some(ScalarImpl::Utf8("home".into()))],
+                ),
+                ListValue::from_datum_iter(&address_type, [Some(address_value("Berlin"))]),
+            )
+            .unwrap()
+        ))
+    );
 }
 
 #[test]

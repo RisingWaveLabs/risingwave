@@ -255,7 +255,7 @@ impl Client {
             let (result, _index, remaining) = select_all(fut_req).await;
             match result {
                 Ok(Ok(res)) => {
-                    let _ = remaining.iter().map(|ele| ele.abort());
+                    let _ = remaining.iter().for_each(|task| task.abort());
                     return Ok(res);
                 }
                 Ok(Err(e)) => errs.push(itertools::Either::Left(e)),
@@ -272,13 +272,34 @@ impl Client {
 
     /// get schema by id
     pub async fn get_schema_by_id(&self, id: i32) -> SrResult<ConfluentSchema> {
-        let res: GetByIdResp = self
-            .concurrent_req(Method::GET, &["schemas", "ids", &id.to_string()])
-            .await?;
+        let res = self.get_schema_response_by_id(id).await?;
         Ok(ConfluentSchema {
             id,
             content: res.schema,
         })
+    }
+
+    async fn get_schema_response_by_id(&self, id: i32) -> SrResult<GetByIdResp> {
+        self.concurrent_req(Method::GET, &["schemas", "ids", &id.to_string()])
+            .await
+    }
+
+    /// Get a schema by its global ID and recursively load the exact versions of its references.
+    pub(crate) async fn get_schema_and_references_by_id(
+        &self,
+        id: i32,
+    ) -> SrResult<(Subject, Vec<Subject>)> {
+        let response = self.get_schema_response_by_id(id).await?;
+        let references = self.get_referenced_subjects(response.references).await?;
+        let primary = Subject {
+            version: 0,
+            name: format!("schema-{id}.proto"),
+            schema: ConfluentSchema {
+                id,
+                content: response.schema,
+            },
+        };
+        Ok((primary, references))
     }
 
     /// get the latest schema of the subject
@@ -300,8 +321,18 @@ impl Client {
 
     /// get the latest version of the subject
     pub async fn get_subject(&self, subject: &str) -> SrResult<Subject> {
+        self.get_subject_by_version(subject, "latest").await
+    }
+
+    /// Get an exact version of a subject.
+    pub async fn get_subject_by_version(
+        &self,
+        subject: &str,
+        version: impl ToString,
+    ) -> SrResult<Subject> {
+        let version = version.to_string();
         let res: GetBySubjectResp = self
-            .concurrent_req(Method::GET, &["subjects", subject, "versions", "latest"])
+            .concurrent_req(Method::GET, &["subjects", subject, "versions", &version])
             .await?;
         tracing::debug!("update schema: {:?}", res);
         Ok(Subject {
@@ -319,13 +350,56 @@ impl Client {
         &self,
         subject: &str,
     ) -> SrResult<(Subject, Vec<Subject>)> {
+        self.get_subject_and_references_by_version(subject, "latest")
+            .await
+    }
+
+    /// Get an exact subject version and recursively load the exact versions of its references.
+    pub async fn get_subject_and_references_by_version(
+        &self,
+        subject: &str,
+        version: impl ToString,
+    ) -> SrResult<(Subject, Vec<Subject>)> {
+        let version = version.to_string();
+        let response: GetBySubjectResp = self
+            .concurrent_req(Method::GET, &["subjects", subject, "versions", &version])
+            .await?;
+        let references = self.get_referenced_subjects(response.references).await?;
+        let primary = Subject {
+            schema: ConfluentSchema {
+                id: response.id,
+                content: response.schema,
+            },
+            version: response.version,
+            name: response.subject,
+        };
+        Ok((primary, references))
+    }
+
+    async fn get_referenced_subjects(
+        &self,
+        references: Vec<SchemaReference>,
+    ) -> SrResult<Vec<Subject>> {
         let mut subjects = vec![];
         let mut visited = HashSet::new();
-        let mut queue = vec![(subject.to_owned(), "latest".to_owned())];
-        // use bfs to get all references
-        while let Some((subject, version)) = queue.pop() {
+        let mut queue = references;
+
+        while let Some(reference) = queue.pop() {
+            let identity = (
+                reference.name.clone(),
+                reference.subject.clone(),
+                reference.version,
+            );
+            if !visited.insert(identity) {
+                continue;
+            }
+
+            let version = reference.version.to_string();
             let res: GetBySubjectResp = self
-                .concurrent_req(Method::GET, &["subjects", &subject, "versions", &version])
+                .concurrent_req(
+                    Method::GET,
+                    &["subjects", &reference.subject, "versions", &version],
+                )
                 .await?;
             let ref_subject = Subject {
                 schema: ConfluentSchema {
@@ -333,19 +407,12 @@ impl Client {
                     content: res.schema,
                 },
                 version: res.version,
-                name: res.subject.clone(),
+                name: reference.name,
             };
             subjects.push(ref_subject);
-            visited.insert(res.subject);
-            queue.extend(
-                res.references
-                    .into_iter()
-                    .filter(|r| !visited.contains(&r.subject))
-                    .map(|r| (r.subject, r.version.to_string())),
-            );
+            queue.extend(res.references);
         }
-        let origin_subject = subjects.remove(0);
 
-        Ok((origin_subject, subjects))
+        Ok(subjects)
     }
 }

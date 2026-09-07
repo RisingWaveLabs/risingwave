@@ -82,10 +82,12 @@ SELECT COUNT(*) FROM mv_user_2;
 ----
 25
 
-query ????
-SELECT COUNT(*), MAX(age), MIN(age), SUM(age) FROM mv_user_more;
+# The refreshed source decodes each record with its writer schema: the original 20 records have
+# no age field and remain NULL, while the 5 records from the evolved schema contain ages 100..104.
+query ?????
+SELECT COUNT(*), COUNT(age), MAX(age), MIN(age), SUM(age) FROM mv_user_more;
 ----
-25	104	0	510
+25	5	104	100	510
 
 # Push more events with extended fields
 system ok
@@ -103,10 +105,10 @@ SELECT COUNT(*) FROM mv_user_2;
 ----
 30
 
-query ????
-SELECT COUNT(*), MAX(age), MIN(age), SUM(age) FROM mv_user_more;
+query ?????
+SELECT COUNT(*), COUNT(age), MAX(age), MIN(age), SUM(age) FROM mv_user_more;
 ----
-30	104	0	1020
+30	10	104	100	1020
 
 
 statement ok

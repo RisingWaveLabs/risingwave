@@ -31,6 +31,7 @@ pub enum SchemaLoader {
     Glue(GlueSchemaLoader),
 }
 
+#[derive(Debug)]
 pub struct ConfluentSchemaLoader {
     pub client: Client,
     pub name_strategy: PbSchemaRegistryNameStrategy,
@@ -56,6 +57,22 @@ pub enum SchemaVersion {
 }
 
 impl ConfluentSchemaLoader {
+    /// Resolves the key or value subject using the configured naming strategy.
+    fn subject<const IS_KEY: bool>(&self) -> Result<String, SchemaFetchError> {
+        let record = if IS_KEY {
+            self.key_record_name.as_deref()
+        } else {
+            self.val_record_name.as_deref()
+        };
+        Ok(get_subject_by_strategy(
+            &self.name_strategy,
+            &self.topic,
+            record,
+            IS_KEY,
+        )?)
+    }
+
+    /// Creates a loader from connector format options.
     pub fn from_format_options(
         topic: &str,
         format_options: &BTreeMap<String, String>,
@@ -88,19 +105,43 @@ impl ConfluentSchemaLoader {
         })
     }
 
+    /// Loads and compiles the latest key or value schema and its references.
     async fn load_schema<Out: LoadedSchema, const IS_KEY: bool>(
         &self,
     ) -> Result<(SchemaVersion, Out), SchemaFetchError> {
-        let record = match IS_KEY {
-            true => self.key_record_name.as_deref(),
-            false => self.val_record_name.as_deref(),
-        };
-        let subject = get_subject_by_strategy(&self.name_strategy, &self.topic, record, IS_KEY)?;
+        let subject = self.subject::<IS_KEY>()?;
         let (primary_subject, dependency_subjects) =
             self.client.get_subject_and_references(&subject).await?;
         let schema_id = primary_subject.schema.id;
         let out = Out::compile(primary_subject, dependency_subjects)?;
         Ok((SchemaVersion::Confluent(schema_id), out))
+    }
+
+    /// Loads and compiles a schema and its references by global schema ID.
+    async fn load_schema_by_id<Out: LoadedSchema>(
+        &self,
+        schema_id: i32,
+    ) -> Result<Out, SchemaFetchError> {
+        let (primary, references) = self
+            .client
+            .get_schema_and_references_by_id(schema_id)
+            .await?;
+        Out::compile(primary, references)
+    }
+
+    /// Loads and compiles a value schema by global schema ID.
+    pub async fn load_val_schema_by_id<Out: LoadedSchema>(
+        &self,
+        schema_id: i32,
+    ) -> Result<Out, SchemaFetchError> {
+        self.load_schema_by_id::<Out>(schema_id).await
+    }
+
+    /// Loads and compiles the latest value schema.
+    pub async fn load_val_schema<Out: LoadedSchema>(
+        &self,
+    ) -> Result<(SchemaVersion, Out), SchemaFetchError> {
+        self.load_schema::<Out, false>().await
     }
 }
 

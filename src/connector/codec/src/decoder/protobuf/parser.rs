@@ -78,6 +78,7 @@ fn detect_loop_and_push(
 /// handling presence, then call [`from_protobuf_value`].
 pub fn from_protobuf_message_field<'a>(
     field_desc: &FieldDescriptor,
+    reader_field_desc: Option<&FieldDescriptor>,
     message: &'a DynamicMessage,
     type_expected: &DataType,
     messages_as_jsonb: &'a HashSet<String>,
@@ -92,19 +93,28 @@ pub fn from_protobuf_message_field<'a>(
     };
 
     match value {
-        Cow::Borrowed(value) => {
-            from_protobuf_value(field_desc, value, type_expected, messages_as_jsonb)
-        }
-        Cow::Owned(value) => {
-            from_protobuf_value(field_desc, &value, type_expected, messages_as_jsonb)
-                .map(|d| d.to_owned_datum().into())
-        }
+        Cow::Borrowed(value) => from_protobuf_value(
+            field_desc,
+            reader_field_desc,
+            value,
+            type_expected,
+            messages_as_jsonb,
+        ),
+        Cow::Owned(value) => from_protobuf_value(
+            field_desc,
+            reader_field_desc,
+            &value,
+            type_expected,
+            messages_as_jsonb,
+        )
+        .map(|d| d.to_owned_datum().into()),
     }
 }
 
 /// Converts a protobuf value to a datum.
 fn from_protobuf_value<'a>(
     field_desc: &FieldDescriptor,
+    reader_field_desc: Option<&FieldDescriptor>,
     value: &'a Value,
     type_expected: &DataType,
     messages_as_jsonb: &'a HashSet<String>,
@@ -144,6 +154,10 @@ fn from_protobuf_value<'a>(
                 ))
             } else {
                 let desc = dyn_msg.descriptor();
+                let reader_desc = reader_field_desc.and_then(|field| match field.kind() {
+                    Kind::Message(message) => Some(message),
+                    _ => None,
+                });
                 let DataType::Struct(st) = type_expected else {
                     return Err(AccessError::TypeError {
                         expected: type_expected.to_string(),
@@ -154,13 +168,22 @@ fn from_protobuf_value<'a>(
 
                 let mut datums = Vec::with_capacity(st.len());
                 for (name, expected_field_type) in st.iter() {
-                    let Some(field_desc) = desc.get_field_by_name(name) else {
-                        // Field deleted in protobuf. Fallback to SQL NULL (of proper RW type).
+                    let reader_field = reader_desc
+                        .as_ref()
+                        .and_then(|descriptor| descriptor.get_field_by_name(name));
+                    let writer_field = match &reader_field {
+                        Some(reader_field) => desc.get_field(reader_field.number()),
+                        None => desc.get_field_by_name(name),
+                    };
+                    let Some(writer_field) = writer_field else {
+                        // The field does not exist in the writer schema. Use SQL NULL instead of a
+                        // default from the reader schema.
                         datums.push(None);
                         continue;
                     };
                     let datum = from_protobuf_message_field(
-                        &field_desc,
+                        &writer_field,
+                        reader_field.as_ref(),
                         dyn_msg,
                         expected_field_type,
                         messages_as_jsonb,
@@ -183,6 +206,7 @@ fn from_protobuf_value<'a>(
             for value in values {
                 builder.append(from_protobuf_value(
                     field_desc,
+                    reader_field_desc,
                     value,
                     elem_type,
                     messages_as_jsonb,
@@ -207,6 +231,16 @@ fn from_protobuf_value<'a>(
                 return Err(err());
             }
             let map_desc = kind.as_message().ok_or_else(err)?;
+            let reader_map_desc = reader_field_desc.and_then(|field| match field.kind() {
+                Kind::Message(message) if message.is_map_entry() => Some(message),
+                _ => None,
+            });
+            let reader_key_field = reader_map_desc
+                .as_ref()
+                .map(MessageDescriptor::map_entry_key_field);
+            let reader_value_field = reader_map_desc
+                .as_ref()
+                .map(MessageDescriptor::map_entry_value_field);
 
             let mut key_builder = map_type.key().create_array_builder(map.len());
             let mut value_builder = map_type.value().create_array_builder(map.len());
@@ -217,12 +251,14 @@ fn from_protobuf_value<'a>(
             for (key, value) in map.iter().sorted_by_key(|(k, _v)| *k) {
                 key_builder.append(from_protobuf_value(
                     &map_desc.map_entry_key_field(),
+                    reader_key_field.as_ref(),
                     &key.clone().into(),
                     map_type.key(),
                     messages_as_jsonb,
                 )?);
                 value_builder.append(from_protobuf_value(
                     &map_desc.map_entry_value_field(),
+                    reader_value_field.as_ref(),
                     value,
                     map_type.value(),
                     messages_as_jsonb,

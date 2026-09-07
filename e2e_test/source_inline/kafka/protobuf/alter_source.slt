@@ -116,15 +116,17 @@ CREATE MATERIALIZED VIEW mv_user_gen_more AS SELECT id, t, age FROM src_user_gen
 statement ok
 ALTER TABLE t_user REFRESH SCHEMA;
 
-query ???? retry 3 backoff 5s
-SELECT COUNT(*), MAX(age), MIN(age), SUM(age) FROM mv_user_more;
+# The refreshed source decodes each record with its writer schema: the original 20 records have
+# no age field and remain NULL, while the 5 records from the evolved schema contain ages 100..104.
+query ????? retry 3 backoff 5s
+SELECT COUNT(*), COUNT(age), MAX(age), MIN(age), SUM(age) FROM mv_user_more;
 ----
-25	104	0	510
+25	5	104	100	510
 
-query ????
-SELECT COUNT(*), MAX(age), MIN(age), SUM(age) FROM t_user;
+query ?????
+SELECT COUNT(*), COUNT(age), MAX(age), MIN(age), SUM(age) FROM t_user;
 ----
-25	NULL	NULL	NULL
+25	0	NULL	NULL	NULL
 
 # Verify generated column still works correctly after schema refresh
 query III retry 3 backoff 5s
@@ -136,10 +138,10 @@ SELECT COUNT(*), MIN(t), MAX(t) FROM mv_user_gen_more WHERE t = id + 1;
 system ok
 python3 e2e_test/source_inline/kafka/protobuf/pb.py "${RISEDEV_KAFKA_BOOTSTRAP_SERVERS}" "${RISEDEV_SCHEMA_REGISTRY_URL}" "pb_alter_source_test" 5 user_with_more_fields
 
-query ???? retry 3 backoff 5s
-SELECT COUNT(*), MAX(age), MIN(age), SUM(age) FROM t_user;
+query ????? retry 3 backoff 5s
+SELECT COUNT(*), COUNT(age), MAX(age), MIN(age), SUM(age) FROM t_user;
 ----
-30	104	100	510
+30	5	104	100	510
 
 # Final verification that generated column still works
 query III retry 3 backoff 5s

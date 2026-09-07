@@ -153,7 +153,6 @@ pub struct Subject {
 #[derive(Debug, Deserialize)]
 pub struct SchemaReference {
     /// The name of the reference.
-    #[expect(dead_code)]
     pub name: String,
     /// The subject that the referenced schema belongs to
     pub subject: String,
@@ -164,6 +163,8 @@ pub struct SchemaReference {
 #[derive(Debug, Deserialize)]
 pub struct GetByIdResp {
     pub schema: String,
+    #[serde(default)]
+    pub references: Vec<SchemaReference>,
 }
 
 #[derive(Debug, Deserialize)]

@@ -16,7 +16,7 @@ pub mod parser;
 use std::collections::HashSet;
 use std::sync::LazyLock;
 
-use prost_reflect::{DynamicMessage, ReflectMessage};
+use prost_reflect::{DynamicMessage, MessageDescriptor, ReflectMessage};
 use risingwave_common::log::LogSuppressor;
 use risingwave_common::types::{DataType, DatumCow};
 use thiserror_ext::AsReport;
@@ -25,13 +25,19 @@ use super::{Access, AccessResult, uncategorized};
 
 pub struct ProtobufAccess<'a> {
     message: DynamicMessage,
+    reader_descriptor: MessageDescriptor,
     messages_as_jsonb: &'a HashSet<String>,
 }
 
 impl<'a> ProtobufAccess<'a> {
-    pub fn new(message: DynamicMessage, messages_as_jsonb: &'a HashSet<String>) -> Self {
+    pub fn new(
+        message: DynamicMessage,
+        reader_descriptor: MessageDescriptor,
+        messages_as_jsonb: &'a HashSet<String>,
+    ) -> Self {
         Self {
             message,
+            reader_descriptor,
             messages_as_jsonb,
         }
     }
@@ -45,21 +51,34 @@ impl<'a> ProtobufAccess<'a> {
 impl Access for ProtobufAccess<'_> {
     fn access<'a>(&'a self, path: &[&str], type_expected: &DataType) -> AccessResult<DatumCow<'a>> {
         debug_assert_eq!(1, path.len());
-        let field_desc = self
-            .message
-            .descriptor()
-            .get_field_by_name(path[0])
-            .ok_or_else(|| uncategorized!("protobuf schema don't have field {}", path[0]))
-            .inspect_err(|e| {
+        let reader_field = self.reader_descriptor.get_field_by_name(path[0]);
+        let writer_descriptor = self.message.descriptor();
+        let writer_field = match &reader_field {
+            Some(reader_field) => writer_descriptor.get_field(reader_field.number()),
+            // The catalog and the descriptor loaded when the parser starts can temporarily be
+            // out of sync. Preserve the previous name-based behavior when there is no reader field
+            // to provide a stable field number.
+            None => writer_descriptor.get_field_by_name(path[0]),
+        };
+
+        let Some(writer_field) = writer_field else {
+            if reader_field.is_some() {
+                return Ok(DatumCow::NULL);
+            }
+            let error = uncategorized!("protobuf schema don't have field {}", path[0]);
+            {
                 static LOG_SUPPRESSOR: LazyLock<LogSuppressor> =
                     LazyLock::new(LogSuppressor::default);
                 if let Ok(suppressed_count) = LOG_SUPPRESSOR.check() {
-                    tracing::error!(suppressed_count, "{}", e.as_report());
+                    tracing::error!(suppressed_count, "{}", error.as_report());
                 }
-            })?;
+            }
+            return Err(error);
+        };
 
         parser::from_protobuf_message_field(
-            &field_desc,
+            &writer_field,
+            reader_field.as_ref(),
             &self.message,
             type_expected,
             self.messages_as_jsonb,
