@@ -296,4 +296,16 @@ mod tests {
             HUMMOCK_IN_MEMORY,
         );
     }
+
+    #[test]
+    fn test_secret_store_private_key_is_redacted_in_debug_output() {
+        let private_key = "00112233445566778899aabbccddeeff";
+        let opts =
+            MetaNodeOpts::parse_from(["meta-node", "--secret-store-private-key-hex", private_key]);
+
+        let debug_output = format!("{opts:?}");
+        assert!(debug_output.contains("secret_store_private_key_hex"));
+        assert!(!debug_output.contains(private_key));
+        assert!(debug_output.contains("secret_store_private_key_hex: Some([REDACTED"));
+    }
 }
