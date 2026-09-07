@@ -324,6 +324,11 @@ impl IcebergCompactionPlanRunner {
             .is_copy_on_write()
             .then(|| CowPublishPlan::from_compaction_plan(&compaction_plan));
 
+        // A data file that appears twice in the plan would be read twice by the rewrite and its
+        // rows doubled in the output, after which the duplicate can no longer be detected by path.
+        // Fail before touching the table so the snapshot stays intact for manual repair.
+        ensure_unique_compaction_plan_data_files(&compaction_plan, &table_ident)?;
+
         if !compaction_plan.has_files() {
             if let Some(cow_publish_plan) = cow_publish_plan {
                 let table = catalog
@@ -474,16 +479,55 @@ async fn live_data_files_for_snapshot(
     Ok(data_files)
 }
 
-async fn live_data_files_for_branch(table: &Table, branch: &str) -> HummockResult<Vec<DataFile>> {
-    let Some(snapshot_id) = table
+fn branch_snapshot_id(table: &Table, branch: &str) -> Option<i64> {
+    table
         .metadata()
         .snapshot_for_ref(branch)
         .map(|snapshot| snapshot.snapshot_id())
-    else {
+}
+
+/// Loads the live data files of `main` before a COW publish.
+///
+/// Duplicate paths on `main` are reported but do not fail the task: the publish set has already
+/// been verified unique, so the following overwrite can only repair `main` (when the duplicated
+/// file was rewritten) or leave it unchanged. Failing here would pin `main` to the corrupted
+/// snapshot forever, because meta reschedules a failed task immediately and nothing else rewrites
+/// the branch.
+async fn load_cow_target_data_files(
+    task_id: u64,
+    table: &Table,
+    ingestion_branch: &str,
+    publish_plan: &CowPublishPlan,
+) -> HummockResult<Vec<DataFile>> {
+    let Some(main_snapshot_id) = branch_snapshot_id(table, MAIN_BRANCH) else {
         return Ok(vec![]);
     };
+    let main_files = live_data_files_for_snapshot(table, main_snapshot_id).await?;
 
-    live_data_files_for_snapshot(table, snapshot_id).await
+    let duplicates = duplicate_data_file_paths(main_files.iter().map(|file| file.file_path()));
+    if !duplicates.is_empty() {
+        let report = DuplicateDataFilePathReport::new(
+            &duplicates,
+            "COW target snapshot",
+            table.identifier(),
+            main_snapshot_id,
+        );
+        tracing::error!(
+            iceberg_component = "compaction_worker",
+            iceberg_operation = "publish_cow_snapshot",
+            task_id,
+            table = %table.identifier(),
+            ingestion_branch,
+            planned_snapshot_id = publish_plan.snapshot_id,
+            main_snapshot_id,
+            duplicated_path_count = report.duplicated_path_count,
+            duplicate_entry_count = report.duplicate_entry_count,
+            duplicate_paths = ?report.sample_paths,
+            "{report}; publishing anyway so the overwrite can repair main",
+        );
+    }
+
+    Ok(main_files)
 }
 
 async fn build_cow_publish_data_files(
@@ -493,12 +537,133 @@ async fn build_cow_publish_data_files(
 ) -> HummockResult<(Vec<DataFile>, CowPruningStatistics)> {
     let mut planned_snapshot_files =
         live_data_files_for_snapshot(table, publish_plan.snapshot_id).await?;
+    ensure_unique_data_file_paths(
+        &planned_snapshot_files,
+        "COW source snapshot",
+        table.identifier(),
+        publish_plan.snapshot_id,
+    )?;
     let pruning_statistics = retain_unrewritten_data_files(
         &mut planned_snapshot_files,
         &publish_plan.rewritten_data_file_paths,
     );
     planned_snapshot_files.extend(output_data_files);
+    ensure_unique_data_file_paths(
+        &planned_snapshot_files,
+        "COW publish set",
+        table.identifier(),
+        publish_plan.snapshot_id,
+    )?;
     Ok((planned_snapshot_files, pruning_statistics))
+}
+
+/// Maximum number of duplicated paths spelled out in one error/log line.
+const MAX_REPORTED_DUPLICATE_DATA_FILE_PATHS: usize = 8;
+
+/// Returns every data file path that occurs more than once, with its occurrence count, sorted by
+/// path so reports are deterministic.
+fn duplicate_data_file_paths<'a>(
+    paths: impl IntoIterator<Item = &'a str>,
+) -> Vec<(&'a str, usize)> {
+    let mut occurrences: BTreeMap<&str, usize> = BTreeMap::new();
+    for path in paths {
+        *occurrences.entry(path).or_default() += 1;
+    }
+    occurrences
+        .into_iter()
+        .filter(|(_, count)| *count > 1)
+        .collect()
+}
+
+/// Summary of duplicated data file paths carrying enough context (table, snapshot, counts) for
+/// oncall to locate the corrupted snapshot from a single log line.
+struct DuplicateDataFilePathReport {
+    role: String,
+    table: TableIdent,
+    snapshot_id: i64,
+    /// Number of distinct paths that appear more than once.
+    duplicated_path_count: usize,
+    /// Number of surplus manifest entries across all duplicated paths.
+    duplicate_entry_count: usize,
+    /// Up to [`MAX_REPORTED_DUPLICATE_DATA_FILE_PATHS`] entries formatted as `path (xN)`.
+    sample_paths: Vec<String>,
+}
+
+impl DuplicateDataFilePathReport {
+    fn new(duplicates: &[(&str, usize)], role: &str, table: &TableIdent, snapshot_id: i64) -> Self {
+        Self {
+            role: role.to_owned(),
+            table: table.clone(),
+            snapshot_id,
+            duplicated_path_count: duplicates.len(),
+            duplicate_entry_count: duplicates
+                .iter()
+                .map(|(_, count)| count.saturating_sub(1))
+                .sum(),
+            sample_paths: duplicates
+                .iter()
+                .take(MAX_REPORTED_DUPLICATE_DATA_FILE_PATHS)
+                .map(|(path, count)| format!("{path} (x{count})"))
+                .collect(),
+        }
+    }
+}
+
+impl std::fmt::Display for DuplicateDataFilePathReport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Duplicate data file paths found in {}: table={}, snapshot_id={}, duplicated_path_count={}, duplicate_entry_count={}, paths=[{}",
+            self.role,
+            self.table,
+            self.snapshot_id,
+            self.duplicated_path_count,
+            self.duplicate_entry_count,
+            self.sample_paths.join(", "),
+        )?;
+        let omitted = self
+            .duplicated_path_count
+            .saturating_sub(self.sample_paths.len());
+        if omitted > 0 {
+            write!(f, ", ... {omitted} more")?;
+        }
+        write!(f, "]")
+    }
+}
+
+fn ensure_unique_data_file_paths(
+    data_files: &[DataFile],
+    role: &str,
+    table: &TableIdent,
+    snapshot_id: i64,
+) -> HummockResult<()> {
+    let duplicates = duplicate_data_file_paths(data_files.iter().map(|file| file.file_path()));
+    if duplicates.is_empty() {
+        return Ok(());
+    }
+    Err(HummockError::compaction_executor(anyhow::anyhow!(
+        "{}",
+        DuplicateDataFilePathReport::new(&duplicates, role, table, snapshot_id)
+    )))
+}
+
+fn ensure_unique_compaction_plan_data_files(
+    plan: &CompactionPlan,
+    table: &TableIdent,
+) -> HummockResult<()> {
+    let duplicates = duplicate_data_file_paths(
+        plan.file_group
+            .data_files
+            .iter()
+            .map(|task| task.data_file_path.as_str()),
+    );
+    if duplicates.is_empty() {
+        return Ok(());
+    }
+    Err(HummockError::compaction_executor(anyhow::anyhow!(
+        "{}",
+        DuplicateDataFilePathReport::new(&duplicates, "compaction plan", table, plan.snapshot_id)
+    )))
 }
 
 fn retain_unrewritten_data_files(
@@ -601,7 +766,8 @@ async fn publish_cow_snapshot_to_main(
         );
     }
 
-    let main_files = live_data_files_for_branch(table, MAIN_BRANCH).await?;
+    let main_files =
+        load_cow_target_data_files(task_id, table, ingestion_branch, publish_plan).await?;
     let (added_files, deleted_files) = diff_data_files(published_files, main_files);
 
     if added_files.is_empty() && deleted_files.is_empty() {
@@ -939,6 +1105,7 @@ mod tests {
 
     use iceberg::NamespaceIdent;
     use iceberg::io::FileIOBuilder;
+    use iceberg::scan::FileScanTask;
     use iceberg::spec::{
         DataFileBuilder, DataFileFormat, FormatVersion, ManifestListWriter, ManifestWriterBuilder,
         NestedField, Operation, PrimitiveType, Schema, Snapshot, SnapshotReference,
@@ -974,6 +1141,29 @@ mod tests {
             .file_size_in_bytes(1)
             .build()
             .unwrap()
+    }
+
+    fn test_data_scan_task(schema: Arc<Schema>, path: &str) -> FileScanTask {
+        FileScanTask {
+            file_size_in_bytes: 1,
+            start: 0,
+            length: 1,
+            record_count: Some(1),
+            data_file_path: path.to_owned(),
+            referenced_data_file: None,
+            data_file_content: DataContentType::Data,
+            data_file_format: DataFileFormat::Parquet,
+            schema,
+            project_field_ids: vec![],
+            predicate: None,
+            deletes: vec![],
+            sequence_number: 0,
+            equality_ids: None,
+            partition: None,
+            partition_spec: None,
+            name_mapping: None,
+            case_sensitive: true,
+        }
     }
 
     fn test_equality_delete_file(path: &str) -> DataFile {
@@ -1169,9 +1359,12 @@ mod tests {
 
         assert_eq!(
             sorted_file_paths(
-                &live_data_files_for_branch(&table, "ingestion")
-                    .await
-                    .unwrap()
+                &live_data_files_for_snapshot(
+                    &table,
+                    branch_snapshot_id(&table, "ingestion").unwrap()
+                )
+                .await
+                .unwrap()
             ),
             vec![
                 "data/clean.parquet",
@@ -1194,6 +1387,150 @@ mod tests {
         assert_eq!(
             sorted_file_paths(&published_files),
             vec!["data/clean.parquet", "data/compacted.parquet"]
+        );
+    }
+
+    #[test]
+    fn test_cow_publish_rejects_duplicate_data_file_paths() {
+        let table_ident = test_table().identifier().clone();
+        let duplicate_file = test_data_file("data/duplicate.parquet");
+        let files = vec![
+            duplicate_file.clone(),
+            test_data_file("data/clean.parquet"),
+            duplicate_file.clone(),
+            duplicate_file,
+        ];
+        let error = ensure_unique_data_file_paths(&files, "COW source snapshot", &table_ident, 42)
+            .unwrap_err();
+
+        let message = error.to_report_string();
+        assert!(message.contains("COW source snapshot"), "{message}");
+        assert!(
+            message.contains(&format!("table={table_ident}")),
+            "{message}"
+        );
+        assert!(message.contains("snapshot_id=42"), "{message}");
+        assert!(message.contains("duplicated_path_count=1"), "{message}");
+        assert!(message.contains("duplicate_entry_count=2"), "{message}");
+        assert!(message.contains("data/duplicate.parquet (x3)"), "{message}");
+        assert!(!message.contains("data/clean.parquet"), "{message}");
+
+        assert!(
+            ensure_unique_data_file_paths(&files[..2], "COW source snapshot", &table_ident, 42)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn test_duplicate_data_file_path_report_truncates_paths() {
+        let paths = (0..MAX_REPORTED_DUPLICATE_DATA_FILE_PATHS + 2)
+            .map(|index| format!("data/dup-{index:02}.parquet"))
+            .collect::<Vec<_>>();
+        let files = paths
+            .iter()
+            .flat_map(|path| [test_data_file(path), test_data_file(path)])
+            .collect::<Vec<_>>();
+        let duplicates = duplicate_data_file_paths(files.iter().map(|file| file.file_path()));
+        assert_eq!(duplicates.len(), paths.len());
+        assert!(duplicates.iter().all(|(_, count)| *count == 2));
+
+        let report = DuplicateDataFilePathReport::new(
+            &duplicates,
+            "COW target snapshot",
+            test_table().identifier(),
+            7,
+        )
+        .to_string();
+        assert!(report.contains("duplicated_path_count=10"), "{report}");
+        assert!(report.contains("duplicate_entry_count=10"), "{report}");
+        assert!(report.contains("data/dup-07.parquet (x2)"), "{report}");
+        assert!(!report.contains("data/dup-08.parquet"), "{report}");
+        assert!(report.contains("... 2 more]"), "{report}");
+    }
+
+    #[test]
+    fn test_compaction_plan_rejects_duplicate_data_file_paths() {
+        let table = test_table();
+        let schema = table.metadata().current_schema().clone();
+        let duplicate_task = test_data_scan_task(schema.clone(), "data/duplicate.parquet");
+        let clean_task = test_data_scan_task(schema, "data/clean.parquet");
+
+        let clean_plan = CompactionPlan::new(
+            FileGroup::new(vec![clean_task.clone(), duplicate_task.clone()]),
+            "ingestion",
+            11,
+        );
+        assert!(ensure_unique_compaction_plan_data_files(&clean_plan, table.identifier()).is_ok());
+
+        let duplicate_plan = CompactionPlan::new(
+            FileGroup::new(vec![duplicate_task.clone(), clean_task, duplicate_task]),
+            "ingestion",
+            11,
+        );
+        let message = ensure_unique_compaction_plan_data_files(&duplicate_plan, table.identifier())
+            .unwrap_err()
+            .to_report_string();
+        assert!(message.contains("compaction plan"), "{message}");
+        assert!(message.contains("snapshot_id=11"), "{message}");
+        assert!(message.contains("data/duplicate.parquet (x2)"), "{message}");
+    }
+
+    #[cfg_attr(madsim, ignore = "requires Iceberg's native Tokio runtime")]
+    #[tokio::test]
+    async fn test_cow_target_duplicates_are_reported_but_not_fatal() {
+        let table = test_table();
+        let duplicate_file = test_data_file("data/duplicate.parquet");
+        let clean_file = test_data_file("data/clean.parquet");
+        let main_manifest_list = write_snapshot_manifests(
+            &table,
+            1,
+            None,
+            vec![duplicate_file.clone(), clean_file, duplicate_file],
+            vec![],
+        )
+        .await;
+        let base_timestamp_ms = table.metadata().last_updated_ms();
+        let metadata = table
+            .metadata()
+            .clone()
+            .into_builder(None)
+            .add_snapshot(test_snapshot(
+                1,
+                None,
+                main_manifest_list,
+                base_timestamp_ms + 1,
+            ))
+            .unwrap()
+            .set_ref(MAIN_BRANCH, test_snapshot_ref(1))
+            .unwrap()
+            .build()
+            .unwrap()
+            .metadata;
+        let table = Table::builder()
+            .identifier(table.identifier().clone())
+            .file_io(table.file_io().clone())
+            .metadata(metadata)
+            .build()
+            .unwrap();
+        let publish_plan = CowPublishPlan {
+            snapshot_id: 1,
+            rewritten_data_file_paths: HashSet::new(),
+        };
+
+        let main_files = load_cow_target_data_files(1, &table, "ingestion", &publish_plan)
+            .await
+            .unwrap();
+        assert_eq!(
+            sorted_file_paths(&main_files),
+            vec![
+                "data/clean.parquet",
+                "data/duplicate.parquet",
+                "data/duplicate.parquet",
+            ]
+        );
+        assert_eq!(
+            duplicate_data_file_paths(main_files.iter().map(|file| file.file_path())),
+            vec![("data/duplicate.parquet", 2)]
         );
     }
 
