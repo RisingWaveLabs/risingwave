@@ -219,6 +219,35 @@ message ValidateSourceResponse {
   ValidationError error = 1;
 }
 
+// Internal request/response types used by the embedded JVM Oracle snapshot reader.
+// Oracle JDBC lives in the connector JVM, so Rust exchanges catalog and row data with it over
+// JNI using these protobuf messages rather than introducing an Oracle native-client dependency.
+message OracleExternalTableRequest {
+  map<string, string> properties = 1;
+  TableSchema table_schema = 2;
+  uint64 snapshot_scn = 3;
+  repeated OracleDatum start_pk = 4;
+  repeated string primary_keys = 5;
+  uint32 limit = 6;
+}
+
+message OracleDatum {
+  bool is_null = 1;
+  // Raw bytes for BYTEA; UTF-8 RisingWave text format for every other type.
+  bytes value = 2;
+}
+
+message OracleRow {
+  repeated OracleDatum values = 1;
+}
+
+message OracleExternalTableResponse {
+  TableSchema table_schema = 1;
+  uint64 snapshot_scn = 2;
+  repeated OracleRow rows = 3;
+  ValidationError error = 4;
+}
+
 service ConnectorService {
   rpc SinkWriterStream(stream SinkWriterStreamRequest) returns (stream SinkWriterStreamResponse);
   rpc SinkCoordinatorStream(stream SinkCoordinatorStreamRequest) returns (stream SinkCoordinatorStreamResponse);

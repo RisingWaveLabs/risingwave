@@ -13,6 +13,7 @@
 // limitations under the License.
 
 pub mod mock_external_table;
+pub mod oracle;
 pub mod postgres;
 pub mod sql_server;
 
@@ -41,6 +42,7 @@ use crate::source::cdc::external::mock_external_table::MockExternalTableReader;
 use crate::source::cdc::external::mysql::{
     MySqlExternalTable, MySqlExternalTableReader, MySqlOffset,
 };
+use crate::source::cdc::external::oracle::{OracleExternalTable, OracleOffset};
 use crate::source::cdc::external::postgres::{PostgresExternalTableReader, PostgresOffset};
 use crate::source::cdc::external::sql_server::{
     SqlServerExternalTable, SqlServerExternalTableReader, SqlServerOffset,
@@ -177,6 +179,7 @@ pub enum CdcOffset {
     MySql(MySqlOffset),
     Postgres(PostgresOffset),
     SqlServer(SqlServerOffset),
+    Oracle(OracleOffset),
 }
 
 // Example debezium offset for Postgres:
@@ -267,6 +270,8 @@ pub struct CdcTableSnapshotSplitOption {
     pub backfill_split_pk_column_index: u32,
 }
 
+// TODO(#26804): Add `OracleExternalTableReader` when Oracle CDC backfill and offset
+// parsing are implemented.
 pub enum ExternalTableReaderImpl {
     MySql(MySqlExternalTableReader),
     Postgres(PostgresExternalTableReader),
@@ -287,6 +292,9 @@ pub struct ExternalTableConfig {
     pub database: String,
     #[serde(rename = "schema.name", default = "Default::default")]
     pub schema: String,
+    /// The Oracle pluggable database name. This field is only used by the Oracle CDC connector.
+    #[serde(rename = "database.pdb.name", default = "Default::default")]
+    pub pdb_name: String,
     #[serde(rename = "table.name")]
     pub table: String,
     /// `ssl.mode` specifies the SSL/TLS encryption level for secure communication with Postgres.
@@ -493,6 +501,7 @@ pub enum ExternalTableImpl {
     MySql(MySqlExternalTable),
     Postgres(PostgresExternalTable),
     SqlServer(SqlServerExternalTable),
+    Oracle(OracleExternalTable),
 }
 
 impl ExternalTableImpl {
@@ -518,6 +527,9 @@ impl ExternalTableImpl {
             CdcSourceType::SqlServer => Ok(ExternalTableImpl::SqlServer(
                 SqlServerExternalTable::connect(config).await?,
             )),
+            CdcSourceType::Oracle => Ok(ExternalTableImpl::Oracle(
+                OracleExternalTable::connect(config).await?,
+            )),
             _ => Err(anyhow!("Unsupported cdc connector type: {}", config.connector).into()),
         }
     }
@@ -527,6 +539,7 @@ impl ExternalTableImpl {
             ExternalTableImpl::MySql(mysql) => mysql.column_descs(),
             ExternalTableImpl::Postgres(postgres) => postgres.column_descs(),
             ExternalTableImpl::SqlServer(sql_server) => sql_server.column_descs(),
+            ExternalTableImpl::Oracle(oracle) => oracle.column_descs(),
         }
     }
 
@@ -535,6 +548,7 @@ impl ExternalTableImpl {
             ExternalTableImpl::MySql(mysql) => mysql.pk_names(),
             ExternalTableImpl::Postgres(postgres) => postgres.pk_names(),
             ExternalTableImpl::SqlServer(sql_server) => sql_server.pk_names(),
+            ExternalTableImpl::Oracle(oracle) => oracle.pk_names(),
         }
     }
 }
