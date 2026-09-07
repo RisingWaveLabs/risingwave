@@ -83,7 +83,7 @@ zstd = { version = "0.13", default-features = false }
 
 [target.'cfg(not(madsim))'.dependencies]
 axum = { workspace = true }
-tower-http = { version = "0.6", features = [
+tower-http = { version = "0.7", features = [
     "add-extension",
     "cors",
     "fs",

@@ -103,7 +103,7 @@ tokio-stream = { workspace = true }
 toml = { workspace = true }
 tonic = { workspace = true }
 tower = { version = "0.5", features = ["util", "load-shed"] }
-tower-http = { version = "0.6", features = [
+tower-http = { version = "0.7", features = [
     "add-extension",
     "cors",
     "compression-gzip",
