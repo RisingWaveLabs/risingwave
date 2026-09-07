@@ -19,7 +19,7 @@ use std::time::Duration;
 use risingwave_common::config::{
     AsyncStackTraceOption, MetricLevel, RwConfig, extract_storage_memory_config, load_config,
 };
-use risingwave_common::monitor::{RouterExt, TcpConfig};
+use risingwave_common::monitor::{GLOBAL_METRICS_REGISTRY, RouterExt, TcpConfig};
 use risingwave_common::system_param::local_manager::LocalSystemParamsManager;
 use risingwave_common::system_param::reader::{SystemParamsRead, SystemParamsReader};
 use risingwave_common::telemetry::manager::TelemetryManager;
@@ -226,6 +226,10 @@ pub async fn compactor_serve(
         compactor_mode,
         CompactorMode::DedicatedIceberg | CompactorMode::SharedIceberg
     );
+    if is_iceberg_compactor && config.server.metrics_level > MetricLevel::Disabled {
+        iceberg_storage_opendal::install_prometheus_metrics(&GLOBAL_METRICS_REGISTRY)
+            .expect("failed to install Iceberg OpenDAL metrics");
+    }
 
     let compaction_executor = Arc::new(CompactionExecutor::new(
         opts.compaction_worker_threads_number,

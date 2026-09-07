@@ -11,6 +11,7 @@ repository = { workspace = true }
 async-trait = "0.1"
 await-tree = { workspace = true }
 clap = { workspace = true }
+iceberg-storage-opendal = { workspace = true }
 jsonbb = { workspace = true }
 prost = { workspace = true }
 risingwave_common = { workspace = true }

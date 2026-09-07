@@ -7607,7 +7607,7 @@ dependencies = [
 [[package]]
 name = "iceberg"
 version = "0.10.0"
-source = "git+https://github.com/risingwavelabs/iceberg-rust.git?rev=cd6e1e6acbfb2e41c9af5b6faedaca5eb83f361c#cd6e1e6acbfb2e41c9af5b6faedaca5eb83f361c"
+source = "git+https://github.com/risingwavelabs/iceberg-rust.git?rev=3e5807d2caca586be5a670296781ad2dff1afdc5#3e5807d2caca586be5a670296781ad2dff1afdc5"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -7666,7 +7666,7 @@ dependencies = [
 [[package]]
 name = "iceberg-catalog-glue"
 version = "0.10.0"
-source = "git+https://github.com/risingwavelabs/iceberg-rust.git?rev=cd6e1e6acbfb2e41c9af5b6faedaca5eb83f361c#cd6e1e6acbfb2e41c9af5b6faedaca5eb83f361c"
+source = "git+https://github.com/risingwavelabs/iceberg-rust.git?rev=3e5807d2caca586be5a670296781ad2dff1afdc5#3e5807d2caca586be5a670296781ad2dff1afdc5"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -7681,7 +7681,7 @@ dependencies = [
 [[package]]
 name = "iceberg-catalog-rest"
 version = "0.10.0"
-source = "git+https://github.com/risingwavelabs/iceberg-rust.git?rev=cd6e1e6acbfb2e41c9af5b6faedaca5eb83f361c#cd6e1e6acbfb2e41c9af5b6faedaca5eb83f361c"
+source = "git+https://github.com/risingwavelabs/iceberg-rust.git?rev=3e5807d2caca586be5a670296781ad2dff1afdc5#3e5807d2caca586be5a670296781ad2dff1afdc5"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -7702,7 +7702,7 @@ dependencies = [
 [[package]]
 name = "iceberg-compaction-core"
 version = "0.1.0"
-source = "git+https://github.com/nimtable/iceberg-compaction.git?rev=58a4c3c274111b7eeaada0a6f15314ddcf537279#58a4c3c274111b7eeaada0a6f15314ddcf537279"
+source = "git+https://github.com/nimtable/iceberg-compaction.git?rev=c76c7e43d3c8aeecae01602ab7d86eba54ba516c#c76c7e43d3c8aeecae01602ab7d86eba54ba516c"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -7731,7 +7731,7 @@ dependencies = [
 [[package]]
 name = "iceberg-datafusion"
 version = "0.10.0"
-source = "git+https://github.com/risingwavelabs/iceberg-rust.git?rev=cd6e1e6acbfb2e41c9af5b6faedaca5eb83f361c#cd6e1e6acbfb2e41c9af5b6faedaca5eb83f361c"
+source = "git+https://github.com/risingwavelabs/iceberg-rust.git?rev=3e5807d2caca586be5a670296781ad2dff1afdc5#3e5807d2caca586be5a670296781ad2dff1afdc5"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -7747,7 +7747,7 @@ dependencies = [
 [[package]]
 name = "iceberg-storage-opendal"
 version = "0.10.0"
-source = "git+https://github.com/risingwavelabs/iceberg-rust.git?rev=cd6e1e6acbfb2e41c9af5b6faedaca5eb83f361c#cd6e1e6acbfb2e41c9af5b6faedaca5eb83f361c"
+source = "git+https://github.com/risingwavelabs/iceberg-rust.git?rev=3e5807d2caca586be5a670296781ad2dff1afdc5#3e5807d2caca586be5a670296781ad2dff1afdc5"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -7757,6 +7757,8 @@ dependencies = [
  "iceberg",
  "once_cell",
  "opendal",
+ "opendal-layer-prometheus",
+ "prometheus",
  "reqsign-aws-v4",
  "reqsign-core",
  "serde",
@@ -9869,6 +9871,28 @@ checksum = "5c75411ab00f77851ff086b686c1e9ca8175ac18c15afa2cb75b9036436cb06c"
 dependencies = [
  "log",
  "opendal-core",
+]
+
+[[package]]
+name = "opendal-layer-observe-metrics-common"
+version = "0.58.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "12dbc31b27ee8e5f658ae6c8514b8276059e5235e2f85138a42e6ed172324876"
+dependencies = [
+ "futures",
+ "http 1.4.0",
+ "opendal-core",
+]
+
+[[package]]
+name = "opendal-layer-prometheus"
+version = "0.58.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c14e6cb0b3ea8d83bef751613b8bf4512678afe8b49c2c96a633515bc0b34d79"
+dependencies = [
+ "opendal-core",
+ "opendal-layer-observe-metrics-common",
+ "prometheus",
 ]
 
 [[package]]
@@ -13131,6 +13155,7 @@ dependencies = [
  "async-trait",
  "await-tree",
  "clap",
+ "iceberg-storage-opendal",
  "jsonbb",
  "madsim-tokio",
  "madsim-tonic",
