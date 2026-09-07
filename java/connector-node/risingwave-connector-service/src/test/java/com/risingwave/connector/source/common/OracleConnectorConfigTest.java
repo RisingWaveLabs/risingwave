@@ -22,6 +22,7 @@ import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 
 import com.risingwave.connector.api.source.SourceTypeE;
+import com.risingwave.connector.cdc.debezium.internal.ConfigurableOffsetBackingStore;
 import com.risingwave.connector.source.SourceValidateHandler;
 import com.risingwave.proto.ConnectorServiceProto;
 import io.grpc.Status;
@@ -78,6 +79,34 @@ public class OracleConnectorConfigTest {
                         SourceTypeE.ORACLE, 42, null, oracleProperties(), false, true);
 
         assertFalse(config.getResolvedDebeziumProps().containsKey("table.include.list"));
+    }
+
+    @Test
+    public void startsSharedOracleSourceWithoutDataSnapshot() {
+        var userProps = oracleProperties();
+        userProps.put("debezium.snapshot.mode", "rw_cdc_backfill");
+        var config = new DbzConnectorConfig(SourceTypeE.ORACLE, 42, null, userProps, false, true);
+
+        assertEquals("no_data", config.getResolvedDebeziumProps().getProperty("snapshot.mode"));
+    }
+
+    @Test
+    public void recoversSharedOracleSourceFromOpaqueOffset() {
+        var userProps = oracleProperties();
+        userProps.put("debezium.snapshot.mode", "rw_cdc_backfill");
+        userProps.put("debezium.decimal.handling.mode", "precise");
+        var offset =
+                "{\"sourcePartition\":{\"server\":\"RW_CDC_42\"},"
+                        + "\"sourceOffset\":{\"scn\":\"3134314\","
+                        + "\"commit_scn\":\"3134315:1:8.30.1337\"},"
+                        + "\"isHeartbeat\":false}";
+        var config = new DbzConnectorConfig(SourceTypeE.ORACLE, 42, offset, userProps, false, true);
+        var properties = config.getResolvedDebeziumProps();
+
+        assertEquals("recovery", properties.getProperty("snapshot.mode"));
+        assertEquals(
+                offset, properties.getProperty(ConfigurableOffsetBackingStore.OFFSET_STATE_VALUE));
+        assertEquals("string", properties.getProperty("decimal.handling.mode"));
     }
 
     @Test

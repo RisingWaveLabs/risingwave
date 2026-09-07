@@ -22,14 +22,14 @@ use risingwave_pb::catalog::{PbSchemaRegistryNameStrategy, StreamSourceInfo};
 use super::unified::json::BigintUnsignedHandlingMode;
 use super::utils::get_kafka_topic;
 use super::{DebeziumProps, TimeHandling, TimestampHandling, TimestamptzHandling};
-use crate::WithOptionsSecResolved;
 use crate::connector_common::AwsAuthProps;
 use crate::error::ConnectorResult;
 use crate::parser::PROTOBUF_MESSAGES_AS_JSONB;
 use crate::schema::AWS_GLUE_SCHEMA_ARN_KEY;
 use crate::schema::schema_registry::SchemaRegistryConfig;
-use crate::source::cdc::CDC_MONGODB_STRONG_SCHEMA_KEY;
+use crate::source::cdc::{CDC_MONGODB_STRONG_SCHEMA_KEY, ORACLE_CDC_CONNECTOR};
 use crate::source::{SourceColumnDesc, SourceEncode, SourceFormat, extract_source_struct};
+use crate::{WithOptionsSecResolved, WithPropertiesExt};
 
 pub const PARQUET_CASE_INSENSITIVE_KEY: &str = "parquet.case_insensitive";
 
@@ -116,6 +116,7 @@ impl SpecificParserConfig {
             time_handling: None,
             bigint_unsigned_handling: None,
             handle_toast_columns: false,
+            numeric_string_parsing: false,
         }),
         protocol_config: ProtocolProperties::Plain,
     };
@@ -297,6 +298,9 @@ impl SpecificParserConfig {
                 time_handling: None,
                 bigint_unsigned_handling: None,
                 handle_toast_columns: false,
+                numeric_string_parsing: options_with_secret
+                    .get_connector()
+                    .is_some_and(|connector| connector == ORACLE_CDC_CONNECTOR),
             }),
             (SourceFormat::DebeziumMongo, SourceEncode::Json) => {
                 let props = MongoProperties::from(&format_encode_options_with_secret);
@@ -388,6 +392,11 @@ pub struct JsonProperties {
     pub time_handling: Option<TimeHandling>,
     pub bigint_unsigned_handling: Option<BigintUnsignedHandlingMode>,
     pub handle_toast_columns: bool,
+    /// Whether the Debezium JSON decoder may parse JSON strings as numeric values.
+    ///
+    /// This is currently enabled for Oracle CDC because Debezium serializes all Oracle `NUMBER`
+    /// values as strings when `decimal.handling.mode` is set to `string`.
+    pub numeric_string_parsing: bool,
 }
 
 #[derive(Debug, Default, Clone)]

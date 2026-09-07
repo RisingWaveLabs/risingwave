@@ -47,6 +47,13 @@ pub struct SourceReader {
     pub connector_message_buffer_size: usize,
 }
 
+fn needs_commit_cdc_offset_after_checkpoint(config: &ConnectorProperties) -> bool {
+    matches!(
+        config,
+        ConnectorProperties::PostgresCdc(_) | ConnectorProperties::OracleCdc(_)
+    )
+}
+
 impl SourceReader {
     pub fn new(
         properties: WithOptionsSecResolved,
@@ -122,8 +129,10 @@ impl SourceReader {
 
     /// Refer to `WaitCheckpointWorker` for more details.
     pub async fn create_wait_checkpoint_task(&self) -> ConnectorResult<Option<WaitCheckpointTask>> {
+        if needs_commit_cdc_offset_after_checkpoint(&self.config) {
+            return Ok(Some(WaitCheckpointTask::CommitCdcOffset(None)));
+        }
         Ok(match &self.config {
-            ConnectorProperties::PostgresCdc(_) => Some(WaitCheckpointTask::CommitCdcOffset(None)),
             ConnectorProperties::GooglePubsub(prop) => Some(WaitCheckpointTask::AckPubsubMessage(
                 prop.subscription_client().await?,
                 vec![],
@@ -249,5 +258,23 @@ pub async fn build_opendal_fs_list_for_batch<Src: OpendalSource>(lister: Opendal
                 return Err(err);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn oracle_offsets_are_committed_after_checkpoint() {
+        assert!(needs_commit_cdc_offset_after_checkpoint(
+            &ConnectorProperties::OracleCdc(Box::default())
+        ));
+        assert!(needs_commit_cdc_offset_after_checkpoint(
+            &ConnectorProperties::PostgresCdc(Box::default())
+        ));
+        assert!(!needs_commit_cdc_offset_after_checkpoint(
+            &ConnectorProperties::MysqlCdc(Box::default())
+        ));
     }
 }

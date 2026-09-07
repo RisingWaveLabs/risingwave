@@ -15,9 +15,6 @@
 use risingwave_common::bail;
 use thiserror_ext::AsReport;
 
-use super::unified::json::{
-    BigintUnsignedHandlingMode, TimeHandling, TimestampHandling, TimestamptzHandling,
-};
 use super::unified::kv_event::KvEvent;
 use super::{
     AccessBuilderImpl, ByteStreamSourceParser, EncodingProperties, SourceStreamChunkRowWriter,
@@ -29,7 +26,7 @@ use crate::parser::simd_json_parser::DebeziumJsonAccessBuilder;
 use crate::parser::unified::AccessImpl;
 use crate::parser::unified::debezium::{parse_schema_change, parse_transaction_meta};
 use crate::parser::upsert_parser::get_key_column_name;
-use crate::parser::{BytesProperties, ParseResult, ParserFormat};
+use crate::parser::{BytesProperties, JsonProperties, ParseResult, ParserFormat};
 use crate::source::cdc::CdcMessageType;
 use crate::source::{SourceColumnDesc, SourceContext, SourceContextRef, SourceMeta};
 
@@ -72,13 +69,7 @@ impl PlainParser {
         };
 
         let transaction_meta_builder = Some(AccessBuilderImpl::DebeziumJson(
-            DebeziumJsonAccessBuilder::new(
-                TimestamptzHandling::GuessNumberUnit,
-                TimestampHandling::GuessNumberUnit,
-                TimeHandling::Micro,
-                BigintUnsignedHandlingMode::Long,
-                false,
-            )?,
+            DebeziumJsonAccessBuilder::new(JsonProperties::default())?,
         ));
 
         let schema_change_builder = Some(AccessBuilderImpl::DebeziumJson(

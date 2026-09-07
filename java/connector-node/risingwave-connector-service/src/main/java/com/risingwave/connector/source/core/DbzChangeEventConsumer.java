@@ -101,11 +101,19 @@ public class DbzChangeEventConsumer
     }
 
     /**
-     * Postgres and Oracle connectors need to commit the offset to the upstream database, so that we
-     * need to wait for the epoch commit before committing the record offset.
+     * Whether records can be acknowledged before the corresponding RisingWave checkpoint.
+     *
+     * <p>PostgreSQL needs checkpoint-delayed acknowledgement because the acknowledged LSN advances
+     * the replication slot's low watermark, allowing PostgreSQL to recycle older WAL. Acknowledging
+     * it before the output is durable could recycle WAL that RisingWave still needs for recovery.
+     *
+     * <p>Oracle needs checkpoint-delayed acknowledgement because Debezium's opaque offset contains
+     * the LogMiner restart low watermark required to rebuild buffered transactions. Acknowledging
+     * it before the output is durable could make recovery skip changes that RisingWave has not
+     * checkpointed.
      */
     private boolean noNeedCommitOffset() {
-        return connector != SourceTypeE.POSTGRES;
+        return connector != SourceTypeE.POSTGRES && connector != SourceTypeE.ORACLE;
     }
 
     private EventType getEventType(SourceRecord record) {

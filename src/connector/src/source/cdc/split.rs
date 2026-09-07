@@ -399,7 +399,6 @@ impl CdcSplitTrait for OracleCdcSplit {
     }
 
     fn update_offset(&mut self, last_seen_offset: String) -> ConnectorResult<()> {
-        self.inner.snapshot_done = self.extract_snapshot_flag(last_seen_offset.as_str())?;
         self.inner.start_offset = Some(last_seen_offset);
         Ok(())
     }
@@ -652,6 +651,7 @@ pub fn extract_sql_server_commit_lsn_from_offset_str(offset_str: &str) -> Option
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::source::cdc::Oracle;
 
     #[test]
     fn test_parse_sql_server_lsn_str() {
@@ -838,5 +838,30 @@ mod tests {
         let change_lsn = extract_sql_server_change_lsn_from_offset_str(offset).unwrap();
         let commit_lsn = extract_sql_server_commit_lsn_from_offset_str(offset).unwrap();
         assert!(change_lsn < commit_lsn);
+    }
+
+    #[test]
+    fn test_oracle_offset_is_persisted_opaquely() {
+        let offset = r#"{
+            "sourcePartition":{"server":"RW_CDC_42"},
+            "sourceOffset":{
+                "scn":"3134314",
+                "commit_scn":"3134315:1:8.30.1337",
+                "snapshot":"INITIAL",
+                "snapshot_completed":false
+            },
+            "isHeartbeat":false
+        }"#
+        .to_owned();
+        let mut split = DebeziumCdcSplit::<Oracle>::new(42, None, None);
+
+        split.update_offset_inner(offset.clone()).unwrap();
+        assert_eq!(split.start_offset(), &Some(offset.clone()));
+        assert!(!split.snapshot_done());
+
+        let restored = DebeziumCdcSplit::<Oracle>::restore_from_json(split.encode_to_json())
+            .expect("Oracle split state must round-trip");
+        assert_eq!(restored.start_offset(), &Some(offset));
+        assert!(!restored.snapshot_done());
     }
 }

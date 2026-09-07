@@ -938,6 +938,16 @@ impl<S: StateStore> SourceExecutor<S> {
                                                         sqlserver_split.inner.start_offset = None;
                                                     }
                                                 }
+                                                SplitImpl::OracleCdc(debezium_split) => {
+                                                    if let Some(oracle_split) = debezium_split.oracle_split.as_mut() {
+                                                        tracing::info!(
+                                                            split_id = ?oracle_split.inner.split_id,
+                                                            old_offset = ?oracle_split.inner.start_offset,
+                                                            "Clearing Oracle CDC offset"
+                                                        );
+                                                        oracle_split.inner.start_offset = None;
+                                                    }
+                                                }
                                                 _ => {
                                                     tracing::warn!(
                                                         "RESET SOURCE called on non-CDC split type"

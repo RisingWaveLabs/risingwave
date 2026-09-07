@@ -20,9 +20,6 @@ use super::simd_json_parser::DebeziumJsonAccessBuilder;
 use super::{DebeziumAvroAccessBuilder, DebeziumAvroParserConfig};
 use crate::error::ConnectorResult;
 use crate::parser::unified::debezium::DebeziumChangeEvent;
-use crate::parser::unified::json::{
-    BigintUnsignedHandlingMode, TimeHandling, TimestampHandling, TimestamptzHandling,
-};
 use crate::parser::unified::util::apply_row_operation_on_stream_chunk_writer;
 use crate::parser::{
     AccessBuilderImpl, ByteStreamSourceParser, EncodingProperties, EncodingType, ParseResult,
@@ -71,19 +68,7 @@ async fn build_accessor_builder(
             ))
         }
         EncodingProperties::Json(json_config) => Ok(AccessBuilderImpl::DebeziumJson(
-            DebeziumJsonAccessBuilder::new(
-                json_config
-                    .timestamptz_handling
-                    .unwrap_or(TimestamptzHandling::GuessNumberUnit),
-                json_config
-                    .timestamp_handling
-                    .unwrap_or(TimestampHandling::GuessNumberUnit),
-                json_config.time_handling.unwrap_or(TimeHandling::Micro),
-                json_config
-                    .bigint_unsigned_handling
-                    .unwrap_or(BigintUnsignedHandlingMode::Long),
-                json_config.handle_toast_columns,
-            )?,
+            DebeziumJsonAccessBuilder::new(json_config)?,
         )),
         _ => bail!("unsupported encoding for Debezium"),
     }
@@ -127,6 +112,7 @@ impl DebeziumParser {
                 time_handling: None,
                 bigint_unsigned_handling: None,
                 handle_toast_columns: false,
+                numeric_string_parsing: false,
             }),
             protocol_config: ProtocolProperties::Debezium(DebeziumProps::default()),
         };
@@ -206,9 +192,10 @@ mod tests {
     use std::ops::Deref;
     use std::sync::Arc;
 
+    use risingwave_common::array::Op;
     use risingwave_common::catalog::{CDC_SOURCE_COLUMN_NUM, ColumnCatalog, ColumnDesc, ColumnId};
     use risingwave_common::row::Row;
-    use risingwave_common::types::{DataType, Timestamptz};
+    use risingwave_common::types::{DataType, ScalarImpl, Timestamptz};
     use risingwave_pb::plan_common::{
         AdditionalColumn, AdditionalColumnTimestamp, additional_column,
     };
@@ -234,6 +221,7 @@ mod tests {
                 time_handling: None,
                 bigint_unsigned_handling: None,
                 handle_toast_columns: false,
+                numeric_string_parsing: false,
             }),
             protocol_config: ProtocolProperties::Debezium(DebeziumProps::default()),
         };
@@ -277,6 +265,87 @@ mod tests {
         }
     }
 
+    /// Verifies that committed Oracle create, update, and delete events decode `NUMBER` values
+    /// emitted as JSON strings into RisingWave integer and decimal types while preserving the
+    /// accompanying `RAW` and `VARCHAR2` values.
+    #[tokio::test]
+    async fn test_parse_oracle_row_changes_with_numeric_strings() {
+        let columns = [
+            ColumnDesc::named("ID", ColumnId::new(1), DataType::Int64),
+            ColumnDesc::named("QUANTITY", ColumnId::new(2), DataType::Int32),
+            ColumnDesc::named("AMOUNT", ColumnId::new(3), DataType::Decimal),
+            ColumnDesc::named("PAYLOAD", ColumnId::new(4), DataType::Bytea),
+            ColumnDesc::named("NAME", ColumnId::new(5), DataType::Varchar),
+        ];
+        let columns = columns
+            .iter()
+            .map(SourceColumnDesc::from)
+            .collect::<Vec<_>>();
+        let props = SpecificParserConfig {
+            encoding_config: EncodingProperties::Json(JsonProperties {
+                use_schema_registry: false,
+                timestamptz_handling: None,
+                timestamp_handling: None,
+                time_handling: None,
+                bigint_unsigned_handling: None,
+                handle_toast_columns: false,
+                numeric_string_parsing: true,
+            }),
+            protocol_config: ProtocolProperties::Debezium(DebeziumProps::default()),
+        };
+        let source_ctx = SourceContext {
+            connector_props: ConnectorProperties::OracleCdc(Box::default()),
+            ..SourceContext::dummy()
+        };
+        let mut parser = DebeziumParser::new(props, columns.clone(), Arc::new(source_ctx))
+            .await
+            .unwrap();
+        let mut builder = SourceStreamChunkBuilder::new(columns, SourceCtrlOpts::for_test());
+        let events = [
+            // INSERT INTO APP.CUSTOMERS (ID, QUANTITY, AMOUNT, PAYLOAD, NAME)
+            // VALUES (1, 7, 123.45, HEXTORAW('010203'), 'before');
+            // COMMIT;
+            r#"{"payload":{"before":null,"after":{"ID":"1","QUANTITY":"7","AMOUNT":"123.45","PAYLOAD":"AQID","NAME":"before"},"source":{"connector":"oracle","ts_ms":1788480000000,"schema":"APP","table":"CUSTOMERS"},"op":"c","ts_ms":1788480000010}}"#,
+            // UPDATE APP.CUSTOMERS
+            // SET QUANTITY = 8, AMOUNT = 456.78, PAYLOAD = HEXTORAW('040506'), NAME = 'after'
+            // WHERE ID = 1;
+            // COMMIT;
+            r#"{"payload":{"before":{"ID":"1","QUANTITY":"7","AMOUNT":"123.45","PAYLOAD":"AQID","NAME":"before"},"after":{"ID":"1","QUANTITY":"8","AMOUNT":"456.78","PAYLOAD":"BAUG","NAME":"after"},"source":{"connector":"oracle","ts_ms":1788480001000,"schema":"APP","table":"CUSTOMERS"},"op":"u","ts_ms":1788480001010}}"#,
+            // DELETE FROM APP.CUSTOMERS WHERE ID = 1;
+            // COMMIT;
+            r#"{"payload":{"before":{"ID":"1","QUANTITY":"8","AMOUNT":"456.78","PAYLOAD":"BAUG","NAME":"after"},"after":null,"source":{"connector":"oracle","ts_ms":1788480002000,"schema":"APP","table":"CUSTOMERS"},"op":"d","ts_ms":1788480002010}}"#,
+        ];
+
+        for event in events {
+            let result = parser
+                .parse_one_with_txn(None, Some(event.as_bytes().to_vec()), builder.row_writer())
+                .await
+                .unwrap();
+            assert!(matches!(result, ParseResult::Rows));
+        }
+
+        builder.finish_current_chunk();
+        let chunk = builder.consume_ready_chunks().next().unwrap();
+        assert_eq!(chunk.ops(), &[Op::Insert, Op::Insert, Op::Delete]);
+        let rows = chunk
+            .rows()
+            .map(|(_, row)| row.to_owned_row())
+            .collect::<Vec<_>>();
+        assert_eq!(rows[0][0], Some(ScalarImpl::Int64(1)));
+        assert_eq!(rows[0][1], Some(ScalarImpl::Int32(7)));
+        assert_eq!(
+            rows[0][2],
+            Some(ScalarImpl::Decimal("123.45".parse().unwrap()))
+        );
+        assert_eq!(rows[0][3], Some(ScalarImpl::Bytea(vec![1, 2, 3].into())));
+        assert_eq!(rows[1][1], Some(ScalarImpl::Int32(8)));
+        assert_eq!(
+            rows[1][2],
+            Some(ScalarImpl::Decimal("456.78".parse().unwrap()))
+        );
+        assert_eq!(rows[2], rows[1]);
+    }
+
     #[tokio::test]
     async fn test_parse_additional_columns() {
         let columns = [
@@ -310,6 +379,7 @@ mod tests {
                 time_handling: None,
                 bigint_unsigned_handling: None,
                 handle_toast_columns: false,
+                numeric_string_parsing: false,
             }),
             protocol_config: ProtocolProperties::Debezium(DebeziumProps::default()),
         };

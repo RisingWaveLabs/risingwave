@@ -234,3 +234,27 @@ impl From<CdcMessage> for SourceMessage {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Verifies that an Oracle Debezium `schema.table` topic suffix is preserved as the routing
+    /// table name instead of being interpreted as a MySQL-style `database.table` identifier so
+    /// that the message can be routed correctly.
+    #[test]
+    fn oracle_topic_suffix_routes_by_schema_and_table() {
+        let meta = DebeziumCdcMeta::new(
+            "APP.CUSTOMERS".to_owned(),
+            0,
+            cdc_message::CdcMessageType::Data,
+            SourceType::Oracle,
+        );
+
+        assert_eq!(meta.extract_database_name(), Some(ScalarRefImpl::Utf8("")));
+        assert_eq!(
+            meta.extract_table_name(),
+            Some(ScalarRefImpl::Utf8("APP.CUSTOMERS"))
+        );
+    }
+}
