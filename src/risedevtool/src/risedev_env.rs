@@ -17,7 +17,10 @@
 use std::fmt::Write;
 use std::process::Command;
 
-use crate::{Application, HummockInMemoryStrategy, ServiceConfig, add_hummock_backend};
+use crate::{
+    Application, HummockInMemoryStrategy, STARROCKS_CONTAINER_HOST, STARROCKS_CONTAINER_QUERY_PORT,
+    ServiceConfig, add_hummock_backend,
+};
 
 /// Generate environment variables (put in file `.risingwave/config/risedev-env`)
 /// from the given service configurations to be used by future
@@ -113,6 +116,43 @@ pub fn generate_risedev_env(services: &Vec<ServiceConfig>) -> String {
                 writeln!(
                     env,
                     r#"RISEDEV_REDIS_WITH_OPTIONS_COMMON="connector='redis',redis.url='{url}'""#,
+                )
+                .unwrap();
+            }
+            ServiceConfig::Starrocks(c) => {
+                let host = &c.address;
+                let http_port = &c.http_port;
+                let query_port = &c.query_port;
+                let user = &c.user;
+                let password = &c.password;
+                let database = &c.database;
+                let admin_user = &c.admin_user;
+                let admin_password = &c.admin_password;
+
+                writeln!(env, r#"STARROCKS_HOST="{host}""#).unwrap();
+                writeln!(env, r#"STARROCKS_HTTP_PORT="{http_port}""#).unwrap();
+                writeln!(env, r#"STARROCKS_QUERY_PORT="{query_port}""#).unwrap();
+                writeln!(env, r#"STARROCKS_USER="{user}""#).unwrap();
+                writeln!(env, r#"STARROCKS_PASSWORD="{password}""#).unwrap();
+                writeln!(env, r#"STARROCKS_DATABASE="{database}""#).unwrap();
+                writeln!(env, r#"STARROCKS_ADMIN_USER="{admin_user}""#).unwrap();
+                writeln!(env, r#"STARROCKS_ADMIN_PASSWORD="{admin_password}""#).unwrap();
+                if !c.user_managed {
+                    writeln!(env, r#"STARROCKS_CONTAINER="risedev-{}""#, c.id).unwrap();
+                    writeln!(
+                        env,
+                        r#"STARROCKS_CONTAINER_HOST="{STARROCKS_CONTAINER_HOST}""#
+                    )
+                    .unwrap();
+                    writeln!(
+                        env,
+                        r#"STARROCKS_CONTAINER_QUERY_PORT="{STARROCKS_CONTAINER_QUERY_PORT}""#
+                    )
+                    .unwrap();
+                }
+                writeln!(
+                    env,
+                    r#"RISEDEV_STARROCKS_WITH_OPTIONS_COMMON="connector='starrocks',starrocks.host='{host}',starrocks.mysqlport='{query_port}',starrocks.httpport='{http_port}',starrocks.user='{user}',starrocks.password='{password}',starrocks.database='{database}'""#,
                 )
                 .unwrap();
             }

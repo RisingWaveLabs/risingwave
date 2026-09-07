@@ -219,6 +219,9 @@ labels:
 
 - label: "ci/run-e2e-starrocks-sink-tests"
   files:
+  - "ci\\/scripts\\/e2e-starrocks-sink-test\\.sh"
+  - "e2e_test\\/commands\\/starrocks"
+  - "e2e_test\\/sink\\/starrocks.*"
   - "src\\/connector\\/src\\/sink\\/starrocks\\.rs"
   - "src\\/connector\\/src\\/sink\\/doris_starrocks_connector\\.rs"
 

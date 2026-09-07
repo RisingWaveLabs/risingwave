@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+script_dir=$(dirname "$0")
+real_path=${PATH//"$script_dir:"/}
+connection_args=(
+  -h "${STARROCKS_HOST}"
+  -P "${STARROCKS_QUERY_PORT}"
+  -u "${STARROCKS_ADMIN_USER}"
+)
+
+if [[ -n "${STARROCKS_CONTAINER:-}" ]]; then
+  connection_args=(
+    -h "${STARROCKS_CONTAINER_HOST}"
+    -P "${STARROCKS_CONTAINER_QUERY_PORT}"
+    -u "${STARROCKS_ADMIN_USER}"
+  )
+  exec docker exec -i -e MYSQL_PWD="${STARROCKS_ADMIN_PASSWORD}" \
+    "${STARROCKS_CONTAINER}" mysql "${connection_args[@]}" "$@"
+fi
+
+if PATH="$real_path" command -v mysql >/dev/null 2>&1; then
+  MYSQL_PWD="${STARROCKS_ADMIN_PASSWORD}" PATH="$real_path" \
+    exec mysql "${connection_args[@]}" "$@"
+fi
+
+echo "mysql client is unavailable and STARROCKS_CONTAINER is not set" >&2
+exit 1

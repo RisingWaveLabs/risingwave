@@ -159,6 +159,24 @@ For example, run the Redis sink test locally without preparing Redis separately:
 ./risedev k
 ```
 
+To run the StarRocks sink test locally, use the Docker-backed StarRocks profile:
+
+```sh
+./risedev d local-starrocks-sink-test
+./risedev slt './e2e_test/sink/starrocks_sink.slt'
+./risedev k
+```
+
+The profile uses the StarRocks all-in-one image and starts both FE and BE. The first startup can take
+some time because the image is large. Allocate at least 4 GB of memory and 10 GB of free disk space to
+Docker. The profile exposes FE HTTP and query ports on `28030` and `29030`. Host port `8040` must also be
+available because StarRocks includes the BE HTTP port in stream-load redirects.
+
+To use an existing StarRocks deployment instead, override the service in a custom profile and set
+`user-managed: true`. Set `address`, `http-port`, and `query-port` to the externally reachable FE endpoint.
+RiseDev will not start a container in this mode, but it will still wait for an alive BE and generate the
+environment variables used by the sink test.
+
 ### Tips for writing `system` commands
 
 Refer to
