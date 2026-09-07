@@ -220,6 +220,24 @@ Tips for debugging:
 - Use `risedev show-risedev-env` to see the environment variables available for `risedev slt`, after you starting the
   cluster with `risedev d`.
 
+### Testing with Application Default Credentials (ADC)
+
+For Google Pub/Sub connector testing, you can use Application Default Credentials (ADC)
+instead of specifying explicit credentials in every test configuration.
+
+To set up ADC locally:
+1. Install Google Cloud SDK and authenticate:
+   ```bash
+   gcloud auth application-default login
+   ```
+2. Or set the `GOOGLE_APPLICATION_CREDENTIALS` environment variable to point to your service account key
+
+For CI/CD environments:
+- Use workload identity federation on GKE/GCE
+- Or set `GOOGLE_APPLICATION_CREDENTIALS_JSON` environment variable with the credentials JSON
+
+The connector will automatically use ADC if no explicit `pubsub.credentials` parameter is provided.
+
 ## Adding a new connector to the development framework
 
 Refer to [#16449](https://github.com/risingwavelabs/risingwave/pull/16449) ( `user-managed` only MySQL),

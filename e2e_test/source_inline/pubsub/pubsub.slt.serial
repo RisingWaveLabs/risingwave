@@ -8,7 +8,7 @@ CREATE SOURCE s (v1 int, v2 varchar) WITH (
     connector = 'google_pubsub'
 ) FORMAT PLAIN ENCODE JSON;
 
-statement error credentials must be set if not using the pubsub emulator
+statement error failed to lookup address information|Google Cloud error|Failed to initialize Google Cloud Pub/Sub ADC
 CREATE SOURCE s (v1 int, v2 varchar) WITH (
     connector = 'google_pubsub',
     pubsub.subscription = 'test-subscription-1'

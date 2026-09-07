@@ -46,17 +46,19 @@ impl SplitEnumerator for PubsubSplitEnumerator {
 
         properties.subscriber_config()?;
 
-        if properties.credentials.is_none() && properties.emulator_host.is_none() {
-            bail!("credentials must be set if not using the pubsub emulator")
-        }
-
         let sub = properties.subscription_client().await?;
         if !sub
             .exists(None)
             .await
             .context("error checking subscription validity")?
         {
-            bail!("subscription {} does not exist", &sub.id())
+            bail!(
+                "subscription {} does not exist. \
+                 If not using emulator, ensure Google ADC is configured: \
+                 set `pubsub.credentials` parameter, or configure GOOGLE_APPLICATION_CREDENTIALS_JSON/GOOGLE_APPLICATION_CREDENTIALS environment variables, \
+                 or run on Google Cloud with appropriate service account",
+                &sub.id()
+            )
         }
 
         let seek_to = match (properties.start_offset, properties.start_snapshot) {

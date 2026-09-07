@@ -153,13 +153,6 @@ impl Sink for GooglePubSubSink {
             )));
         }
 
-        let conf = &self.config;
-        if matches!((&conf.emulator_host, &conf.credentials), (None, None)) {
-            return Err(SinkError::GooglePubSub(anyhow!(
-                "Configure at least one of `pubsub.emulator_host` and `pubsub.credentials` in the Google Pub/Sub sink"
-            )));
-        }
-
         Ok(())
     }
 
@@ -237,9 +230,27 @@ impl GooglePubSubSinkWriter {
         } else if let Some(emu_host) = config.emulator_host {
             Environment::Emulator(emu_host)
         } else {
-            return Err(SinkError::GooglePubSub(anyhow!(
-                "Missing emulator_host or credentials in Google Pub/Sub sink"
-            )));
+            let mut auth_config = project::Config::default();
+            auth_config = auth_config.with_audience(apiv1::conn_pool::AUDIENCE);
+            auth_config = auth_config.with_scopes(&apiv1::conn_pool::SCOPES);
+
+            let provider = DefaultTokenSourceProvider::new(auth_config)
+                .await
+                .map_err(|e| {
+                    SinkError::GooglePubSub(
+                        anyhow!(e).context(
+                            "No explicit credentials or emulator_host provided. \
+                             Attempted to authenticate via Google Application Default Credentials (ADC) but not successful. \
+                             Please configure credentials via one of the following methods: \
+                             1) Set `pubsub.credentials` parameter in your sink configuration, \
+                             2) Set `GOOGLE_APPLICATION_CREDENTIALS_JSON` environment variable (JSON content), \
+                             3) Set `GOOGLE_APPLICATION_CREDENTIALS` environment variable (file path), \
+                             4) Run `gcloud auth application-default login` for local development, \
+                             5) Ensure workload identity is configured on GCE/GKE"
+                        )
+                    )
+                })?;
+            Environment::GoogleCloud(Box::new(provider))
         };
 
         let client_config = ClientConfig {
