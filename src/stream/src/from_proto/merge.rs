@@ -35,37 +35,44 @@ impl MergeExecutorBuilder {
         node: &MergeNode,
         chunk_size: usize,
     ) -> StreamResult<Option<MergeExecutorInput>> {
-        let Some(upstream_actors) = actor_context
-            .initial_upstream_actors
-            .get(&node.upstream_fragment_id)
-        else {
-            return Ok(None);
-        };
         let upstream_fragment_id = node.get_upstream_fragment_id();
+        let upstream_actors = actor_context
+            .initial_upstream_actors
+            .get(&upstream_fragment_id);
+        if upstream_actors.is_none() && !node.allow_no_initial_upstream {
+            return Ok(None);
+        }
 
-        let inputs: Vec<_> = try_join_all(upstream_actors.actors.iter().map(|upstream_actor| {
-            new_input(
-                &local_barrier_manager,
-                executor_stats.clone(),
-                actor_context.id,
-                actor_context.fragment_id,
-                upstream_actor,
-                upstream_fragment_id,
-                actor_context.config.clone(),
-            )
-        }))
+        let inputs: Vec<_> = try_join_all(
+            upstream_actors
+                .into_iter()
+                .flat_map(|upstream_actors| upstream_actors.actors.iter())
+                .map(|upstream_actor| {
+                    new_input(
+                        &local_barrier_manager,
+                        executor_stats.clone(),
+                        actor_context.id,
+                        actor_context.fragment_id,
+                        upstream_actor,
+                        upstream_fragment_id,
+                        actor_context.config.clone(),
+                    )
+                }),
+        )
         .await?;
 
         // If there's always only one upstream, we can use `ReceiverExecutor`. Note that it can't
-        // scale to multiple upstreams.
-        let always_single_input = match node.get_upstream_dispatcher_type()? {
-            DispatcherType::Unspecified => unreachable!(),
-            DispatcherType::Hash | DispatcherType::Broadcast => false,
-            // There could be arbitrary number of upstreams with simple dispatcher.
-            DispatcherType::Simple => false,
-            // There should be always only one upstream with no-shuffle dispatcher.
-            DispatcherType::NoShuffle => true,
-        };
+        // scale to multiple upstreams. An initially empty merge must stay dynamic to accept a
+        // later MergeUpdate, even for dispatcher kinds normally optimized to a singleton.
+        let always_single_input = !inputs.is_empty()
+            && match node.get_upstream_dispatcher_type()? {
+                DispatcherType::Unspecified => unreachable!(),
+                DispatcherType::Hash | DispatcherType::Broadcast => false,
+                // There could be arbitrary number of upstreams with simple dispatcher.
+                DispatcherType::Simple => false,
+                // There should be always only one upstream with no-shuffle dispatcher.
+                DispatcherType::NoShuffle => true,
+            };
 
         let upstreams = if always_single_input {
             MergeExecutorUpstream::Singleton(Itertools::exactly_one(inputs.into_iter()).unwrap())

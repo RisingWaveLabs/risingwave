@@ -14,7 +14,7 @@
 
 use std::cmp;
 
-use futures::future::{try_join, try_join_all};
+use futures::future::{BoxFuture, Either, select, try_join, try_join_all};
 use risingwave_common::hash::VnodeBitmapExt;
 use risingwave_common::types::DefaultOrd;
 use risingwave_common::{bail, row};
@@ -30,6 +30,13 @@ use risingwave_storage::table::batch_table::BatchTable;
 use super::filter::FilterExecutorInner;
 use crate::executor::prelude::*;
 use crate::task::ActorEvalErrorReport;
+
+type WatermarkRefreshFuture = BoxFuture<'static, StreamExecutorResult<Option<ScalarImpl>>>;
+
+enum WatermarkFilterEvent {
+    GlobalRefresh(StreamExecutorResult<Option<ScalarImpl>>),
+    Input(Option<MessageStreamItem>),
+}
 
 /// The executor will generate a `Watermark` after each chunk.
 /// This will also guarantee all later rows with event time **less than** the watermark will be
@@ -109,12 +116,8 @@ impl<S: StateStore, const UPSERT: bool> WatermarkFilterExecutorInner<S, UPSERT> 
         table.init_epoch(first_epoch).await?;
 
         // Initiate and yield the first watermark.
-        let mut current_watermark = Self::get_global_max_watermark(
-            &table,
-            &global_watermark_table,
-            HummockReadEpoch::Committed(prev_epoch),
-        )
-        .await?;
+        let mut current_watermark =
+            Self::get_global_max_watermark(&table, &global_watermark_table, prev_epoch).await?;
 
         let mut last_checkpoint_watermark = None;
 
@@ -131,9 +134,54 @@ impl<S: StateStore, const UPSERT: bool> WatermarkFilterExecutorInner<S, UPSERT> 
         // If the input is idle
         let mut idle_input = true;
         let mut barrier_num_during_idle = 0;
-        #[for_await]
-        for msg in input {
-            let msg = msg?;
+        let mut pending_global_refresh: Option<WatermarkRefreshFuture> = None;
+
+        loop {
+            let event = if let Some(refresh) = pending_global_refresh.as_mut() {
+                let next_msg = input.next();
+                pin_mut!(next_msg);
+                match select(refresh, next_msg).await {
+                    Either::Left((refresh_result, _)) => {
+                        pending_global_refresh = None;
+                        WatermarkFilterEvent::GlobalRefresh(refresh_result)
+                    }
+                    Either::Right((msg, _)) => WatermarkFilterEvent::Input(msg),
+                }
+            } else {
+                WatermarkFilterEvent::Input(input.next().await)
+            };
+
+            let msg = match event {
+                WatermarkFilterEvent::GlobalRefresh(refresh_result) => {
+                    let global_max_watermark = refresh_result?;
+                    current_watermark = match (current_watermark, global_max_watermark) {
+                        (Some(watermark), Some(global_max_watermark)) => Some(cmp::max_by(
+                            watermark,
+                            global_max_watermark,
+                            DefaultOrd::default_cmp,
+                        )),
+                        (Some(watermark), None) => Some(watermark),
+                        (None, global_max_watermark) => global_max_watermark,
+                    };
+                    if let Some(watermark) = current_watermark.clone()
+                        && !is_paused
+                    {
+                        yield Message::Watermark(Watermark::new(
+                            event_time_col_idx,
+                            watermark_type.clone(),
+                            watermark,
+                        ));
+                    }
+                    continue;
+                }
+                WatermarkFilterEvent::Input(msg) => {
+                    let Some(msg) = msg else {
+                        break;
+                    };
+                    msg?
+                }
+            };
+
             match msg {
                 Message::Chunk(chunk) => {
                     let chunk = chunk.compact_vis();
@@ -273,7 +321,7 @@ impl<S: StateStore, const UPSERT: bool> WatermarkFilterExecutorInner<S, UPSERT> 
                         current_watermark = Self::get_global_max_watermark(
                             &table,
                             &global_watermark_table,
-                            HummockReadEpoch::Committed(prev_epoch),
+                            prev_epoch,
                         )
                         .await?;
                     }
@@ -283,37 +331,18 @@ impl<S: StateStore, const UPSERT: bool> WatermarkFilterExecutorInner<S, UPSERT> 
                             barrier_num_during_idle += 1;
 
                             if barrier_num_during_idle
-                                == UPDATE_GLOBAL_WATERMARK_FREQUENCY_WHEN_IDLE
+                                >= UPDATE_GLOBAL_WATERMARK_FREQUENCY_WHEN_IDLE
+                                && pending_global_refresh.is_none()
                             {
                                 barrier_num_during_idle = 0;
-                                // Align watermark
-                                // NOTE(st1page): Should be `NoWait` because it could lead to a degradation of concurrent checkpoint situations, as it would require waiting for the previous epoch
-                                let global_max_watermark = Self::get_global_max_watermark(
-                                    &table,
-                                    &global_watermark_table,
-                                    HummockReadEpoch::NoWait(prev_epoch),
-                                )
-                                .await?;
-
-                                current_watermark = if let Some(global_max_watermark) =
-                                    global_max_watermark.clone()
-                                    && let Some(watermark) = current_watermark.clone()
-                                {
-                                    Some(cmp::max_by(
-                                        watermark,
-                                        global_max_watermark,
-                                        DefaultOrd::default_cmp,
-                                    ))
-                                } else {
-                                    current_watermark.or(global_max_watermark)
-                                };
-                                if let Some(watermark) = current_watermark.clone() {
-                                    yield Message::Watermark(Watermark::new(
-                                        event_time_col_idx,
-                                        watermark_type.clone(),
-                                        watermark,
-                                    ));
-                                }
+                                let global_watermark_table = global_watermark_table.clone();
+                                pending_global_refresh = Some(Box::pin(async move {
+                                    Self::read_global_max_watermark(
+                                        &global_watermark_table,
+                                        prev_epoch,
+                                    )
+                                    .await
+                                }));
                             }
                         } else {
                             idle_input = true;
@@ -342,39 +371,57 @@ impl<S: StateStore, const UPSERT: bool> WatermarkFilterExecutorInner<S, UPSERT> 
         )
     }
 
-    /// If the returned if `Ok(None)`, it means there is no global max watermark.
-    async fn get_global_max_watermark(
-        table: &StateTable<S>,
-        global_watermark_table: &BatchTable<S>,
-        wait_epoch: HummockReadEpoch,
+    fn decode_watermark_row(
+        watermark_row: Option<OwnedRow>,
     ) -> StreamExecutorResult<Option<ScalarImpl>> {
-        let handle_watermark_row = |watermark_row: Option<OwnedRow>| match watermark_row {
+        match watermark_row {
             Some(row) => {
                 if row.len() == 1 {
-                    Ok::<_, StreamExecutorError>(row[0].clone())
+                    Ok(row[0].clone())
                 } else {
                     bail!("The watermark row should only contain 1 datum");
                 }
             }
             _ => Ok(None),
-        };
+        }
+    }
+
+    async fn read_global_max_watermark(
+        global_watermark_table: &BatchTable<S>,
+        read_epoch: u64,
+    ) -> StreamExecutorResult<Option<ScalarImpl>> {
         let global_watermark_iter_futures =
             global_watermark_table
                 .vnodes()
                 .iter_vnodes()
                 .map(|vnode| async move {
                     let pk = row::once(vnode.to_datum());
-                    let watermark_row: Option<OwnedRow> =
-                        global_watermark_table.get_row(pk, wait_epoch).await?;
-                    handle_watermark_row(watermark_row)
+                    let watermark_row: Option<OwnedRow> = global_watermark_table
+                        .get_row(pk, HummockReadEpoch::Committed(read_epoch))
+                        .await?;
+                    Self::decode_watermark_row(watermark_row)
                 });
+        let global_watermarks = try_join_all(global_watermark_iter_futures).await?;
+
+        Ok(global_watermarks
+            .into_iter()
+            .flatten()
+            .max_by(DefaultOrd::default_cmp))
+    }
+
+    /// If the returned if `Ok(None)`, it means there is no global max watermark.
+    async fn get_global_max_watermark(
+        table: &StateTable<S>,
+        global_watermark_table: &BatchTable<S>,
+        read_epoch: u64,
+    ) -> StreamExecutorResult<Option<ScalarImpl>> {
         let local_watermark_iter_futures = table.vnodes().iter_vnodes().map(|vnode| async move {
             let pk = row::once(vnode.to_datum());
             let watermark_row: Option<OwnedRow> = table.get_row(pk).await?;
-            handle_watermark_row(watermark_row)
+            Self::decode_watermark_row(watermark_row)
         });
         let (global_watermarks, local_watermarks) = try_join(
-            try_join_all(global_watermark_iter_futures),
+            Self::read_global_max_watermark(global_watermark_table, read_epoch),
             try_join_all(local_watermark_iter_futures),
         )
         .await?;
@@ -382,8 +429,7 @@ impl<S: StateStore, const UPSERT: bool> WatermarkFilterExecutorInner<S, UPSERT> 
         // Return the minimal value if the remote max watermark is Null.
         let watermark = global_watermarks
             .into_iter()
-            .chain(local_watermarks)
-            .flatten()
+            .chain(local_watermarks.into_iter().flatten())
             .max_by(DefaultOrd::default_cmp);
 
         Ok(watermark)

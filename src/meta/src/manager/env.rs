@@ -96,6 +96,8 @@ pub struct MetaOpts {
     /// Whether to enable the recovery of the cluster. If disabled, the meta service will exit on
     /// abnormal cases.
     pub enable_recovery: bool,
+    /// Whether to clean up all foreground creating streaming jobs during recovery.
+    pub clean_all_foreground_jobs_on_recovery: bool,
     /// Whether to disable the auto-scaling feature.
     pub disable_automatic_parallelism_control: bool,
     /// The number of streaming jobs per scaling operation.
@@ -175,8 +177,6 @@ pub struct MetaOpts {
     pub periodic_compaction_interval_sec: u64,
     /// Interval of reporting the number of nodes in the cluster.
     pub node_num_monitor_interval_sec: u64,
-    /// Whether to protect the drop table operation with incoming sink.
-    pub protect_drop_table_with_incoming_sink: bool,
     /// The Prometheus endpoint for Meta Dashboard Service.
     /// The Dashboard service uses this in the following ways:
     /// 1. Query Prometheus for relevant metrics to find Stream Graph Bottleneck, and display it.
@@ -302,6 +302,7 @@ pub struct MetaOpts {
 
     pub table_change_log_insert_batch_size: u64,
     pub table_change_log_delete_batch_size: u64,
+    pub table_change_log_truncate_interval_sec: u64,
 
     pub license_key_path: Option<PathBuf>,
 
@@ -324,6 +325,7 @@ impl MetaOpts {
     pub fn test(enable_recovery: bool) -> Self {
         Self {
             enable_recovery,
+            clean_all_foreground_jobs_on_recovery: false,
             disable_automatic_parallelism_control: false,
             parallelism_control_batch_size: 1,
             parallelism_control_trigger_period_sec: 10,
@@ -367,7 +369,6 @@ impl MetaOpts {
             enable_committed_sst_sanity_check: false,
             periodic_compaction_interval_sec: 300,
             node_num_monitor_interval_sec: 10,
-            protect_drop_table_with_incoming_sink: false,
             prometheus_endpoint: None,
             prometheus_selector: None,
             vpc_id: None,
@@ -429,6 +430,7 @@ impl MetaOpts {
             serverless_backfill_controller_addr: String::new(),
             table_change_log_insert_batch_size: 1000,
             table_change_log_delete_batch_size: 1000,
+            table_change_log_truncate_interval_sec: 600,
         }
     }
 }

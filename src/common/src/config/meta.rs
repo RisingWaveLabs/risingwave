@@ -232,6 +232,13 @@ pub struct MetaConfig {
     #[serde(default)]
     pub disable_recovery: bool,
 
+    /// Whether to clean up all foreground creating streaming jobs during recovery.
+    ///
+    /// This preserves the legacy recovery behavior. When disabled, only creating jobs whose
+    /// creation progress cannot be recovered are cleaned up.
+    #[serde(default)]
+    pub clean_all_foreground_jobs_on_recovery: bool,
+
     /// Whether meta should request pausing all data sources on the next bootstrap.
     /// This allows us to pause the cluster on next bootstrap in an offline way.
     /// It's important for standalone or single node deployments.
@@ -310,10 +317,6 @@ pub struct MetaConfig {
     #[serde(default = "default::meta::cut_table_size_limit")]
     #[deprecated]
     pub cut_table_size_limit: u64,
-
-    /// Whether to protect dropping a table with incoming sink.
-    #[serde(default = "default::meta::protect_drop_table_with_incoming_sink")]
-    pub protect_drop_table_with_incoming_sink: bool,
 
     #[serde(default, flatten)]
     #[config_doc(omitted)]
@@ -593,6 +596,9 @@ pub struct MetaDeveloperConfig {
 
     #[serde(default = "default::developer::table_change_log_delete_batch_size")]
     pub table_change_log_delete_batch_size: u64,
+
+    #[serde(default = "default::developer::table_change_log_truncate_interval_sec")]
+    pub table_change_log_truncate_interval_sec: u64,
 }
 
 #[serde_with::apply(Option => #[serde(with = "none_as_empty_string")])]
@@ -814,10 +820,6 @@ pub mod default {
         // limit the size of group to trigger split by group_size and avoid too many small groups
         pub fn split_group_size_limit() -> u64 {
             64 * 1024 * 1024 * 1024 // 64GB
-        }
-
-        pub fn protect_drop_table_with_incoming_sink() -> bool {
-            false
         }
 
         pub fn partition_vnode_count() -> u32 {

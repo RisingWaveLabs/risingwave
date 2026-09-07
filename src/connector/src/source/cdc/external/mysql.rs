@@ -28,7 +28,7 @@ use risingwave_common::catalog::{CDC_OFFSET_COLUMN_NAME, ColumnDesc, ColumnId, F
 use risingwave_common::row::OwnedRow;
 use risingwave_common::types::{DataType, Datum, Decimal, F32, ScalarImpl};
 use risingwave_common::util::iter_util::ZipEqFast;
-use sea_schema::mysql::def::{ColumnDefault, ColumnKey, ColumnType, NumericAttr};
+use sea_schema::mysql::def::{ColumnDefault, ColumnType, IndexInfo, NumericAttr};
 use sea_schema::mysql::discovery::SchemaDiscovery;
 use sea_schema::mysql::query::SchemaQueryBuilder;
 use sea_schema::sea_query::{Alias, IntoIden};
@@ -41,10 +41,11 @@ use crate::connector_common::SslMode;
 // Re-export SslMode for convenience
 pub use crate::connector_common::SslMode as MySqlSslMode;
 use crate::error::{ConnectorError, ConnectorResult};
+use crate::parser::mysql_row_to_owned_row_with_strict_pk;
 use crate::source::CdcTableSnapshotSplit;
 use crate::source::cdc::external::{
     CdcOffset, CdcOffsetParseFunc, CdcTableSnapshotSplitOption, DebeziumOffset,
-    ExternalTableConfig, ExternalTableReader, SchemaTableName, mysql_row_to_owned_row,
+    ExternalTableConfig, ExternalTableReader, SchemaTableName,
 };
 
 /// Build MySQL connection pool with proper SSL configuration.
@@ -154,10 +155,10 @@ impl MySqlExternalTable {
         let schema = Alias::new(config.database.as_str()).into_iden();
         let table = Alias::new(config.table.as_str()).into_iden();
         let columns = schema_discovery
-            .discover_columns(schema, table, &system_info)
+            .discover_columns(schema.clone(), table.clone(), &system_info)
             .await?;
+        let indexes = schema_discovery.discover_indexes(schema, table).await?;
         let mut column_descs = vec![];
-        let mut pk_names = vec![];
         for col in columns {
             let data_type = mysql_type_to_rw_type(&col.col_type)?;
             // column name in mysql is case-insensitive, convert to lowercase
@@ -186,14 +187,10 @@ impl MySqlExternalTable {
             };
 
             column_descs.push(column_desc);
-            if matches!(col.key, ColumnKey::Primary) {
-                pk_names.push(col_name);
-            }
         }
 
-        if pk_names.is_empty() {
-            return Err(anyhow!("MySQL table doesn't define the primary key").into());
-        }
+        let pk_names = primary_key_names(&indexes)
+            .ok_or_else(|| anyhow!("MySQL table doesn't define the primary key"))?;
         Ok(Self {
             column_descs,
             pk_names,
@@ -207,6 +204,20 @@ impl MySqlExternalTable {
     pub fn pk_names(&self) -> &Vec<String> {
         &self.pk_names
     }
+}
+
+fn primary_key_names(indexes: &[IndexInfo]) -> Option<Vec<String>> {
+    indexes
+        .iter()
+        .find(|index| index.name.eq_ignore_ascii_case("PRIMARY"))
+        .map(|index| {
+            index
+                .parts
+                .iter()
+                .map(|part| part.column.to_lowercase())
+                .collect()
+        })
+        .filter(|names: &Vec<_>| !names.is_empty())
 }
 
 fn derive_default_value(default: ColumnDefault, data_type: &DataType) -> ConnectorResult<Datum> {
@@ -442,6 +453,7 @@ pub fn mysql_type_to_rw_type(col_type: &ColumnType) -> ConnectorResult<DataType>
 
 pub struct MySqlExternalTableReader {
     rw_schema: Schema,
+    pk_indices: Vec<usize>,
     field_names: String,
     pool: mysql_async::Pool,
     upstream_mysql_pk_infos: Vec<(String, ColumnType)>, // (column_name, column_type)
@@ -539,7 +551,11 @@ impl MySqlExternalTableReader {
         major > 8 || (major == 8 && minor >= 4)
     }
 
-    pub async fn new(config: ExternalTableConfig, rw_schema: Schema) -> ConnectorResult<Self> {
+    pub async fn new(
+        config: ExternalTableConfig,
+        rw_schema: Schema,
+        pk_indices: Vec<usize>,
+    ) -> ConnectorResult<Self> {
         let database = config.database.clone();
         let table = config.table.clone();
         let pool = build_mysql_connection_pool(
@@ -573,6 +589,7 @@ impl MySqlExternalTableReader {
 
         Ok(Self {
             rw_schema,
+            pk_indices,
             field_names,
             pool,
             upstream_mysql_pk_infos,
@@ -757,7 +774,8 @@ impl MySqlExternalTableReader {
             let row_stream = rs_stream.map(|row| {
                 // convert mysql row into OwnedRow
                 let mut row = row?;
-                Ok::<_, ConnectorError>(mysql_row_to_owned_row(&mut row, &self.rw_schema))
+                mysql_row_to_owned_row_with_strict_pk(&mut row, &self.rw_schema, &self.pk_indices)
+                    .map_err(ConnectorError::from)
             });
             pin_mut!(row_stream);
             #[for_await]
@@ -770,7 +788,8 @@ impl MySqlExternalTableReader {
             let row_stream = rs_stream.map(|row| {
                 // convert mysql row into OwnedRow
                 let mut row = row?;
-                Ok::<_, ConnectorError>(mysql_row_to_owned_row(&mut row, &self.rw_schema))
+                mysql_row_to_owned_row_with_strict_pk(&mut row, &self.rw_schema, &self.pk_indices)
+                    .map_err(ConnectorError::from)
             });
             pin_mut!(row_stream);
             #[for_await]
@@ -840,9 +859,12 @@ mod tests {
     use maplit::{convert_args, hashmap};
     use risingwave_common::catalog::{ColumnDesc, ColumnId, Field, Schema};
     use risingwave_common::types::DataType;
-    use sea_schema::mysql::def::ColumnType;
+    use sea_schema::mysql::def::{ColumnType, IndexInfo, IndexOrder, IndexPart, IndexType};
 
-    use super::{mysql_type_is_unsigned_bigint, mysql_type_to_rw_type, type_name_to_mysql_type};
+    use super::{
+        mysql_type_is_unsigned_bigint, mysql_type_to_rw_type, primary_key_names,
+        type_name_to_mysql_type,
+    };
     use crate::source::cdc::external::mysql::MySqlExternalTable;
     use crate::source::cdc::external::{
         CdcOffset, ExternalTableConfig, ExternalTableReader, MySqlExternalTableReader, MySqlOffset,
@@ -851,6 +873,35 @@ mod tests {
 
     fn parse_mysql_type_name(ty_name: &str) -> ColumnType {
         type_name_to_mysql_type(ty_name).unwrap()
+    }
+
+    #[test]
+    fn test_primary_key_names_preserve_index_order() {
+        let indexes = vec![IndexInfo {
+            unique: true,
+            name: "PRIMARY".to_owned(),
+            parts: ["RelatedID", "TypeID", "ClientID"]
+                .into_iter()
+                .map(|column| IndexPart {
+                    column: column.to_owned(),
+                    order: IndexOrder::Ascending,
+                    sub_part: None,
+                })
+                .collect(),
+            nullable: false,
+            idx_type: IndexType::BTree,
+            comment: String::new(),
+            functional: false,
+        }];
+
+        assert_eq!(
+            primary_key_names(&indexes),
+            Some(vec![
+                "relatedid".to_owned(),
+                "typeid".to_owned(),
+                "clientid".to_owned(),
+            ])
+        );
     }
 
     #[test]
@@ -1019,7 +1070,7 @@ mod tests {
         let config =
             serde_json::from_value::<ExternalTableConfig>(serde_json::to_value(props).unwrap())
                 .unwrap();
-        let reader = MySqlExternalTableReader::new(config, rw_schema)
+        let reader = MySqlExternalTableReader::new(config, rw_schema, vec![0])
             .await
             .unwrap();
         let offset = reader.current_cdc_offset().await.unwrap();

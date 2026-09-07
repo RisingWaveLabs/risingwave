@@ -2,7 +2,15 @@ syntax = "proto3";
 
 package iceberg_compaction;
 
+import "connector_service.proto";
+
 option optimize_for = SPEED;
+
+message PkIndexCompactionResult {
+  connector_service.SinkMetadata output_files = 1;
+  repeated string input_file_paths = 2;
+  int64 read_snapshot_id = 3;
+}
 
 message SubscribeIcebergCompactionEventRequest {
   // Register provides the context_id of the corresponding Compactor.
@@ -18,8 +26,12 @@ message SubscribeIcebergCompactionEventRequest {
   message ReportTask {
     enum Status {
       UNSPECIFIED = 0;
+      // The dispatched task completed successfully. For a bounded automatic
+      // round, this means progress; only DRAINED completes the round.
       SUCCESS = 1;
       FAILED = 2;
+      // A bounded planning attempt completed successfully and produced no plans.
+      DRAINED = 3;
     }
 
     uint64 task_id = 1;
@@ -27,6 +39,9 @@ message SubscribeIcebergCompactionEventRequest {
     Status status = 3;
     reserved 4, 5;
     optional string error_message = 6;
+
+    // Populated only for pk-index coordinated compaction tasks.
+    optional PkIndexCompactionResult pk_index_result = 7;
   }
 
   oneof event {
@@ -45,7 +60,6 @@ message SubscribeIcebergCompactionEventRequest {
 
 message IcebergCompactionTask {
   uint64 task_id = 1;
-  // Now we only support iceberg table full compaction.
   // compactor will get the information of the iceberg table from the properties
   map<string, string> props = 2;
 
@@ -58,10 +72,21 @@ message IcebergCompactionTask {
     SMALL_FILES = 2;
 
     FILES_WITH_DELETE = 3;
+
+    // Select a localized compaction strategy from the current snapshot.
+    AUTO = 4;
   }
 
   TaskType task_type = 3;
   uint32 sink_id = 4;
+
+  // Whether this task should be routed through the meta-coordinated commit
+  // path for iceberg pk-index sinks, the compactor performs the rewrite
+  // without committing and reports the result back to meta instead.
+  bool pk_index_coordinated = 5;
+
+  // Inclusive file sequence boundary shared by every task in an automatic compaction round.
+  optional int64 max_file_sequence_number = 6;
 }
 
 message CancelCompactTask {

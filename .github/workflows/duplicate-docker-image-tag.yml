@@ -1,0 +1,82 @@
+name: Duplicate Docker Image Tag
+
+permissions:
+  contents: read
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_image_tag:
+        description: "Existing RisingWave image tag"
+        required: true
+        type: string
+      target_image_tag:
+        description: "New RisingWave image tag"
+        required: true
+        type: string
+      duplicate_ghcr:
+        description: "Duplicate the tag on GHCR"
+        required: true
+        type: boolean
+        default: true
+      duplicate_dockerhub:
+        description: "Duplicate the tag on Docker Hub"
+        required: true
+        type: boolean
+        default: true
+
+jobs:
+  duplicate_image_tag:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate inputs
+        env:
+          SOURCE_IMAGE_TAG: ${{ inputs.source_image_tag }}
+          TARGET_IMAGE_TAG: ${{ inputs.target_image_tag }}
+          DUPLICATE_ON_GHCR: ${{ inputs.duplicate_ghcr }}
+          DUPLICATE_ON_DOCKERHUB: ${{ inputs.duplicate_dockerhub }}
+        run: |
+          validate_image_tag() {
+            local tag="$1"
+            local input_name="$2"
+
+            if [[ ! "$tag" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]]; then
+              echo "Invalid $input_name: $tag"
+              exit 1
+            fi
+          }
+
+          validate_image_tag "$SOURCE_IMAGE_TAG" "source_image_tag"
+          validate_image_tag "$TARGET_IMAGE_TAG" "target_image_tag"
+
+          if [[ "$SOURCE_IMAGE_TAG" == "$TARGET_IMAGE_TAG" ]]; then
+            echo "source_image_tag and target_image_tag must differ"
+            exit 1
+          fi
+
+          if [[ "$DUPLICATE_ON_GHCR" != "true" && "$DUPLICATE_ON_DOCKERHUB" != "true" ]]; then
+            echo "Enable duplicate_ghcr, duplicate_dockerhub, or both"
+            exit 1
+          fi
+
+      - name: Trigger Docker pipeline via Buildkite
+        id: trigger_docker
+        uses: buildkite/trigger-pipeline-action@v2.3.0
+        with:
+          buildkite_api_access_token: ${{ secrets.BUILDKITE_TOKEN }}
+          pipeline: "risingwavelabs/docker"
+          branch: ${{ github.ref_name }}
+          commit: ${{ github.sha }}
+          message: ":github: Duplicate Docker image tag: ${{ inputs.source_image_tag }} -> ${{ inputs.target_image_tag }}"
+          build_env_vars: '{ "AD_HOC": "true", "DUPLICATE_DOCKER_IMAGE_TAG": "true", "SOURCE_IMAGE_TAG": "${{ inputs.source_image_tag }}", "TARGET_IMAGE_TAG": "${{ inputs.target_image_tag }}", "DUPLICATE_ON_GHCR": "${{ inputs.duplicate_ghcr }}", "DUPLICATE_ON_DOCKERHUB": "${{ inputs.duplicate_dockerhub }}" }'
+
+      - name: Summarize Buildkite build
+        if: ${{ always() }}
+        env:
+          DOCKER_BUILD_URL: ${{ steps.trigger_docker.outputs.url }}
+        run: |
+          if [[ -n "$DOCKER_BUILD_URL" ]]; then
+            echo "- [Docker image tag duplication build]($DOCKER_BUILD_URL)" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "- Docker image tag duplication build: URL unavailable (trigger failed before returning one)." >> "$GITHUB_STEP_SUMMARY"
+          fi

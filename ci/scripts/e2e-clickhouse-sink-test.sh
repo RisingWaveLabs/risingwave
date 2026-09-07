@@ -25,9 +25,10 @@ sink_test_env_setup "$profile"
 
 
 echo "--- create clickhouse table"
+# v9 is left out of the sink on purpose: a Decimal256 column the sink does not write must not break it.
 curl https://clickhouse.com/ | sh
 sleep 2
-./clickhouse client --host=clickhouse-server --port=9000 --password='default' --query="SET enable_json_type = 1;CREATE table demo_test(v1 Int32,v2 Int64,v3 String,v4 Enum16('A'=1,'B'=2), v5 decimal64(3), v6 Nullable(String), v7 DateTime64(6), v8 json)ENGINE = ReplacingMergeTree PRIMARY KEY (v1);"
+./clickhouse client --host=clickhouse-server --port=9000 --password='default' --query="SET enable_json_type = 1;CREATE table demo_test(v1 Int32,v2 Int64,v3 String,v4 Enum16('A'=1,'B'=2), v5 decimal64(3), v6 Nullable(String), v7 DateTime64(6), v8 json, v9 Decimal(76, 4))ENGINE = ReplacingMergeTree PRIMARY KEY (v1);"
 
 echo "--- testing sinks"
 sqllogictest -p 4566 -d dev './e2e_test/sink/clickhouse_sink.slt'

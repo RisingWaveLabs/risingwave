@@ -95,6 +95,23 @@ pub struct Model {
     pub owner_id: UserId,
     pub schema_id: Option<SchemaId>,
     pub database_id: Option<DatabaseId>,
+    /// The parent object this object belongs to. The self foreign key uses `ON DELETE CASCADE`.
+    ///
+    /// This is distinct from `object_dependency`, which records semantic references used for
+    /// dependency checks and `DROP ... CASCADE`. The belong-to rules are:
+    ///
+    /// - database: no parent;
+    /// - schema: its database;
+    /// - named schema objects, including indexes and subscriptions: their schema;
+    /// - associated sources: the relation they belong to;
+    /// - internal tables: their streaming job;
+    /// - implicit Iceberg sinks and sources: their Iceberg table.
+    ///
+    /// New objects derive `database_id` and `schema_id` from this parent in
+    /// `CatalogController::create_object`.
+    ///
+    /// Object-type validation and cycle prevention remain application responsibilities.
+    pub belong_to_oid: Option<ObjectId>,
     pub initialized_at: DateTime,
     pub created_at: DateTime,
     pub initialized_at_cluster_version: Option<String>,
@@ -129,6 +146,14 @@ pub enum Relation {
         on_delete = "Cascade"
     )]
     SelfRef1,
+    #[sea_orm(
+        belongs_to = "Entity",
+        from = "Column::BelongToOid",
+        to = "Column::Oid",
+        on_update = "NoAction",
+        on_delete = "Cascade"
+    )]
+    SelfRef3,
     #[sea_orm(
         belongs_to = "super::database::Entity",
         from = "Column::DatabaseId",

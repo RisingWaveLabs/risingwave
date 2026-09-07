@@ -266,18 +266,97 @@ pub fn mysql_row_to_owned_row(mysql_row: &mut MysqlRow, schema: &Schema) -> Owne
     OwnedRow::new(datums)
 }
 
+/// Decode primary-key columns strictly while preserving the legacy lenient behavior for all
+/// other columns in a MySQL CDC snapshot row.
+pub fn mysql_row_to_owned_row_with_strict_pk(
+    mysql_row: &mut MysqlRow,
+    schema: &Schema,
+    pk_indices: &[usize],
+) -> anyhow::Result<OwnedRow> {
+    super::decode_row_with_strict_pk(
+        "MySQL",
+        schema,
+        pk_indices,
+        |index, field| mysql_datum_to_rw_datum(mysql_row, index, &field.name, &field.data_type),
+        |name, err| log_error!(name, err, "parse column failed"),
+    )
+}
+
 #[cfg(test)]
 mod tests {
+
+    use std::sync::Arc;
 
     use futures::pin_mut;
     use mysql_async::Row as MySqlRow;
     use mysql_async::prelude::*;
+    use mysql_common::constants::ColumnType;
+    use mysql_common::packets::Column;
+    use mysql_common::row::new_row;
+    use mysql_common::value::Value;
     use risingwave_common::catalog::{Field, Schema};
     use risingwave_common::row::Row;
     use risingwave_common::types::DataType;
     use tokio_stream::StreamExt;
 
-    use crate::parser::mysql_row_to_owned_row;
+    use crate::parser::{mysql_row_to_owned_row, mysql_row_to_owned_row_with_strict_pk};
+
+    fn mysql_row(values: Vec<Value>, names: &[&str]) -> MySqlRow {
+        let columns = names
+            .iter()
+            .map(|name| Column::new(ColumnType::MYSQL_TYPE_VAR_STRING).with_name(name.as_bytes()))
+            .collect::<Vec<_>>();
+        new_row(values, Arc::from(columns))
+    }
+
+    #[test]
+    fn strict_pk_decode_rejects_malformed_value() {
+        let schema = Schema::new(vec![
+            Field::with_name(DataType::Int32, "id"),
+            Field::with_name(DataType::Varchar, "payload"),
+        ]);
+        let mut row = mysql_row(
+            vec![
+                Value::Bytes(b"not-an-int".to_vec()),
+                Value::Bytes(b"ok".to_vec()),
+            ],
+            &["id", "payload"],
+        );
+
+        let err = mysql_row_to_owned_row_with_strict_pk(&mut row, &schema, &[0]).unwrap_err();
+        assert!(err.to_string().contains("primary key `id`"));
+    }
+
+    #[test]
+    fn strict_pk_decode_rejects_null_value() {
+        let schema = Schema::new(vec![
+            Field::with_name(DataType::Int32, "id"),
+            Field::with_name(DataType::Varchar, "payload"),
+        ]);
+        let mut row = mysql_row(
+            vec![Value::NULL, Value::Bytes(b"ok".to_vec())],
+            &["id", "payload"],
+        );
+
+        let err = mysql_row_to_owned_row_with_strict_pk(&mut row, &schema, &[0]).unwrap_err();
+        assert!(err.to_string().contains("primary key `id` cannot be NULL"));
+    }
+
+    #[test]
+    fn strict_pk_decode_keeps_non_pk_conversion_lenient() {
+        let schema = Schema::new(vec![
+            Field::with_name(DataType::Int32, "id"),
+            Field::with_name(DataType::Int32, "payload"),
+        ]);
+        let mut row = mysql_row(
+            vec![Value::Int(1), Value::Bytes(b"not-an-int".to_vec())],
+            &["id", "payload"],
+        );
+
+        let row = mysql_row_to_owned_row_with_strict_pk(&mut row, &schema, &[0]).unwrap();
+        assert!(row.datum_at(0).is_some());
+        assert!(row.datum_at(1).is_none());
+    }
 
     // manual test case
     #[ignore]

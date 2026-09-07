@@ -51,7 +51,7 @@ use crate::common::log_store_impl::kv_log_store::{
     SeqId,
 };
 
-const INSERT_OP_CODE: RowOpCodeType = 1;
+const INSERT_OP_CODE: RowOpCodeType = risingwave_common::constants::log_store::INSERT_OP_CODE;
 const DELETE_OP_CODE: RowOpCodeType = 2;
 const UPDATE_INSERT_OP_CODE: RowOpCodeType = 3;
 const UPDATE_DELETE_OP_CODE: RowOpCodeType = 4;
@@ -276,11 +276,11 @@ impl LogStoreRowSerde {
     }
 
     pub(crate) fn encode_epoch(epoch: u64) -> i64 {
-        epoch as i64 ^ (1i64 << 63)
+        risingwave_common::constants::log_store::encode_epoch(epoch)
     }
 
     pub(crate) fn decode_epoch(encoded_epoch: i64) -> u64 {
-        encoded_epoch as u64 ^ (1u64 << 63)
+        risingwave_common::constants::log_store::decode_epoch(encoded_epoch)
     }
 }
 

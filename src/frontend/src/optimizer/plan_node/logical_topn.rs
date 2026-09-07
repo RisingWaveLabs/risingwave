@@ -358,7 +358,11 @@ impl ToStream for LogicalTopN {
         let logical_input = if self.group_key().is_empty() {
             self.input()
         } else {
-            try_enforce_locality_requirement(self.input(), self.group_key())
+            try_enforce_locality_requirement(
+                self.input(),
+                self.group_key(),
+                ctx.locality_backfill_enabled(),
+            )
         };
         let (input, input_col_change) = logical_input.logical_rewrite_for_stream(ctx)?;
         let (top_n, out_col_change) = self.rewrite_with_input(input, input_col_change);

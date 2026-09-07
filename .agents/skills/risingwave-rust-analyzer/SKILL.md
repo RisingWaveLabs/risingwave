@@ -20,7 +20,7 @@ Use `rust-analyzer` to get semantic feedback faster than a full workspace build.
 
 Default to the repository root so rust-analyzer sees the pinned toolchain and Cargo flags:
 
-- `rust-toolchain` pins `nightly-2025-10-10`.
+- Read the pinned toolchain from the root-level `rust-toolchain` symlink, which points to `ci/rust-toolchain`; do not assume a specific nightly version.
 - `.cargo/config.toml` sets important `rustflags`, including `+avx2`, `tokio_unstable`, and linker flags.
 
 Use a crate directory or crate `Cargo.toml` only when you intentionally want narrower analysis and can tolerate missing cross-workspace context.

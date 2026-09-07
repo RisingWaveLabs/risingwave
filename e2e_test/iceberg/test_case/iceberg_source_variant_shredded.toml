@@ -1,0 +1,28 @@
+init_sqls = [
+    'CREATE SCHEMA IF NOT EXISTS demo_db',
+    'DROP TABLE IF EXISTS demo_db.test_variant_shredded PURGE',
+    'SET spark.sql.variant.writeShredding.enabled=true',
+    'SET spark.sql.variant.forceShreddingSchemaForTest=a INT',
+    # Spark's iceberg writer never shreds; write shredded files with the native
+    # parquet writer, to be stamped with field ids and add_files'd from the slt.
+    """INSERT OVERWRITE DIRECTORY 's3a://icebergdata/variant_shredded_files'
+    USING PARQUET
+    SELECT * FROM VALUES
+        (1, parse_json('{"a":1,"b":"x"}'), 'one'),
+        (2, parse_json('{"a":2}'), 'two'),
+        (3, CAST(NULL AS VARIANT), 'three')
+    AS t(id, v, s)""",
+    """CREATE TABLE demo_db.test_variant_shredded (
+        id INT,
+        v VARIANT,
+        s STRING
+    ) USING iceberg
+    TBLPROPERTIES ('format-version'='3')""",
+]
+
+slt = 'test_case/iceberg_source_variant_shredded.slt'
+
+drop_sqls = [
+    'DROP TABLE IF EXISTS demo_db.test_variant_shredded PURGE',
+    'DROP SCHEMA IF EXISTS demo_db',
+]

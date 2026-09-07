@@ -1,0 +1,112 @@
+control substitution on
+
+system ok
+mysql -e "
+    CREATE DATABASE IF NOT EXISTS risedev;
+    USE risedev;
+    DROP TABLE IF EXISTS mysql_auto_schema_change_column_case;
+    CREATE TABLE mysql_auto_schema_change_column_case (
+        Id INT NOT NULL PRIMARY KEY,
+        Details VARCHAR(50),
+        SCREAMING_SNAKE INT
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+    INSERT INTO mysql_auto_schema_change_column_case VALUES (1, 'before', 10);
+"
+
+statement ok
+create source s_mysql_auto_schema_change_column_case with (
+  ${RISEDEV_MYSQL_WITH_OPTIONS_COMMON},
+  username = '${RISEDEV_MYSQL_USER}',
+  password = '${MYSQL_PWD}',
+  database.name = 'risedev',
+  auto.schema.change = 'true'
+);
+
+sleep 2s
+
+statement ok
+create table rw_mysql_column_case_lowercase (
+  id INT,
+  details VARCHAR,
+  screaming_snake INT,
+  primary key (id)
+) with (
+  snapshot = 'true',
+  snapshot.batch_size = 1
+) from s_mysql_auto_schema_change_column_case table 'risedev.mysql_auto_schema_change_column_case';
+
+statement ok
+create table rw_mysql_column_case_quoted (
+  "Id" INT,
+  "Details" VARCHAR,
+  "SCREAMING_SNAKE" INT,
+  primary key ("Id")
+) with (
+  snapshot = 'true',
+  snapshot.batch_size = 1
+) from s_mysql_auto_schema_change_column_case table 'risedev.mysql_auto_schema_change_column_case';
+
+query ITI retry 10 backoff 1s
+select id, details, screaming_snake
+from rw_mysql_column_case_lowercase;
+----
+1 before 10
+
+query ITI retry 10 backoff 1s
+select "Id", "Details", "SCREAMING_SNAKE"
+from rw_mysql_column_case_quoted;
+----
+1 before 10
+
+system ok
+mysql -e "
+    USE risedev;
+    ALTER TABLE mysql_auto_schema_change_column_case ADD COLUMN NewCol VARCHAR(50);
+    INSERT INTO mysql_auto_schema_change_column_case
+        (Id, Details, SCREAMING_SNAKE, NewCol)
+    VALUES
+        (2, 'after', 20, 'added');
+"
+
+query ITIT retry 10 backoff 1s
+select id, details, screaming_snake, newcol
+from rw_mysql_column_case_lowercase
+where id = 2;
+----
+2 after 20 added
+
+query ITIT retry 10 backoff 1s
+select "Id", "Details", "SCREAMING_SNAKE", newcol
+from rw_mysql_column_case_quoted
+where "Id" = 2;
+----
+2 after 20 added
+
+query TT rowsort retry 10 backoff 1s
+select table_name, column_name
+from information_schema.columns
+where table_name in ('rw_mysql_column_case_lowercase', 'rw_mysql_column_case_quoted');
+----
+rw_mysql_column_case_lowercase details
+rw_mysql_column_case_lowercase id
+rw_mysql_column_case_lowercase newcol
+rw_mysql_column_case_lowercase screaming_snake
+rw_mysql_column_case_quoted Details
+rw_mysql_column_case_quoted Id
+rw_mysql_column_case_quoted SCREAMING_SNAKE
+rw_mysql_column_case_quoted newcol
+
+statement ok
+drop table rw_mysql_column_case_lowercase;
+
+statement ok
+drop table rw_mysql_column_case_quoted;
+
+statement ok
+drop source s_mysql_auto_schema_change_column_case cascade;
+
+system ok
+mysql -e "
+    USE risedev;
+    DROP TABLE IF EXISTS mysql_auto_schema_change_column_case;
+"

@@ -1,5 +1,9 @@
 # To test: gh workflow run 'Build Docker Image' --ref kwannoel/workflow-update-branch
 name: Build Docker Image
+
+permissions:
+  contents: read
+
 on:
   workflow_dispatch:
     inputs:

@@ -1,4 +1,4 @@
-// Copyright 2025 RisingWave Labs
+// Copyright 2023 RisingWave Labs
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -204,7 +204,7 @@ pub async fn rpc_serve_with_store(
                 .run_once(lease_interval_secs as i64, election_shutdown_rx.clone())
                 .await
             {
-                tracing::error!(error = %e.as_report(), "election error happened");
+                tracing::error!(error = %e.as_report(), "an election error occurred");
             }
             // Leader lost, shutdown the service.
             shutdown.cancel();
@@ -235,7 +235,7 @@ pub async fn rpc_serve_with_store(
 
                 res = is_leader_watcher.changed() => {
                     if res.is_err() {
-                        tracing::error!("leader watcher recv failed");
+                        tracing::error!("failed to receive a leader watcher update");
                     }
                 }
             }
@@ -612,6 +612,7 @@ pub async fn start_service_as_election_leader(
     let telemetry_srv = TelemetryInfoServiceImpl::new(env.meta_store());
     let system_params_srv = SystemParamsServiceImpl::new(
         env.system_params_manager_impl_ref(),
+        metadata_manager.clone(),
         env.opts.license_key_path.is_some(),
     );
     let session_params_srv = SessionParamsServiceImpl::new(env.session_params_manager_impl_ref());
@@ -678,11 +679,30 @@ pub async fn start_service_as_election_leader(
                 let catalog_controller = catalog_controller.clone();
                 Box::pin(async move {
                     catalog_controller
+                        .get_table_change_log_truncate_info()
+                        .await
+                        .map(Some)
+                        .unwrap_or_else(|e| {
+                            tracing::warn!(err = %e.as_report(), "failed to collect table change log retention metadata");
+                            None
+                        })
+                })
+            })
+        },
+        {
+            let catalog_controller = metadata_manager.catalog_controller.clone();
+            Box::new(move || {
+                let catalog_controller = catalog_controller.clone();
+                Box::pin(async move {
+                    catalog_controller
                         .get_pinned_snapshot_epochs()
                         .await
                         .map(Some)
                         .unwrap_or_else(|e| {
-                            tracing::warn!(err = %e.as_report(), "failed to collect pinned snapshot epochs. pause vacuum time travel");
+                            tracing::warn!(
+                                err = %e.as_report(),
+                                "failed to collect pinned snapshot epochs; pausing time-travel vacuum",
+                            );
                             None
                         })
                 })

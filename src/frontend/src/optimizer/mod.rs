@@ -60,6 +60,7 @@ use risingwave_common::bail;
 use risingwave_common::catalog::{
     ColumnCatalog, ColumnDesc, ConflictBehavior, Field, FieldDisplay, Schema,
 };
+use risingwave_common::session_config::LocalityBackfillMode;
 use risingwave_common::types::DataType;
 use risingwave_common::util::column_index_mapping::ColIndexMapping;
 use risingwave_common::util::iter_util::ZipEqDebug;
@@ -92,7 +93,8 @@ use crate::optimizer::plan_node::{
     StreamUpstreamSinkUnion, StreamVectorIndexWrite, ToStream, VisitExprsRecursive,
 };
 use crate::optimizer::plan_visitor::{
-    LocalityProviderCounter, RwTimestampValidator, TemporalJoinValidator,
+    LocalityBackfillScanEstimator, LocalityProviderCounter, RwTimestampValidator,
+    TemporalJoinValidator,
 };
 use crate::optimizer::property::Distribution;
 use crate::utils::{
@@ -244,6 +246,85 @@ impl<P: PlanPhase> PlanRoot<P> {
                 })
                 .collect(),
         }
+    }
+}
+
+fn resolve_locality_backfill(
+    ctx: &OptimizerContext,
+    plan: LogicalPlanRef,
+    backfill_type: BackfillType,
+) -> bool {
+    let config = ctx.session_ctx().config();
+    let enabled = config.enable_locality_backfill();
+    let mode = config.locality_backfill_mode();
+    let min_size = config.auto_locality_backfill_min_size();
+    drop(config);
+
+    if !enabled {
+        return false;
+    }
+
+    match mode {
+        LocalityBackfillMode::Always => true,
+        LocalityBackfillMode::Auto => {
+            if backfill_type.without_snapshot()
+                || risingwave_common::license::Feature::LocalityBackfill
+                    .check_available()
+                    .is_err()
+            {
+                false
+            } else {
+                let catalog_reader = ctx.session_ctx().env().catalog_reader().read_guard();
+                let estimated_backfill_size =
+                    LocalityBackfillScanEstimator::estimate(plan, catalog_reader.table_stats());
+                estimated_backfill_size >= min_size
+            }
+        }
+    }
+}
+
+const UNLICENSED_LOCALITY_PROVIDER_LIMIT: usize = 5;
+
+fn locality_backfill_requires_license(
+    mode: LocalityBackfillMode,
+    locality_provider_count: usize,
+) -> bool {
+    locality_provider_count > 0
+        && (mode == LocalityBackfillMode::Auto
+            || locality_provider_count > UNLICENSED_LOCALITY_PROVIDER_LIMIT)
+}
+
+fn rewrite_logical_plan_for_stream(
+    plan: &LogicalPlanRef,
+    backfill_type: BackfillType,
+    locality_backfill_enabled: bool,
+) -> Result<(LogicalPlanRef, ColIndexMapping)> {
+    let (plan, out_col_change) = plan.logical_rewrite_for_stream(
+        &mut RewriteStreamContext::new_with_backfill_type(backfill_type, locality_backfill_enabled),
+    )?;
+    if out_col_change.is_injective() {
+        Ok((plan, out_col_change))
+    } else {
+        let mut output_indices = (0..plan.schema().len()).collect_vec();
+        #[expect(unused_assignments)]
+        let (mut map, mut target_size) = out_col_change.into_parts();
+
+        // TODO(st1page): https://github.com/risingwavelabs/risingwave/issues/7234
+        // assert_eq!(target_size, output_indices.len());
+        target_size = plan.schema().len();
+        let mut tar_exists = vec![false; target_size];
+        for i in map.iter_mut().flatten() {
+            if tar_exists[*i] {
+                output_indices.push(*i);
+                *i = target_size;
+                target_size += 1;
+            } else {
+                tar_exists[*i] = true;
+            }
+        }
+        let plan = LogicalProject::with_out_col_idx(plan, output_indices.into_iter());
+        let out_col_change = ColIndexMapping::new(map, target_size);
+        Ok((plan.into(), out_col_change))
     }
 }
 
@@ -643,27 +724,6 @@ impl LogicalPlanRoot {
             ).into());
         }
 
-        if LocalityProviderCounter::count(plan.clone()) > 5 {
-            // LocalityProviderCounter is non-zero only when locality backfill is enabled.
-            assert!(ctx.session_ctx().config().enable_locality_backfill());
-            risingwave_common::license::Feature::LocalityBackfill.check_available()?;
-        }
-
-        if ctx.missed_locality_providers() > 1
-            && risingwave_common::license::Feature::LocalityBackfill
-                .check_available()
-                .is_ok()
-        {
-            // missed_locality_providers can only be non-zero when locality backfill is disabled.
-            assert!(!ctx.session_ctx().config().enable_locality_backfill());
-            ctx.warn_to_user(format!(
-                "This streaming job has {} operators that could benefit from locality backfill. \
-                Consider enabling it with `SET enable_locality_backfill = true` for potentially \
-                faster backfill performance, when existing data volume in upstream(s) is large.",
-                ctx.missed_locality_providers()
-            ));
-        }
-
         Ok(optimized_plan.into_phase(plan))
     }
 
@@ -724,36 +784,35 @@ impl LogicalPlanRoot {
                     ).into());
                 }
                 let mut optimized_plan = self.gen_optimized_logical_plan_for_stream()?;
-                let (plan, out_col_change) = {
-                    let (plan, out_col_change) = optimized_plan.plan.logical_rewrite_for_stream(
-                        &mut RewriteStreamContext::new_with_backfill_type(backfill_type),
-                    )?;
-                    if out_col_change.is_injective() {
-                        (plan, out_col_change)
-                    } else {
-                        let mut output_indices = (0..plan.schema().len()).collect_vec();
-                        #[expect(unused_assignments)]
-                        let (mut map, mut target_size) = out_col_change.into_parts();
+                let locality_backfill_enabled =
+                    resolve_locality_backfill(&ctx, optimized_plan.plan.clone(), backfill_type);
+                let (mut plan, mut out_col_change) = rewrite_logical_plan_for_stream(
+                    &optimized_plan.plan,
+                    backfill_type,
+                    locality_backfill_enabled,
+                )?;
 
-                        // TODO(st1page): https://github.com/risingwavelabs/risingwave/issues/7234
-                        // assert_eq!(target_size, output_indices.len());
-                        target_size = plan.schema().len();
-                        let mut tar_exists = vec![false; target_size];
-                        for i in map.iter_mut().flatten() {
-                            if tar_exists[*i] {
-                                output_indices.push(*i);
-                                *i = target_size;
-                                target_size += 1;
-                            } else {
-                                tar_exists[*i] = true;
-                            }
-                        }
-                        let plan =
-                            LogicalProject::with_out_col_idx(plan, output_indices.into_iter());
-                        let out_col_change = ColIndexMapping::new(map, target_size);
-                        (plan.into(), out_col_change)
-                    }
-                };
+                let locality_provider_count = LocalityProviderCounter::count(plan.clone());
+                let locality_backfill_mode = ctx.session_ctx().config().locality_backfill_mode();
+                if locality_backfill_enabled
+                    && locality_backfill_requires_license(
+                        locality_backfill_mode,
+                        locality_provider_count,
+                    )
+                    && risingwave_common::license::Feature::LocalityBackfill
+                        .check_available()
+                        .is_err()
+                {
+                    ctx.warn_to_user(format!(
+                        "The streaming job would use {locality_provider_count} locality providers, \
+                         which are unavailable under the current license. Falling back to regular backfill."
+                    ));
+                    (plan, out_col_change) = rewrite_logical_plan_for_stream(
+                        &optimized_plan.plan,
+                        backfill_type,
+                        false,
+                    )?;
+                }
                 if explain_trace {
                     ctx.trace("Logical Rewrite For Stream:");
                     ctx.trace(plan.explain_to_string());
@@ -1412,6 +1471,10 @@ impl BatchPlanRef {
             || self.node_type() == BatchPlanNodeType::BatchIcebergScan
     }
 
+    fn is_lookup_join(&self) -> bool {
+        self.node_type() == BatchPlanNodeType::BatchLookupJoin
+    }
+
     fn is_insert(&self) -> bool {
         self.node_type() == BatchPlanNodeType::BatchInsert
     }
@@ -1438,6 +1501,10 @@ fn require_additional_exchange_on_root_in_distributed_mode(plan: BatchPlanRef) -
             || plan.is_insert()
             || plan.is_update()
             || plan.is_delete()
+            // A lookup join on a singleton lookup table may be already in `Single`
+            // distribution and reads from the state store, so it must not be executed
+            // in the root stage on the frontend.
+            || plan.is_lookup_join()
     })
 }
 

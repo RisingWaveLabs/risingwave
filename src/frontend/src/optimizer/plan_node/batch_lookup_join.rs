@@ -182,10 +182,23 @@ impl_plan_tree_node_for_unary! { Batch, BatchLookupJoin }
 
 impl ToDistributedBatch for BatchLookupJoin {
     fn to_distributed(&self) -> Result<PlanRef> {
+        let right_table = &self.right_table;
+
+        // The lookup table has a singleton distribution, so there's no way to align the
+        // left side with the distribution key of the right table. Instead, gather the left
+        // side into a single task and perform all lookups from there. Note that this is
+        // still correct because the lookup executor scans the table with a full vnode
+        // bitmap, regardless of which worker the task is scheduled to.
+        if right_table.distribution_key.is_empty() {
+            let input = self
+                .input()
+                .to_distributed_with_required(&Order::any(), &RequiredDist::single())?;
+            return Ok(self.clone_with_distributed_lookup(input, true).into());
+        }
+
         // Align left distribution keys with the right table.
         let mut exchange_dist_keys = vec![];
         let left_eq_indexes = self.eq_join_predicate().left_eq_indexes();
-        let right_table = &self.right_table;
         for dist_col_index in &right_table.distribution_key {
             let dist_col_id = right_table.columns[*dist_col_index].column_desc.column_id;
             let output_pos = self

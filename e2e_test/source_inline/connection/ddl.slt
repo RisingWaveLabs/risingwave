@@ -25,7 +25,7 @@ conn CONNECTION_TYPE_KAFKA
 # the "connectiond_params" looks like:
 # {"properties.bootstrap.server":"SECRET sec_broker AS TEXT","properties.security.protocol":"plaintext"}
 
-statement error Permission denied: PermissionDenied: secret used by 1 other objects.
+statement error Permission denied: secret used by 1 other objects.
 drop secret sec_broker;
 
 statement error Duplicated key in both WITH clause and Connection catalog: properties.security.protocol
@@ -54,11 +54,11 @@ create table t1 (a int, b varchar) with (
   topic = 'connection_ddl_1')
 format plain encode json;
 
-statement error Permission denied: PermissionDenied: connection used by 1 other objects.
+statement error Permission denied: connection used by 1 other objects.
 drop connection conn;
 
 # Connection & Source & Sink will have independent rely on the secret
-statement error Permission denied: PermissionDenied: secret used by 2 other objects.
+statement error Permission denied: secret used by 2 other objects.
 drop secret sec_broker;
 
 statement ok

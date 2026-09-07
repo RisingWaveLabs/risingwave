@@ -195,7 +195,7 @@ impl HummockMetaClient for MockHummockMetaClient {
                         .map(|sst| sst.sst_info),
                     sync_result.uncommitted_ssts.iter().map(|sst| &sst.sst_info),
                     &epochs,
-                    commit_table_ids.iter().map(|&table_id| (table_id, 0)),
+                    commit_table_ids.iter().copied(),
                 )
             }
             None => Default::default(),

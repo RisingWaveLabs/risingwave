@@ -1,0 +1,121 @@
+control substitution on
+
+system ok
+psql -c "
+    SELECT pg_terminate_backend(active_pid)
+    FROM pg_replication_slots
+    WHERE slot_name = 'pg_auto_schema_change_type_compat_slot' AND active_pid IS NOT NULL;
+    SELECT pg_sleep(1);
+    SELECT pg_drop_replication_slot(slot_name)
+    FROM pg_replication_slots
+    WHERE slot_name = 'pg_auto_schema_change_type_compat_slot';
+    DROP TABLE IF EXISTS pg_auto_schema_change_type_compat;
+"
+
+system ok
+psql -c "
+    CREATE TABLE pg_auto_schema_change_type_compat (
+        id int PRIMARY KEY,
+        amount numeric,
+        note varchar
+    );
+    INSERT INTO pg_auto_schema_change_type_compat VALUES
+        (1, 57896044618658097711785492504343953926634992332820282019728792003956564819967, 'before');
+"
+
+statement ok
+create source s_pg_auto_schema_change_type_compat with (
+  connector = 'postgres-cdc',
+  hostname = '${PGHOST:localhost}',
+  port = '${PGPORT:5432}',
+  username = '${PGUSER:$USER}',
+  password = '${PGPASSWORD:}',
+  database.name = '${PGDATABASE:postgres}',
+  schema.name = 'public',
+  slot.name = 'pg_auto_schema_change_type_compat_slot',
+  auto.schema.change = 'true'
+);
+
+statement ok
+create table rw_pg_auto_schema_change_int256 (
+  id int,
+  amount rw_int256,
+  note varchar,
+  primary key (id)
+) from s_pg_auto_schema_change_type_compat table 'public.pg_auto_schema_change_type_compat';
+
+statement ok
+create table rw_pg_auto_schema_change_varchar (
+  id int,
+  amount varchar,
+  note varchar,
+  primary key (id)
+) from s_pg_auto_schema_change_type_compat table 'public.pg_auto_schema_change_type_compat';
+
+query TTT retry 10 backoff 1s
+select id, amount, note from rw_pg_auto_schema_change_int256 order by id;
+----
+1 57896044618658097711785492504343953926634992332820282019728792003956564819967 before
+
+query TTT retry 10 backoff 1s
+select id, amount, note from rw_pg_auto_schema_change_varchar order by id;
+----
+1 57896044618658097711785492504343953926634992332820282019728792003956564819967 before
+
+system ok
+psql -c "
+    ALTER TABLE pg_auto_schema_change_type_compat ADD COLUMN added int DEFAULT 7;
+    INSERT INTO pg_auto_schema_change_type_compat VALUES
+        (2, 42, 'after', 8);
+"
+
+query TTTT retry 10 backoff 1s
+select id, amount, note, added from rw_pg_auto_schema_change_int256 order by id;
+----
+1 57896044618658097711785492504343953926634992332820282019728792003956564819967 before 7
+2 42 after 8
+
+query TTTT retry 10 backoff 1s
+select id, amount, note, added from rw_pg_auto_schema_change_varchar order by id;
+----
+1 57896044618658097711785492504343953926634992332820282019728792003956564819967 before 7
+2 42 after 8
+
+query TTTT retry 10 backoff 1s
+describe rw_pg_auto_schema_change_int256;
+----
+id integer false NULL
+amount rw_int256 false NULL
+note character varying false NULL
+added integer false NULL
+_rw_timestamp timestamp with time zone true NULL
+primary key id NULL NULL
+distribution key id NULL NULL
+table description rw_pg_auto_schema_change_int256 NULL NULL
+
+query TTTT retry 10 backoff 1s
+describe rw_pg_auto_schema_change_varchar;
+----
+id integer false NULL
+amount character varying false NULL
+note character varying false NULL
+added integer false NULL
+_rw_timestamp timestamp with time zone true NULL
+primary key id NULL NULL
+distribution key id NULL NULL
+table description rw_pg_auto_schema_change_varchar NULL NULL
+
+statement ok
+drop source s_pg_auto_schema_change_type_compat cascade;
+
+system ok
+psql -c "
+    SELECT pg_terminate_backend(active_pid)
+    FROM pg_replication_slots
+    WHERE slot_name = 'pg_auto_schema_change_type_compat_slot' AND active_pid IS NOT NULL;
+    SELECT pg_sleep(1);
+    SELECT pg_drop_replication_slot(slot_name)
+    FROM pg_replication_slots
+    WHERE slot_name = 'pg_auto_schema_change_type_compat_slot';
+    DROP TABLE IF EXISTS pg_auto_schema_change_type_compat;
+"

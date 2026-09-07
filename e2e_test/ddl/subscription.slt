@@ -66,3 +66,47 @@ drop materialized view ddl_mv;
 
 statement ok
 drop table ddl_t;
+
+statement ok
+create table ddl_subscription_cascade_t (v1 int);
+
+statement ok
+create subscription ddl_subscription_cascade_from_table from ddl_subscription_cascade_t with(retention = '1D');
+
+query I
+select count(*) from rw_catalog.rw_subscriptions where name = 'ddl_subscription_cascade_from_table';
+----
+1
+
+statement ok
+drop table ddl_subscription_cascade_t cascade;
+
+query I
+select count(*) from rw_catalog.rw_subscriptions where name = 'ddl_subscription_cascade_from_table';
+----
+0
+
+statement ok
+create table ddl_subscription_cascade_base (v1 int);
+
+statement ok
+create materialized view ddl_subscription_cascade_mv as select v1 from ddl_subscription_cascade_base;
+
+statement ok
+create subscription ddl_subscription_cascade_from_mv from ddl_subscription_cascade_mv with(retention = '1D');
+
+query I
+select count(*) from rw_catalog.rw_subscriptions where name = 'ddl_subscription_cascade_from_mv';
+----
+1
+
+statement ok
+drop materialized view ddl_subscription_cascade_mv cascade;
+
+query I
+select count(*) from rw_catalog.rw_subscriptions where name = 'ddl_subscription_cascade_from_mv';
+----
+0
+
+statement ok
+drop table ddl_subscription_cascade_base;

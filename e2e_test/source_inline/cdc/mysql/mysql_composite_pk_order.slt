@@ -1,0 +1,72 @@
+# Verify that auto schema discovery preserves the upstream composite primary-key order.
+
+control substitution on
+
+statement ok
+drop source if exists s_mysql_composite_pk_order cascade;
+
+system ok
+mysql -e "
+    DROP USER IF EXISTS 'composite_pk_cdc'@'%';
+    DROP DATABASE IF EXISTS mysql_composite_pk_order;
+    CREATE DATABASE mysql_composite_pk_order;
+    CREATE USER 'composite_pk_cdc'@'%' IDENTIFIED BY 'composite_pk_cdc_pwd';
+    GRANT SELECT, RELOAD, SHOW DATABASES, REPLICATION SLAVE, REPLICATION CLIENT ON *.* TO 'composite_pk_cdc'@'%';
+    USE mysql_composite_pk_order;
+    CREATE TABLE upstream_table (
+        TypeID INT NOT NULL,
+        RelatedID INT NOT NULL,
+        ClientID INT NOT NULL,
+        payload VARCHAR(50),
+        PRIMARY KEY (RelatedID, TypeID, ClientID)
+    );
+    INSERT INTO upstream_table VALUES
+        (2, 1, 3, 'first'),
+        (1, 2, 3, 'second');
+"
+
+statement ok
+create source s_mysql_composite_pk_order with (
+  ${RISEDEV_MYSQL_WITH_OPTIONS_COMMON},
+  username = 'composite_pk_cdc',
+  password = 'composite_pk_cdc_pwd',
+  database.name = 'mysql_composite_pk_order'
+);
+
+statement ok
+create table rw_mysql_composite_pk_order (*)
+from s_mysql_composite_pk_order table 'mysql_composite_pk_order.upstream_table';
+
+# Physical column order is (TypeID, RelatedID, ClientID), while the upstream
+# primary-key index order is (RelatedID, TypeID, ClientID).
+query TTTT
+describe rw_mysql_composite_pk_order;
+----
+typeid integer false NULL
+relatedid integer false NULL
+clientid integer false NULL
+payload character varying false NULL
+_rw_timestamp timestamp with time zone true NULL
+primary key relatedid, typeid, clientid NULL NULL
+distribution key relatedid, typeid, clientid NULL NULL
+table description rw_mysql_composite_pk_order NULL NULL
+
+query IIIT retry 10 backoff 1s
+select typeid, relatedid, clientid, payload
+from rw_mysql_composite_pk_order
+order by relatedid, typeid, clientid;
+----
+2 1 3 first
+1 2 3 second
+
+statement ok
+drop table rw_mysql_composite_pk_order;
+
+statement ok
+drop source s_mysql_composite_pk_order cascade;
+
+system ok
+mysql -e "
+    DROP DATABASE IF EXISTS mysql_composite_pk_order;
+    DROP USER IF EXISTS 'composite_pk_cdc'@'%';
+"

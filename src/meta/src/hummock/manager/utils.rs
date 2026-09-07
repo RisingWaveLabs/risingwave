@@ -68,9 +68,18 @@ impl HummockManager {
         use crate::hummock::manager::compaction::Compaction;
         use crate::hummock::manager::context::ContextInfo;
         use crate::hummock::manager::versioning::Versioning;
-        let mut compaction_guard = self.compaction.write().await;
-        let mut versioning_guard = self.versioning.write().await;
-        let mut context_info_guard = self.context_info.write().await;
+        let mut compaction_guard = self
+            .compaction
+            .write_with_process_name("check_state_consistency")
+            .await;
+        let mut versioning_guard = self
+            .versioning
+            .write_with_process_name("check_state_consistency")
+            .await;
+        let mut context_info_guard = self
+            .context_info
+            .write_with_process_name("check_state_consistency")
+            .await;
         // We don't check `checkpoint` because it's allowed to update its in memory state without
         // persisting to object store.
         let get_state = |compaction_guard: &mut Compaction,

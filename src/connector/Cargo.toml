@@ -36,7 +36,7 @@ sink-doris = []
 sink-starrocks = []
 
 [dependencies]
-# Rust ADBC crates (e.g., adbc_core 0.21) are built against the ADBC C/C++ core driver library version 0.19
+# Rust ADBC crates (e.g., adbc_core 0.23) are built against the ADBC C/C++ core driver library version 0.19
 adbc_core = { workspace = true, optional = true }
 adbc_snowflake = { workspace = true, optional = true, default-features = false }
 anyhow = "1"
@@ -58,7 +58,7 @@ aws-sdk-s3 = { workspace = true }
 aws-smithy-types = { workspace = true }
 aws-smithy-types-convert = { version = "0.60.1", features = ["convert-chrono"] }
 aws-types = { workspace = true }
-base64 = "0.22"
+base64 = "0.23"
 byteorder = "1"
 bytes = { version = "1", features = ["serde"] }
 cfg-if = "1"
@@ -92,6 +92,7 @@ google-cloud-pubsub = { package = "gcloud-pubsub", version = "1.5" }
 iceberg = { workspace = true }
 iceberg-catalog-glue = { workspace = true }
 iceberg-catalog-rest = { workspace = true }
+iceberg-storage-opendal = { workspace = true }
 indexmap = { workspace = true }
 itertools = { workspace = true }
 jni = { workspace = true }

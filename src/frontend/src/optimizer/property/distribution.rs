@@ -122,6 +122,7 @@ impl Distribution {
         output_count: u32,
         catalog_reader: &CatalogReader,
         worker_node_manager: &WorkerNodeSelector,
+        batch_parallelism: usize,
     ) -> Result<ExchangeInfo> {
         let exchange_info = ExchangeInfo {
             mode: match self {
@@ -153,8 +154,10 @@ impl Distribution {
                         "hash key should not be empty, use `Single` instead"
                     );
 
-                    let vnode_mapping = worker_node_manager
-                        .fragment_mapping(Self::get_fragment_id(catalog_reader, *table_id)?)?;
+                    let vnode_mapping = worker_node_manager.fragment_mapping(
+                        Self::get_fragment_id(catalog_reader, *table_id)?,
+                        batch_parallelism,
+                    )?;
 
                     let worker_slot_to_id_map: HashMap<WorkerSlotId, u32> = vnode_mapping
                         .iter_unique()

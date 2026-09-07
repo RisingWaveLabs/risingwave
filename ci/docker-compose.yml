@@ -184,7 +184,7 @@ services:
       retries: 5
 
   pubsub-emulator:
-    image: gcr.io/google.com/cloudsdktool/google-cloud-cli:475.0.0-emulators
+    image: gcr.io/google.com/cloudsdktool/google-cloud-cli:583.0.0-emulators
     command: >
       gcloud beta emulators pubsub start --project=demo --host-port=0.0.0.0:8900
     ports:
@@ -235,13 +235,25 @@ services:
   source-cdc-test-env:
     image: public.ecr.aws/w1p7b4n3/rw-build-env:${BUILD_ENV_VERSION:?}
     depends_on:
-      - mysql
-      - sqlserver-server
-      - db
-      - mongodb
-      - mongodb-setup
+      mysql:
+        condition: service_started
+      sqlserver-server:
+        condition: service_started
+      db:
+        condition: service_started
+      mongodb:
+        condition: service_started
+      mongodb-setup:
+        condition: service_started
+      mongodb-auth-setup:
+        condition: service_completed_successfully
+      mongodb-tls-setup:
+        condition: service_completed_successfully
+      mongodb-mtls-setup:
+        condition: service_completed_successfully
     volumes:
       - ..:/risingwave
+      - mongodb-tls-certs:/mongodb-tls:ro
     stop_grace_period: 30s
 
   source-pulsar-test-env:
@@ -694,6 +706,155 @@ services:
     volumes:
       - ./mongodb/config-replica.js:/config-replica.js
 
+  mongodb-auth-key-generator:
+    image: mongo:8
+    user: root
+    command:
+      - /bin/sh
+      - -c
+      - |
+        set -eu
+        if [ ! -s /mongodb-auth/keyfile ]; then
+          openssl rand -base64 756 > /mongodb-auth/keyfile
+        fi
+        chown 999:999 /mongodb-auth/keyfile
+        chmod 400 /mongodb-auth/keyfile
+    volumes:
+      - mongodb-auth-key:/mongodb-auth
+    restart: "no"
+
+  mongodb-auth:
+    image: mongo:8
+    depends_on:
+      mongodb-auth-key-generator:
+        condition: service_completed_successfully
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: root
+      MONGO_INITDB_ROOT_PASSWORD: risingwave
+    command:
+      - mongod
+      - --replSet
+      - rs-auth
+      - --oplogSize
+      - "128"
+      - --bind_ip_all
+      - --auth
+      - --keyFile
+      - /mongodb-auth/keyfile
+    volumes:
+      - mongodb-auth-key:/mongodb-auth:ro
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - "mongosh --quiet 'mongodb://root:risingwave@localhost:27017/admin?directConnection=true' --eval 'db.runCommand({ ping: 1 }).ok' >/dev/null"
+      interval: 2s
+      timeout: 5s
+      retries: 60
+
+  mongodb-auth-setup:
+    image: mongo:8
+    depends_on:
+      mongodb-auth:
+        condition: service_healthy
+    entrypoint: ["/bin/bash", "/scripts/init-replica-set-and-user.sh"]
+    volumes:
+      - ./mongodb-auth:/scripts:ro
+    restart: "no"
+
+  mongodb-tls-cert-generator:
+    image: mongo:8
+    entrypoint: ["/bin/bash", "/scripts/generate-certs.sh"]
+    volumes:
+      - ./mongodb-tls:/scripts:ro
+      - mongodb-tls-certs:/mongodb-tls
+    restart: "no"
+
+  mongodb-tls:
+    image: mongo:8
+    depends_on:
+      mongodb-tls-cert-generator:
+        condition: service_completed_successfully
+    command:
+      - mongod
+      - --replSet
+      - rs-tls
+      - --oplogSize
+      - "128"
+      - --bind_ip_all
+      - --tlsMode
+      - requireTLS
+      - --tlsCertificateKeyFile
+      - /mongodb-tls/server.pem
+      - --tlsCAFile
+      - /mongodb-tls/ca.pem
+      - --tlsAllowConnectionsWithoutCertificates
+    volumes:
+      - mongodb-tls-certs:/mongodb-tls:ro
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - "mongosh --quiet --host localhost --tls --tlsCAFile /mongodb-tls/ca.pem --eval 'db.runCommand({ ping: 1 }).ok' >/dev/null"
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+  mongodb-tls-setup:
+    image: mongo:8
+    depends_on:
+      mongodb-tls:
+        condition: service_healthy
+    environment:
+      MONGODB_HOST: mongodb-tls
+      MONGODB_REPLICA_SET: rs-tls
+    entrypoint: ["/bin/bash", "/scripts/init-replica-set.sh"]
+    volumes:
+      - ./mongodb-tls:/scripts:ro
+      - mongodb-tls-certs:/mongodb-tls:ro
+    restart: "no"
+
+  mongodb-mtls:
+    image: mongo:8
+    depends_on:
+      mongodb-tls-cert-generator:
+        condition: service_completed_successfully
+    command:
+      - mongod
+      - --replSet
+      - rs-mtls
+      - --oplogSize
+      - "128"
+      - --bind_ip_all
+      - --tlsMode
+      - requireTLS
+      - --tlsCertificateKeyFile
+      - /mongodb-tls/server.pem
+      - --tlsCAFile
+      - /mongodb-tls/ca.pem
+    volumes:
+      - mongodb-tls-certs:/mongodb-tls:ro
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - "mongosh --quiet --host localhost --tls --tlsCAFile /mongodb-tls/ca.pem --tlsCertificateKeyFile /mongodb-tls/client.pem --eval 'db.runCommand({ ping: 1 }).ok' >/dev/null"
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+  mongodb-mtls-setup:
+    image: mongo:8
+    depends_on:
+      mongodb-mtls:
+        condition: service_healthy
+    environment:
+      MONGODB_HOST: mongodb-mtls
+      MONGODB_REPLICA_SET: rs-mtls
+      MONGODB_TLS_CERTIFICATE_KEY_FILE: /mongodb-tls/client.pem
+    entrypoint: ["/bin/bash", "/scripts/init-replica-set.sh"]
+    volumes:
+      - ./mongodb-tls:/scripts:ro
+      - mongodb-tls-certs:/mongodb-tls:ro
+    restart: "no"
+
   mqtt-server:
     image: eclipse-mosquitto
     command:
@@ -792,3 +953,7 @@ services:
       timeout: 10s
       retries: 10
       start_period: 10s
+
+volumes:
+  mongodb-auth-key:
+  mongodb-tls-certs:

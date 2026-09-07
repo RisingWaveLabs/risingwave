@@ -1,5 +1,7 @@
 # ALTER CONNECTION SET SCHEMA is covered in `e2e_test/source_inline/connection/ddl.slt`
 
+control substitution on
+
 statement ok
 SET RW_IMPLICIT_FLUSH TO true;
 
@@ -27,6 +29,42 @@ CREATE INDEX test_index2 ON test_table(v);
 
 statement ok
 CREATE MATERIALIZED VIEW test_mv AS SELECT u FROM test_table;
+
+statement error cannot alter schema
+ALTER MATERIALIZED VIEW test_table SET SCHEMA test_schema;
+
+statement error cannot alter schema
+ALTER TABLE test_mv SET SCHEMA test_schema;
+
+statement ok
+CREATE MATERIALIZED VIEW alter_internal_mv AS SELECT v FROM test_table;
+
+let internal_table_name
+SELECT name
+FROM rw_catalog.rw_internal_table_info
+WHERE job_name = 'alter_internal_mv'
+ORDER BY id
+LIMIT 1
+
+let internal_table_id
+SELECT id
+FROM rw_catalog.rw_internal_table_info
+WHERE name = '${internal_table_name}'
+
+# The internal table starts in public, so this also verifies rejection before the no-op return.
+statement error table not found
+ALTER TABLE ${internal_table_name} SET SCHEMA public;
+
+statement error table not found
+ALTER TABLE ${internal_table_name} SET SCHEMA test_schema;
+
+statement ok
+DROP MATERIALIZED VIEW alter_internal_mv;
+
+query I
+SELECT count(*) FROM rw_catalog.rw_internal_table_info WHERE id = ${internal_table_id};
+----
+0
 
 statement ok
 CREATE INDEX test_mv_index ON test_mv(u);

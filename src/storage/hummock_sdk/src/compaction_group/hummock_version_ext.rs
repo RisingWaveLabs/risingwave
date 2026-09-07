@@ -31,7 +31,7 @@ use tracing::warn;
 
 use super::group_split::split_sst_with_table_ids;
 use super::{StateTableId, group_split};
-use crate::change_log::{ChangeLogDeltaCommon, TableChangeLogCommon};
+use crate::change_log::{EpochNewChangeLogCommon, TableChangeLogCommon};
 use crate::compact_task::is_compaction_task_expired;
 use crate::compaction_group::StaticCompactionGroupId;
 use crate::key_range::KeyRangeCommon;
@@ -56,7 +56,7 @@ pub struct SstDeltaInfo {
 
 pub type BranchedSstInfo = HashMap<CompactionGroupId, Vec<HummockSstableId>>;
 
-impl<L> HummockVersionCommon<SstableInfo, L> {
+impl HummockVersionCommon<SstableInfo> {
     pub fn get_compaction_group_levels(&self, compaction_group_id: CompactionGroupId) -> &Levels {
         self.levels
             .get(&compaction_group_id)
@@ -72,7 +72,7 @@ impl<L> HummockVersionCommon<SstableInfo, L> {
             .unwrap_or_else(|| panic!("compaction group {} does not exist", compaction_group_id))
     }
 
-    // only scan the sst infos from levels in the specified compaction group (without table change log)
+    // Only scan SST infos from levels in the specified compaction group.
     pub fn get_sst_ids_by_group_id(
         &self,
         compaction_group_id: CompactionGroupId,
@@ -231,7 +231,7 @@ pub fn safe_epoch_read_table_watermarks_impl(
         .collect()
 }
 
-impl<L: Clone> HummockVersionCommon<SstableInfo, L> {
+impl HummockVersionCommon<SstableInfo> {
     pub fn count_new_ssts_in_group_split(
         &self,
         parent_group_id: CompactionGroupId,
@@ -395,7 +395,7 @@ impl<L: Clone> HummockVersionCommon<SstableInfo, L> {
 
     pub fn build_sst_delta_infos(
         &self,
-        version_delta: &HummockVersionDeltaCommon<SstableInfo, L>,
+        version_delta: &HummockVersionDeltaCommon<SstableInfo>,
     ) -> Vec<SstDeltaInfo> {
         let mut infos = vec![];
 
@@ -500,30 +500,9 @@ impl<L: Clone> HummockVersionCommon<SstableInfo, L> {
         infos
     }
 
-    /// Used by migration of table change log to meta store.
-    /// `Self::table_change_log` will be consumed by the migration process later.
-    pub fn apply_table_change_log_delta_backward_compatibility(
-        &mut self,
-        version_delta: &HummockVersionDeltaCommon<SstableInfo, L>,
-    ) {
-        #[expect(deprecated)]
-        for (table_id, change_log_delta) in &version_delta.change_log_delta {
-            let new_change_log = &change_log_delta.new_log;
-            match self.table_change_log.entry(*table_id) {
-                Entry::Occupied(entry) => {
-                    let change_log = entry.into_mut();
-                    change_log.add_change_log(new_change_log.clone());
-                }
-                Entry::Vacant(entry) => {
-                    entry.insert(TableChangeLogCommon::new(once(new_change_log.clone())));
-                }
-            };
-        }
-    }
-
     pub fn apply_version_delta(
         &mut self,
-        version_delta: &HummockVersionDeltaCommon<SstableInfo, L>,
+        version_delta: &HummockVersionDeltaCommon<SstableInfo>,
     ) -> HashMap<TableId, Option<StateTableInfo>> {
         assert_eq!(self.id, version_delta.prev_id);
 
@@ -766,10 +745,9 @@ impl<L: Clone> HummockVersionCommon<SstableInfo, L> {
 
     pub fn apply_change_log_delta<T: Clone>(
         table_change_log: &mut HashMap<TableId, TableChangeLogCommon<T>>,
-        change_log_delta: &HashMap<TableId, ChangeLogDeltaCommon<T>>,
+        change_log_delta: &HashMap<TableId, EpochNewChangeLogCommon<T>>,
     ) {
-        for (table_id, change_log_delta) in change_log_delta {
-            let new_change_log = &change_log_delta.new_log;
+        for (table_id, new_change_log) in change_log_delta {
             match table_change_log.entry(*table_id) {
                 Entry::Occupied(entry) => {
                     let change_log = entry.into_mut();
@@ -780,19 +758,12 @@ impl<L: Clone> HummockVersionCommon<SstableInfo, L> {
                 }
             };
         }
-
-        // truncate the remaining table change log
-        for (table_id, change_log_delta) in change_log_delta {
-            if let Some(change_log) = table_change_log.get_mut(table_id) {
-                change_log.truncate(change_log_delta.truncate_epoch);
-            }
-        }
     }
 
     /// Returns the log deltas required to truncate the entire change log for a table.
     pub fn collect_gc_change_log_delta<'a, T: Clone>(
         current_change_log_table_ids: impl Iterator<Item = &'a TableId>,
-        change_log_delta: &HashMap<TableId, ChangeLogDeltaCommon<T>>,
+        change_log_delta: &HashMap<TableId, EpochNewChangeLogCommon<T>>,
         removed_table_ids: &HashSet<TableId>,
         state_table_info_delta: &HashMap<TableId, StateTableInfoDelta>,
         changed_table_info: &HashMap<TableId, Option<StateTableInfo>>,
@@ -1157,7 +1128,7 @@ impl Levels {
     }
 }
 
-impl<T, L> HummockVersionCommon<T, L> {
+impl<T> HummockVersionCommon<T> {
     pub fn get_combined_levels(&self) -> impl Iterator<Item = &'_ LevelCommon<T>> + '_ {
         self.levels
             .values()

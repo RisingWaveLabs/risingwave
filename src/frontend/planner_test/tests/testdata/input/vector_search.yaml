@@ -266,3 +266,16 @@
     - logical_plan
     - optimized_logical_plan_for_stream
     - stream_plan
+- before:
+    - create_correlated_tables_with_column_value_index
+  id: correlated_lookup_join_over_shared_cte
+  sql: |
+    with cte as (select id, name, embedding from items where id > 0)
+    select e.event_id,
+           array(select row(name)
+                 from (select name from cte order by e.embedding <-> cte.embedding limit 3)) as related_info,
+           c2.name
+    from events e join cte c2 on c2.id = e.event_id;
+  expected_outputs:
+    - batch_plan
+    - stream_error

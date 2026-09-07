@@ -26,6 +26,25 @@ Before submitting your code changes, ensure you fully test them and perform nece
 
 To get your PR reviewed and merged sooner, you can find and `@` mention developers who recently worked on the same files. If you're not sure who to ask, feel free to reach out to any active developers to help find relevant reviewers. Don't hesitate to follow up politely if you haven't received a response, or ask for help in the RisingWave Community Slack channel. We welcome you to be proactive in finding reviewers for your PR!
 
+### CI approval for fork pull requests
+
+For security, Buildkite does not automatically run code from pull requests
+opened from forks. When your pull request is ready for CI, ask a maintainer to
+review the changes and comment the following command on the pull request:
+
+```text
+/approve-run-bk
+```
+
+Only a trusted maintainer can trigger the build. Comments from the pull request
+author or other outside contributors do not start Buildkite. After you push a
+new commit, ask a maintainer to approve Buildkite again so that CI runs against
+the new commit.
+
+Other checks may still run automatically. See the
+[Continuous Integration](./ci.md) guide for details about the Buildkite
+`pull-request` and `main-cron` pipelines.
+
 ### Pull Request title
 
 As described in [here](https://github.com/commitizen/conventional-commit-types/blob/master/index.json), a valid PR title should begin with one of the following prefixes:

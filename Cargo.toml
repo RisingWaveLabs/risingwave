@@ -79,7 +79,7 @@ exclude = [
 resolver = "2"
 
 [workspace.package]
-version = "3.1.0-alpha"
+version = "3.2.0-alpha"
 edition = "2024"
 homepage = "https://github.com/risingwavelabs/risingwave"
 keywords = ["sql", "database", "streaming"]
@@ -111,7 +111,7 @@ adbc_core = { version = "0.23" }
 adbc_snowflake = { version = "0.23", default-features = false }
 apache-avro = { git = "https://github.com/risingwavelabs/avro-rs", rev = "1f2723802d4fb77b97fa084f7bb81e3b60b9e03f" }
 arc-swap = "1"
-arrow-udf-runtime = "0.9.0"
+arrow-udf-runtime = "0.10.0"
 async-openai = { version = "0.41.0", features = ["embedding"] }
 auto_enums = { version = "0.8", features = ["futures03", "tokio1"] }
 await-tree = { version = "0.3.2-alpha.2", features = ["serde", "attributes"] }
@@ -159,7 +159,11 @@ clap = { version = "4", features = ["cargo", "derive", "env"] }
 criterion = { version = "0.8", features = ["async_futures"] }
 deltalake = { version = "0.32.0", features = ["s3", "gcs"] }
 faiss = { version = "0.12.2-alpha.0", features = ["static"] }
-foyer = { version = "0.21.2", features = ["serde", "tracing"] }
+foyer = { version = "0.22.3", default-features = false, features = [
+    "runtime-madsim-tokio",
+    "serde",
+    "tracing",
+] }
 futures-async-stream = "0.2.13"
 governor = { version = "0.10", default-features = false, features = ["std"] }
 hashbrown = { version = "0.17", features = ["default-hasher", "inline-more"] }
@@ -171,15 +175,18 @@ hashbrown0_16 = { package = "hashbrown", version = "0.16.1", features = [
     "nightly",
 ] }
 hytra = "0.1"
-# branch dev_rebase_main_20260303
-iceberg = { git = "https://github.com/risingwavelabs/iceberg-rust.git", rev = "08a18f4116382e7c9691d63a91f1b0a0342a40b1", features = [
-    "storage-s3",
-    "storage-gcs",
-    "storage-azblob",
-    "storage-azdls",
+# branch dev_rebase_main_20260807
+iceberg = { git = "https://github.com/risingwavelabs/iceberg-rust.git", rev = "cd6e1e6acbfb2e41c9af5b6faedaca5eb83f361c" }
+iceberg-catalog-glue = { git = "https://github.com/risingwavelabs/iceberg-rust.git", rev = "cd6e1e6acbfb2e41c9af5b6faedaca5eb83f361c" }
+iceberg-catalog-rest = { git = "https://github.com/risingwavelabs/iceberg-rust.git", rev = "cd6e1e6acbfb2e41c9af5b6faedaca5eb83f361c" }
+iceberg-storage-opendal = { git = "https://github.com/risingwavelabs/iceberg-rust.git", rev = "cd6e1e6acbfb2e41c9af5b6faedaca5eb83f361c", features = [
+    "opendal-azblob",
+    "opendal-azdls",
+    "opendal-fs",
+    "opendal-gcs",
+    "opendal-memory",
+    "opendal-s3",
 ] }
-iceberg-catalog-glue = { git = "https://github.com/risingwavelabs/iceberg-rust.git", rev = "08a18f4116382e7c9691d63a91f1b0a0342a40b1" }
-iceberg-catalog-rest = { git = "https://github.com/risingwavelabs/iceberg-rust.git", rev = "08a18f4116382e7c9691d63a91f1b0a0342a40b1" }
 indexmap = { version = "2.12.0", features = ["serde"] }
 itertools = "0.14.0"
 jni = { version = "0.21.1", features = ["invocation"] }
@@ -193,7 +200,8 @@ mysql_async = { version = "0.36", features = [
     "native-tls-tls",
     "rust_decimal",
 ] }
-opendal = "0.55"
+opendal = "0.58.1"
+opendal-http-transport-reqwest = "0.58.1"
 openssl = "0.10.80"
 opentelemetry = "0.31"
 opentelemetry-otlp = { version = "0.31", features = ["grpc-tonic"] }
@@ -206,9 +214,12 @@ parking_lot = { version = "0.12", features = [
     "arc_lock",
     "deadlock_detection",
 ] }
-parquet = { version = "58", features = ["async"] }
-parquet-variant = "=58.3.0"
-parquet-variant-json = "=58.3.0"
+# `variant_experimental` tags Parquet `VARIANT` columns with the Arrow extension; declared here
+# rather than relying on feature unification from the iceberg crate.
+parquet = { version = "58", features = ["async", "variant_experimental"] }
+parquet-variant = "=58.4.0"
+parquet-variant-compute = "=58.4.0"
+parquet-variant-json = "=58.4.0"
 pin-project-lite = "0.2"
 prost = { version = "=0.14.3" }
 prost-build = { version = "=0.14.3" }

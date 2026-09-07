@@ -8,6 +8,16 @@ statement ok
 insert into t select x, x*2 from generate_series(1, 10000) t(x);
 
 statement ok
+create materialized view m as select * from t;
+
+statement ok
+create user index_reader;
+
+# The existing privilege is copied to the index's state tables when the index finishes.
+statement ok
+grant select on materialized view m to index_reader;
+
+statement ok
 set backfill_rate_limit=1000;
 
 statement ok
@@ -17,10 +27,15 @@ statement ok
 set streaming_parallelism to 2;
 
 statement ok
-CREATE INDEX idx1 ON t(v1);
+CREATE INDEX idx1 ON m(v1);
 
 statement count 1
 show jobs;
+
+# Regranting while the index is still creating also propagates the privilege to its state
+# tables. Index finalization must tolerate those preexisting privilege rows (#26479).
+statement ok
+grant select on all materialized views in schema public to index_reader;
 
 onlyif can-use-recover
 statement ok
@@ -32,11 +47,11 @@ show jobs;
 
 # Verify index NOT work during backfill
 query T
-explain select * from t where v1 = 10000;
+explain select * from m where v1 = 10000;
 ----
 BatchExchange { order: [], dist: Single }
-└─BatchFilter { predicate: (t.v1 = 10000:Int32) }
-  └─BatchScan { table: t, columns: [v1, v2] }
+└─BatchFilter { predicate: (m.v1 = 10000:Int32) }
+  └─BatchScan { table: m, columns: [v1, v2] }
 
 statement ok
 wait;
@@ -45,7 +60,7 @@ statement count 0
 show jobs;
 
 statement ok
-CREATE INDEX idx2 ON t(v2);
+CREATE INDEX idx2 ON m(v2);
 
 statement count 1
 show jobs;
@@ -58,7 +73,7 @@ show jobs;
 
 # Verify index works after completion
 query T
-explain select * from t where v1 = 10000;
+explain select * from m where v1 = 10000;
 ----
 BatchExchange { order: [], dist: Single }
 └─BatchScan { table: idx1, columns: [v1, v2], scan_ranges: [v1 = Int32(10000)] }
@@ -67,7 +82,13 @@ statement ok
 drop index idx1;
 
 statement ok
-drop table t cascade;
+drop materialized view m;
+
+statement ok
+drop table t;
+
+statement ok
+drop user index_reader;
 
 statement ok
 set background_ddl=false;

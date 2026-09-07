@@ -12,7 +12,7 @@ repository = { workspace = true }
 ignored = ["chrono-tz", "futures-async-stream"]
 
 [features]
-udf = ["arrow-udf-runtime", "tonic", "ginepro", "zstd"]
+udf = ["arrow-udf-runtime", "tonic", "ginepro", "zstd", "url"]
 
 [dependencies]
 aho-corasick = "1"
@@ -67,8 +67,9 @@ thiserror = { workspace = true }
 thiserror-ext = { workspace = true }
 tokio = { workspace = true }
 # For arrow-udf-runtime/remote
-tonic = { workspace = true, optional = true }
+tonic = { workspace = true, optional = true, features = ["tls-native-roots"] }
 tracing = "0.1"
+url = { version = "2", optional = true }
 uuid = { version = "1", features = ["v4"] }
 zstd = { version = "0.13", default-features = false, optional = true }
 

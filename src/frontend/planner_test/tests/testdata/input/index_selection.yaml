@@ -60,6 +60,22 @@
   expected_outputs:
   - batch_plan
 - sql: |
+    create table t1 (a int primary key, b numeric, c bigint);
+    select * from t1 where a = some('{1}')
+  expected_outputs:
+  - batch_plan
+- sql: |
+    create table t1 (a int primary key, b numeric, c bigint);
+    select * from t1 where a = some(array[1::bigint])
+  expected_outputs:
+  - batch_plan
+- sql: |
+    create table t1 (a int, b numeric, c bigint);
+    create index idx1 on t1(a, b) include(c);
+    select * from t1 where a = some('{1,2,3}')
+  expected_outputs:
+  - batch_plan
+- sql: |
     create table t1 (a int, b numeric, c bigint);
     create index idx1 on t1(a, b) include(c);
     select * from t1 where a between 1 and 8

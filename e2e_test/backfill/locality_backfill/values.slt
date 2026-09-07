@@ -2,6 +2,9 @@ statement ok
 set enable_locality_backfill=true;
 
 statement ok
+set locality_backfill_mode=always;
+
+statement ok
 CREATE MATERIALIZED VIEW mv as with v as (select 1 as a, 2 as b, 3 as c) select count(*) from v group by a;
 
 statement ok

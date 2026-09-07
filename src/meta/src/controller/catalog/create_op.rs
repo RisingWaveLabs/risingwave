@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use risingwave_common::cast::datetime_to_timestamp_millis;
-use risingwave_common::catalog::{ICEBERG_SINK_PREFIX, ICEBERG_SOURCE_PREFIX};
 use risingwave_common::system_param::{OverrideValidate, Validate};
 use risingwave_common::util::epoch::Epoch;
 use risingwave_pb::common::PbObjectType;
@@ -27,15 +26,56 @@ impl CatalogController {
         txn: &DatabaseTransaction,
         obj_type: ObjectType,
         owner_id: UserId,
-        database_id: Option<DatabaseId>,
-        schema_id: Option<SchemaId>,
+        belong_to_oid: Option<ObjectId>,
     ) -> MetaResult<object::Model> {
+        let (database_id, schema_id) = match (obj_type, belong_to_oid) {
+            (ObjectType::Database, None) => (None, None),
+            (ObjectType::Database, Some(_)) => {
+                return Err(MetaError::invalid_parameter(
+                    "database object must not have a parent",
+                ));
+            }
+            (ObjectType::Schema, Some(database_oid)) => {
+                let database = Object::find_by_id(database_oid)
+                    .one(txn)
+                    .await?
+                    .ok_or_else(|| MetaError::catalog_id_not_found("database", database_oid))?;
+                if database.obj_type != ObjectType::Database {
+                    return Err(MetaError::invalid_parameter(
+                        "schema object must belong to a database",
+                    ));
+                }
+                (Some(database_oid.as_database_id()), None)
+            }
+            (ObjectType::Schema, None) => {
+                return Err(MetaError::invalid_parameter(
+                    "schema object must belong to a database",
+                ));
+            }
+            (_, Some(parent_oid)) => {
+                let parent = Object::find_by_id(parent_oid)
+                    .one(txn)
+                    .await?
+                    .ok_or_else(|| MetaError::catalog_id_not_found("parent object", parent_oid))?;
+                if parent.obj_type == ObjectType::Schema {
+                    (parent.database_id, Some(parent.oid.as_schema_id()))
+                } else {
+                    (parent.database_id, parent.schema_id)
+                }
+            }
+            (_, None) => {
+                return Err(MetaError::invalid_parameter(
+                    "non-database object must have a parent",
+                ));
+            }
+        };
         let active_db = object::ActiveModel {
             oid: Default::default(),
             obj_type: Set(obj_type),
             owner_id: Set(owner_id),
             schema_id: Set(schema_id),
             database_id: Set(database_id),
+            belong_to_oid: Set(belong_to_oid),
             initialized_at: Default::default(),
             created_at: Default::default(),
             initialized_at_cluster_version: Set(Some(current_cluster_version())),
@@ -62,21 +102,15 @@ impl CatalogController {
         ensure_user_id(owner_id, &txn).await?;
         check_database_name_duplicate(&db.name, &txn).await?;
 
-        let db_obj = Self::create_object(&txn, ObjectType::Database, owner_id, None, None).await?;
+        let db_obj = Self::create_object(&txn, ObjectType::Database, owner_id, None).await?;
         let mut db: database::ActiveModel = db.into();
         db.database_id = Set(db_obj.oid.as_database_id());
         let db = db.insert(&txn).await?;
 
         let mut schemas = vec![];
         for schema_name in iter::once(DEFAULT_SCHEMA_NAME).chain(SYSTEM_SCHEMAS) {
-            let schema_obj = Self::create_object(
-                &txn,
-                ObjectType::Schema,
-                owner_id,
-                Some(db_obj.oid.as_database_id()),
-                None,
-            )
-            .await?;
+            let schema_obj =
+                Self::create_object(&txn, ObjectType::Schema, owner_id, Some(db_obj.oid)).await?;
             let schema = schema::ActiveModel {
                 schema_id: Set(schema_obj.oid.as_schema_id()),
                 name: Set(schema_name.into()),
@@ -113,8 +147,7 @@ impl CatalogController {
             &txn,
             ObjectType::Schema,
             owner_id,
-            Some(schema.database_id),
-            None,
+            Some(schema.database_id.as_object_id()),
         )
         .await?;
         let mut schema: schema::ActiveModel = schema.into();
@@ -157,8 +190,7 @@ impl CatalogController {
             &txn,
             ObjectType::Subscription,
             pb_subscription.owner as _,
-            Some(pb_subscription.database_id),
-            Some(pb_subscription.schema_id),
+            Some(pb_subscription.schema_id.as_object_id()),
         )
         .await?;
         pb_subscription.id = obj.oid.as_subscription_id();
@@ -180,6 +212,7 @@ impl CatalogController {
     pub async fn create_source(
         &self,
         mut pb_source: PbSource,
+        iceberg_table_id: Option<TableId>,
     ) -> MetaResult<(SourceId, NotificationVersion)> {
         let mut inner = self.inner.write().await;
         let owner_id = pb_source.owner as _;
@@ -203,8 +236,9 @@ impl CatalogController {
             &txn,
             ObjectType::Source,
             owner_id,
-            Some(pb_source.database_id),
-            Some(pb_source.schema_id),
+            iceberg_table_id
+                .map(TableId::as_object_id)
+                .or(Some(pb_source.schema_id.as_object_id())),
         )
         .await?;
         let source_id = source_obj.oid.as_source_id();
@@ -248,44 +282,29 @@ impl CatalogController {
         let mut job_notifications = vec![];
         let mut updated_user_info = vec![];
         // check if it belongs to iceberg table
-        if pb_source.name.starts_with(ICEBERG_SOURCE_PREFIX) {
+        if let Some(table_id) = iceberg_table_id {
             // 1. finish iceberg table job.
-            let table_name = pb_source.name.trim_start_matches(ICEBERG_SOURCE_PREFIX);
-            let table_id = Table::find()
-                .select_only()
-                .column(table::Column::TableId)
-                .join(JoinType::InnerJoin, table::Relation::Object1.def())
-                .filter(
-                    object::Column::DatabaseId
-                        .eq(pb_source.database_id)
-                        .and(object::Column::SchemaId.eq(pb_source.schema_id))
-                        .and(table::Column::Name.eq(table_name)),
-                )
-                .into_tuple::<TableId>()
-                .one(&txn)
-                .await?
-                .ok_or(MetaError::from(anyhow!("table {} not found", table_name)))?;
             let table_notifications = self
                 .finish_streaming_job_inner(&txn, table_id.as_job_id())
                 .await?;
             job_notifications.push((table_id.as_job_id(), table_notifications));
 
             // 2. finish iceberg sink job.
-            let sink_name = format!("{}{}", ICEBERG_SINK_PREFIX, table_name);
             let sink_id = Sink::find()
                 .select_only()
                 .column(sink::Column::SinkId)
                 .join(JoinType::InnerJoin, sink::Relation::Object.def())
                 .filter(
-                    object::Column::DatabaseId
-                        .eq(pb_source.database_id)
-                        .and(object::Column::SchemaId.eq(pb_source.schema_id))
-                        .and(sink::Column::Name.eq(&sink_name)),
+                    object::Column::BelongToOid
+                        .eq(table_id)
+                        .and(object::Column::ObjType.eq(ObjectType::Sink)),
                 )
                 .into_tuple::<SinkId>()
                 .one(&txn)
                 .await?
-                .ok_or(MetaError::from(anyhow!("sink {} not found", sink_name)))?;
+                .ok_or_else(|| {
+                    MetaError::catalog_id_not_found("iceberg sink for table", table_id)
+                })?;
             let sink_job_id = sink_id.as_job_id();
             let sink_notifications = self.finish_streaming_job_inner(&txn, sink_job_id).await?;
             job_notifications.push((sink_job_id, sink_notifications));
@@ -356,8 +375,7 @@ impl CatalogController {
             &txn,
             ObjectType::Function,
             owner_id,
-            Some(pb_function.database_id),
-            Some(pb_function.schema_id),
+            Some(pb_function.schema_id.as_object_id()),
         )
         .await?;
         pb_function.id = function_obj.oid.as_function_id();
@@ -414,8 +432,7 @@ impl CatalogController {
             &txn,
             ObjectType::Connection,
             owner_id,
-            Some(pb_connection.database_id),
-            Some(pb_connection.schema_id),
+            Some(pb_connection.schema_id.as_object_id()),
         )
         .await?;
         pb_connection.id = conn_obj.oid.as_connection_id();
@@ -499,8 +516,7 @@ impl CatalogController {
             &txn,
             ObjectType::Secret,
             owner_id,
-            Some(pb_secret.database_id),
-            Some(pb_secret.schema_id),
+            Some(pb_secret.schema_id.as_object_id()),
         )
         .await?;
         pb_secret.id = secret_obj.oid.as_secret_id();
@@ -557,8 +573,7 @@ impl CatalogController {
             &txn,
             ObjectType::View,
             owner_id,
-            Some(pb_view.database_id),
-            Some(pb_view.schema_id),
+            Some(pb_view.schema_id.as_object_id()),
         )
         .await?;
         pb_view.id = view_obj.oid.as_view_id();

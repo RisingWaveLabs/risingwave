@@ -22,7 +22,7 @@ use risingwave_common::catalog::{
 use risingwave_common::types::DataType;
 use risingwave_connector::WithOptionsSecResolved;
 use risingwave_connector::source::iceberg::{
-    IcebergFileScanTask, IcebergProperties, IcebergScanOpts, IcebergSplit,
+    IcebergFileScanMetrics, IcebergFileScanTask, IcebergProperties, IcebergScanOpts, IcebergSplit,
     scan_task_to_chunk_with_deletes,
 };
 use risingwave_connector::source::{ConnectorProperties, SplitImpl, SplitMetaData};
@@ -39,7 +39,7 @@ pub struct IcebergScanExecutor {
     chunk_size: usize,
     schema: Schema,
     identity: String,
-    metrics: Option<BatchMetrics>,
+    file_scan_metrics: Option<IcebergFileScanMetrics>,
     need_seq_num: bool,
     need_file_path_and_pos: bool,
     limit: Option<u64>,
@@ -71,13 +71,19 @@ impl IcebergScanExecutor {
         need_file_path_and_pos: bool,
         limit: Option<u64>,
     ) -> Self {
+        let file_scan_metrics = metrics.as_ref().map(|metrics| {
+            IcebergFileScanMetrics::new(
+                &metrics.iceberg_scan_metrics(),
+                iceberg_config.table.table_name(),
+            )
+        });
         Self {
             iceberg_config,
             chunk_size,
             schema,
             file_scan_tasks: Some(file_scan_tasks),
             identity,
-            metrics,
+            file_scan_metrics,
             need_seq_num,
             need_file_path_and_pos,
             limit,
@@ -118,7 +124,7 @@ impl IcebergScanExecutor {
                     handle_delete_files: table.metadata().format_version()
                         >= iceberg::spec::FormatVersion::V3,
                 },
-                self.metrics.as_ref().map(|m| m.iceberg_scan_metrics()),
+                self.file_scan_metrics.clone(),
             ) {
                 let chunk = chunk?;
                 assert_eq!(chunk.data_types(), data_types);

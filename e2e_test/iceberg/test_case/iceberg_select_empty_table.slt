@@ -52,6 +52,29 @@ select count(*) from iceberg_t1_source;
 ----
 0
 
+# Regression test for issue #25968: creating a logical view over an Iceberg source must not depend on
+# DataFusion being selected as the batch execution engine.
+statement ok
+set enable_datafusion_engine = true;
+
+# Insert a row through the sink and verify that the view can read it after the checkpoint commits.
+statement ok
+INSERT INTO s1 VALUES (1, 'hello', 'world');
+
+statement ok
+flush;
+
+statement ok
+create view iceberg_t1_view as select * from iceberg_t1_source;
+
+query I
+select count(*) from iceberg_t1_view;
+----
+1
+
+statement ok
+drop view iceberg_t1_view;
+
 statement ok
 DROP SINK sink1;
 

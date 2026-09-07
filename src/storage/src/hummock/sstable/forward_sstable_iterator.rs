@@ -18,6 +18,7 @@ use std::sync::Arc;
 use await_tree::{InstrumentAwait, SpanExt};
 use risingwave_hummock_sdk::key::FullKey;
 use risingwave_hummock_sdk::sstable_info::SstableInfo;
+use sync_point::sync_point;
 use thiserror_ext::AsReport;
 
 use super::super::{HummockResult, HummockValue};
@@ -382,6 +383,7 @@ impl HummockIterator for SstableIterator {
         self.seek_idx(block_idx, Some(key)).await?;
         if !self.is_valid() {
             // seek to next block
+            sync_point!("SSTABLE_ITERATOR::SEEK::BEFORE_NEXT_BLOCK");
             self.seek_idx(block_idx + 1, None).await?;
         }
         Ok(())

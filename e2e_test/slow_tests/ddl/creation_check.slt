@@ -20,8 +20,16 @@ system ok
 
 sleep 1s
 
-statement error table with name t2 exists but under creation
+statement error table named t2 already exists and is still being created
 create table t2(v1 int);
+
+system ok
+./risedev psql -c 'drop materialized view m1;' &
+
+query I retry 10 backoff 1s
+select count(*) from rw_catalog.rw_materialized_views where name = 'm1';
+----
+0
 
 statement ok
 recover

@@ -199,7 +199,6 @@ def do_sink(config, file_num, item_num_per_file, prefix):
         nested_struct
         from {_table()} WITH (
         connector = 's3',
-        match_pattern = '*.parquet',
         s3.region_name = 'custom',
         s3.bucket_name = 'hummock001',
         s3.credentials.access = 'hummockadmin',
@@ -293,7 +292,6 @@ def do_sink(config, file_num, item_num_per_file, prefix):
         nested_struct
         from {_table()} WITH (
         connector = 'snowflake',
-        match_pattern = '*.parquet',
         snowflake.aws_region = 'custom',
         snowflake.s3_bucket = 'hummock001',
         snowflake.aws_access_key_id = 'hummockadmin',
@@ -301,8 +299,7 @@ def do_sink(config, file_num, item_num_per_file, prefix):
         s3.endpoint_url = 'http://hummock001.127.0.0.1:9301',
         s3.path = 'test_json_sink/',
         type = 'append-only',
-        force_append_only='true',
-        refresh.interval.sec = 1,
+        force_append_only='true'
     ) FORMAT PLAIN ENCODE JSON(force_append_only='true');''')
 
     print('Sink into s3 in json encode...')

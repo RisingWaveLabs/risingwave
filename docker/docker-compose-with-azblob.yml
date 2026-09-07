@@ -35,6 +35,7 @@ services:
                    --meta-addr http://0.0.0.0:5690 \
                    --frontend-total-memory-bytes=4294967296\" \
                  --compactor-opts=\" \
+                   --config-path /risingwave.toml \
                    --listen-addr 0.0.0.0:6660 \
                    --prometheus-listener-addr 0.0.0.0:1250 \
                    --advertise-addr 0.0.0.0:6660 \

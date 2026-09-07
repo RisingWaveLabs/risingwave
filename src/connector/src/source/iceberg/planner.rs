@@ -14,7 +14,6 @@
 
 use std::cmp::{Ordering, Reverse};
 use std::collections::BinaryHeap;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
@@ -22,11 +21,12 @@ use futures::StreamExt;
 use futures::stream::BoxStream;
 use futures_async_stream::try_stream;
 use iceberg::expr::BoundPredicate;
-use iceberg::scan::FileScanTask;
+use iceberg::scan::{FileScanTask, FileScanTaskDeleteFile};
 use iceberg::spec::{DataContentType, DataFileFormat, SchemaRef};
 use iceberg::table::Table;
 use risingwave_common::bail;
 use risingwave_common::catalog::ColumnCatalog;
+use risingwave_common::metrics::{LabelGuardedHistogram, LabelGuardedIntCounter};
 use risingwave_common::types::{JsonbRef, JsonbVal, ScalarRef};
 use risingwave_pb::batch_plan::iceberg_scan_node::IcebergScanType;
 use serde::{Deserialize, Serialize};
@@ -92,11 +92,48 @@ pub struct IcebergScanMetricsLabels {
     source_id: String,
     source_name: String,
     table_name: String,
+    snapshots_discovered_total: LabelGuardedIntCounter,
+    list_duration_seconds: LabelGuardedHistogram,
+    delete_files_per_data_file: LabelGuardedHistogram,
+    data_files_discovered_total: LabelGuardedIntCounter,
+    equality_delete_files_discovered_total: LabelGuardedIntCounter,
+    position_delete_files_discovered_total: LabelGuardedIntCounter,
+    list_errors_total: LabelGuardedIntCounter,
+    fetch_errors_total: LabelGuardedIntCounter,
 }
 
 impl IcebergScanMetricsLabels {
     pub fn new(source_id: String, source_name: String, table_name: String) -> Self {
+        let labels = [
+            source_id.as_str(),
+            source_name.as_str(),
+            table_name.as_str(),
+        ];
         Self {
+            snapshots_discovered_total: GLOBAL_ICEBERG_SCAN_METRICS
+                .iceberg_source_snapshots_discovered_total
+                .with_guarded_label_values(&labels),
+            list_duration_seconds: GLOBAL_ICEBERG_SCAN_METRICS
+                .iceberg_source_list_duration_seconds
+                .with_guarded_label_values(&labels),
+            delete_files_per_data_file: GLOBAL_ICEBERG_SCAN_METRICS
+                .iceberg_source_delete_files_per_data_file
+                .with_guarded_label_values(&labels),
+            data_files_discovered_total: GLOBAL_ICEBERG_SCAN_METRICS
+                .iceberg_source_files_discovered_total
+                .with_guarded_label_values(&[labels[0], labels[1], labels[2], "data"]),
+            equality_delete_files_discovered_total: GLOBAL_ICEBERG_SCAN_METRICS
+                .iceberg_source_files_discovered_total
+                .with_guarded_label_values(&[labels[0], labels[1], labels[2], "eq_delete"]),
+            position_delete_files_discovered_total: GLOBAL_ICEBERG_SCAN_METRICS
+                .iceberg_source_files_discovered_total
+                .with_guarded_label_values(&[labels[0], labels[1], labels[2], "pos_delete"]),
+            list_errors_total: GLOBAL_ICEBERG_SCAN_METRICS
+                .iceberg_source_scan_errors_total
+                .with_guarded_label_values(&[labels[0], labels[1], labels[2], "list_error"]),
+            fetch_errors_total: GLOBAL_ICEBERG_SCAN_METRICS
+                .iceberg_source_scan_errors_total
+                .with_guarded_label_values(&[labels[0], labels[1], labels[2], "fetch_error"]),
             source_id,
             source_name,
             table_name,
@@ -104,26 +141,15 @@ impl IcebergScanMetricsLabels {
     }
 
     pub fn record_scan_error(&self, error_kind: &str) {
-        GLOBAL_ICEBERG_SCAN_METRICS
-            .iceberg_source_scan_errors_total
-            .with_guarded_label_values(&[
-                self.source_id.as_str(),
-                self.source_name.as_str(),
-                self.table_name.as_str(),
-                error_kind,
-            ])
-            .inc();
+        match error_kind {
+            "list_error" => self.list_errors_total.inc(),
+            "fetch_error" => self.fetch_errors_total.inc(),
+            _ => tracing::warn!(error_kind, "unknown Iceberg scan error metric label"),
+        }
     }
 
     pub fn record_snapshot_discovered(&self) {
-        GLOBAL_ICEBERG_SCAN_METRICS
-            .iceberg_source_snapshots_discovered_total
-            .with_guarded_label_values(&[
-                self.source_id.as_str(),
-                self.source_name.as_str(),
-                self.table_name.as_str(),
-            ])
-            .inc();
+        self.snapshots_discovered_total.inc();
     }
 
     pub fn record_snapshot_lag(&self, lag_secs: i64) {
@@ -142,45 +168,45 @@ impl IcebergScanMetricsLabels {
     }
 
     fn record_list_duration(&self, duration: Duration) {
-        GLOBAL_ICEBERG_SCAN_METRICS
-            .iceberg_source_list_duration_seconds
-            .with_guarded_label_values(&[
-                self.source_id.as_str(),
-                self.source_name.as_str(),
-                self.table_name.as_str(),
-            ])
-            .observe(duration.as_secs_f64());
+        self.list_duration_seconds.observe(duration.as_secs_f64());
     }
 
     fn record_delete_files_per_data_file(&self, delete_file_count: usize) {
-        GLOBAL_ICEBERG_SCAN_METRICS
-            .iceberg_source_delete_files_per_data_file
-            .with_guarded_label_values(&[
-                self.source_id.as_str(),
-                self.source_name.as_str(),
-                self.table_name.as_str(),
-            ])
+        self.delete_files_per_data_file
             .observe(delete_file_count as f64);
     }
 
     fn record_file_counts(&self, stats: &IcebergScanPlanStats) {
-        for (file_type, count) in [
-            ("data", stats.data_file_count),
-            ("eq_delete", stats.eq_delete_count),
-            ("pos_delete", stats.pos_delete_count),
+        for (metric, count) in [
+            (&self.data_files_discovered_total, stats.data_file_count),
+            (
+                &self.equality_delete_files_discovered_total,
+                stats.eq_delete_count,
+            ),
+            (
+                &self.position_delete_files_discovered_total,
+                stats.pos_delete_count,
+            ),
         ] {
             if count > 0 {
-                GLOBAL_ICEBERG_SCAN_METRICS
-                    .iceberg_source_files_discovered_total
-                    .with_guarded_label_values(&[
-                        self.source_id.as_str(),
-                        self.source_name.as_str(),
-                        self.table_name.as_str(),
-                        file_type,
-                    ])
-                    .inc_by(count);
+                metric.inc_by(count);
             }
         }
+    }
+
+    pub fn record_fetch_error(&self) {
+        self.fetch_errors_total.inc();
+    }
+
+    pub fn set_inflight_file_count(&self, count: usize) {
+        GLOBAL_ICEBERG_SCAN_METRICS
+            .iceberg_source_inflight_file_count
+            .with_guarded_label_values(&[
+                self.source_id.as_str(),
+                self.source_name.as_str(),
+                self.table_name.as_str(),
+            ])
+            .set(count as i64);
     }
 }
 
@@ -195,7 +221,7 @@ impl IcebergScanPlanStats {
     fn record_task(&mut self, scan_task: &FileScanTask) {
         self.data_file_count += 1;
         for delete_task in &scan_task.deletes {
-            match delete_task.data_file_content {
+            match delete_task.file_type {
                 DataContentType::EqualityDeletes => self.eq_delete_count += 1,
                 DataContentType::PositionDeletes => self.pos_delete_count += 1,
                 _ => {}
@@ -360,6 +386,10 @@ pub struct PersistedFileScanTask {
     pub start: u64,
     pub length: u64,
     pub record_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_row_id: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_sequence_number: Option<i64>,
     pub data_file_path: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub referenced_data_file: Option<String>,
@@ -370,8 +400,12 @@ pub struct PersistedFileScanTask {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub predicate: Option<BoundPredicate>,
     pub deletes: Vec<PersistedFileScanTask>,
+    #[serde(default)]
     pub sequence_number: i64,
+    #[serde(default)]
     pub equality_ids: Option<Vec<i32>>,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub partition_spec_id: i32,
     pub file_size_in_bytes: u64,
     #[serde(default = "default_case_sensitive")]
     pub case_sensitive: bool,
@@ -379,6 +413,10 @@ pub struct PersistedFileScanTask {
 
 fn default_case_sensitive() -> bool {
     true
+}
+
+fn is_zero(value: &i32) -> bool {
+    *value == 0
 }
 
 impl PersistedFileScanTask {
@@ -400,16 +438,19 @@ impl PersistedFileScanTask {
             start,
             length,
             record_count,
+            first_row_id,
+            data_sequence_number,
             data_file_path,
-            referenced_data_file,
-            data_file_content,
+            referenced_data_file: _,
+            data_file_content: _,
             data_file_format,
             schema,
             project_field_ids,
             predicate,
             deletes,
             sequence_number,
-            equality_ids,
+            equality_ids: _,
+            partition_spec_id: _,
             file_size_in_bytes,
             case_sensitive,
         }: Self,
@@ -418,24 +459,26 @@ impl PersistedFileScanTask {
             start,
             length,
             record_count,
+            first_row_id,
+            data_sequence_number,
             data_file_path,
-            referenced_data_file,
-            data_file_content,
             data_file_format,
             schema,
             project_field_ids,
             predicate,
             deletes: deletes
                 .into_iter()
-                .map(|task| Arc::new(PersistedFileScanTask::to_task(task)))
+                .map(PersistedFileScanTask::into_delete_task)
                 .collect(),
             sequence_number,
-            equality_ids,
             file_size_in_bytes,
             partition: None,
             partition_spec: None,
             name_mapping: None,
+            unified_partition_type: None,
             case_sensitive,
+            key_metadata: None,
+            file_sequence_number: None,
         }
     }
 
@@ -444,22 +487,56 @@ impl PersistedFileScanTask {
             start,
             length,
             record_count,
+            first_row_id,
+            data_sequence_number,
             data_file_path,
-            referenced_data_file,
-            data_file_content,
             data_file_format,
             schema,
             project_field_ids,
             predicate,
             deletes,
             sequence_number,
-            equality_ids,
+            file_sequence_number: _,
             file_size_in_bytes,
             case_sensitive,
             ..
         }: FileScanTask,
     ) -> Self {
+        let persisted_deletes = deletes
+            .into_iter()
+            .map(|task| {
+                PersistedFileScanTask::from_delete_task(
+                    task,
+                    schema.clone(),
+                    project_field_ids.clone(),
+                    case_sensitive,
+                )
+            })
+            .collect();
         Self {
+            start,
+            length,
+            record_count,
+            first_row_id,
+            data_sequence_number,
+            data_file_path,
+            referenced_data_file: None,
+            data_file_content: DataContentType::Data,
+            data_file_format,
+            schema,
+            project_field_ids,
+            predicate,
+            deletes: persisted_deletes,
+            sequence_number,
+            equality_ids: None,
+            partition_spec_id: 0,
+            file_size_in_bytes,
+            case_sensitive,
+        }
+    }
+
+    fn into_delete_task(self) -> FileScanTaskDeleteFile {
+        let Self {
             start,
             length,
             record_count,
@@ -467,42 +544,70 @@ impl PersistedFileScanTask {
             referenced_data_file,
             data_file_content,
             data_file_format,
-            schema,
-            project_field_ids,
-            predicate,
-            deletes: deletes
-                .into_iter()
-                .map(PersistedFileScanTask::from_task_ref)
-                .collect(),
-            sequence_number,
             equality_ids,
+            sequence_number,
+            partition_spec_id,
             file_size_in_bytes,
-            case_sensitive,
+            ..
+        } = self;
+        let (content_offset, content_size_in_bytes) = if data_file_format == DataFileFormat::Puffin
+        {
+            (i64::try_from(start).ok(), i64::try_from(length).ok())
+        } else {
+            (None, None)
+        };
+
+        FileScanTaskDeleteFile {
+            file_path: data_file_path,
+            file_size_in_bytes,
+            file_type: data_file_content,
+            partition_spec_id,
+            equality_ids,
+            file_format: data_file_format,
+            referenced_data_file,
+            content_offset,
+            content_size_in_bytes,
+            record_count,
+            sequence_number,
+            // Persisted split state deliberately excludes plaintext encryption key material.
+            key_metadata: None,
         }
     }
 
-    fn from_task_ref(task: Arc<FileScanTask>) -> Self {
+    fn from_delete_task(
+        task: FileScanTaskDeleteFile,
+        schema: SchemaRef,
+        project_field_ids: Vec<i32>,
+        case_sensitive: bool,
+    ) -> Self {
+        let (start, length) = if task.file_format == DataFileFormat::Puffin {
+            (
+                task.content_offset.unwrap_or_default().max(0) as u64,
+                task.content_size_in_bytes.unwrap_or_default().max(0) as u64,
+            )
+        } else {
+            (0, task.file_size_in_bytes)
+        };
+
         Self {
-            start: task.start,
-            length: task.length,
+            start,
+            length,
             record_count: task.record_count,
-            data_file_path: task.data_file_path.clone(),
-            referenced_data_file: task.referenced_data_file.clone(),
-            data_file_content: task.data_file_content,
-            data_file_format: task.data_file_format,
-            schema: task.schema.clone(),
-            project_field_ids: task.project_field_ids.clone(),
-            predicate: task.predicate.clone(),
-            deletes: task
-                .deletes
-                .iter()
-                .cloned()
-                .map(PersistedFileScanTask::from_task_ref)
-                .collect(),
+            first_row_id: None,
+            data_sequence_number: None,
+            data_file_path: task.file_path,
+            referenced_data_file: task.referenced_data_file,
+            data_file_content: task.file_type,
+            data_file_format: task.file_format,
+            schema,
+            project_field_ids,
+            predicate: None,
+            deletes: Vec::new(),
             sequence_number: task.sequence_number,
-            equality_ids: task.equality_ids.clone(),
+            equality_ids: task.equality_ids,
+            partition_spec_id: task.partition_spec_id,
             file_size_in_bytes: task.file_size_in_bytes,
-            case_sensitive: task.case_sensitive,
+            case_sensitive,
         }
     }
 }

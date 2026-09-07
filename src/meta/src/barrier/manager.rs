@@ -69,7 +69,7 @@ impl GlobalBarrierManager {
         let job_info = self
             .metadata_manager
             .catalog_controller
-            .list_creating_jobs(true, true, None)
+            .list_creating_jobs(true, None)
             .await?;
         Ok(job_info
             .into_iter()
@@ -80,7 +80,7 @@ impl GlobalBarrierManager {
                         backfill_type,
                     } = match &mut backfill_progress {
                         Ok(progress) => progress.remove(&job_id).unwrap_or_else(|| {
-                            warn!(%job_id, "background job has no ddl progress");
+                            warn!(%job_id, "creating job has no ddl progress");
                             BackfillProgress {
                                 progress: "0.0%".into(),
                                 backfill_type: PbBackfillType::NormalBackfill,

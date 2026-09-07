@@ -42,6 +42,14 @@ pub enum Relation {
         on_delete = "Cascade"
     )]
     Object,
+    #[sea_orm(
+        belongs_to = "super::object::Entity",
+        from = "Column::DependentTableId",
+        to = "super::object::Column::Oid",
+        on_update = "NoAction",
+        on_delete = "Cascade"
+    )]
+    DependentObject,
 }
 
 impl Related<super::object::Entity> for Entity {

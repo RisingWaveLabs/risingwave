@@ -29,6 +29,7 @@ use risingwave_pb::iceberg_compaction::subscribe_iceberg_compaction_event_respon
 use risingwave_pb::iceberg_compaction::{
     CancelCompactTask as IcebergCancelCompactTask, SubscribeIcebergCompactionEventResponse,
 };
+use risingwave_pb::id::IcebergCompactionTaskId;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 use crate::MetaResult;
@@ -516,7 +517,7 @@ impl IcebergCompactor {
         Ok(())
     }
 
-    pub fn cancel_task(&self, task_id: u64) -> MetaResult<()> {
+    pub fn cancel_task(&self, task_id: IcebergCompactionTaskId) -> MetaResult<()> {
         self.send_event(IcebergResponseEvent::CancelCompactTask(
             IcebergCancelCompactTask { task_id },
         ))
@@ -701,7 +702,7 @@ mod tests {
             .unwrap();
         assert_eq!(compactor.context_id(), iceberg_context_id);
 
-        compactor.cancel_task(42).unwrap();
+        compactor.cancel_task(42.into()).unwrap();
         let event = receiver.try_recv().unwrap().unwrap().event.unwrap();
         match event {
             IcebergResponseEvent::CancelCompactTask(cancel_task) => {

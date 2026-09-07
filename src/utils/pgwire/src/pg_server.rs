@@ -223,27 +223,44 @@ const ALLOWED_JWT_ALGORITHMS: &[Algorithm] = &[
     Algorithm::PS512,
 ];
 const RSA_JWK_KEY_TYPE: &str = "RSA";
+/// Optional OAuth user option overriding the expected JWT `aud`.
+const OAUTH_AUDIENCE_KEY: &str = "audience";
 
 async fn validate_jwt(
     jwt: &str,
     jwks_url: &str,
     issuer: &str,
-    cluster_id: &str,
+    audience: &str,
     metadata: &HashMap<String, String>,
 ) -> Result<bool, BoxedError> {
     let jwks: Jwks = reqwest::get(jwks_url).await?.json().await?;
-    validate_jwt_with_jwks(jwt, &jwks, issuer, cluster_id, metadata)
+    validate_jwt_with_jwks(jwt, &jwks, issuer, audience, metadata)
 }
 
 fn audience_from_cluster_id(cluster_id: &str) -> String {
     format!("urn:risingwave:cluster:{}", cluster_id)
 }
 
+fn resolve_oauth_audience(
+    configured: Option<String>,
+    cluster_id: &str,
+) -> Result<String, BoxedError> {
+    let Some(configured_audience) = configured else {
+        return Ok(audience_from_cluster_id(cluster_id));
+    };
+
+    let audience = configured_audience.trim();
+    if audience.is_empty() {
+        return Err(format!("OAuth option `{OAUTH_AUDIENCE_KEY}` cannot be empty").into());
+    }
+    Ok(audience.to_owned())
+}
+
 fn validate_jwt_with_jwks(
     jwt: &str,
     jwks: &Jwks,
     issuer: &str,
-    cluster_id: &str,
+    audience: &str,
     metadata: &HashMap<String, String>,
 ) -> Result<bool, BoxedError> {
     let header = decode_header(jwt)?;
@@ -291,7 +308,7 @@ fn validate_jwt_with_jwks(
     let decoding_key = DecodingKey::from_rsa_components(n, e)?;
     let mut validation = Validation::new(header.alg);
     validation.set_issuer(&[issuer]);
-    validation.set_audience(&[audience_from_cluster_id(cluster_id)]); // JWT 'aud' claim must match cluster_id
+    validation.set_audience(&[audience]);
     validation.set_required_spec_claims(&["exp", "iss", "aud"]);
     let token_data = decode::<HashMap<String, serde_json::Value>>(jwt, &decoding_key, &validation)?;
 
@@ -319,11 +336,14 @@ impl UserAuthenticator {
                 let mut metadata = metadata.clone();
                 let jwks_url = metadata.remove("jwks_url").unwrap();
                 let issuer = metadata.remove("issuer").unwrap();
+                let audience =
+                    resolve_oauth_audience(metadata.remove(OAUTH_AUDIENCE_KEY), cluster_id)
+                        .map_err(PsqlError::StartupError)?;
                 validate_jwt(
                     &String::from_utf8_lossy(password),
                     &jwks_url,
                     &issuer,
-                    cluster_id,
+                    &audience,
                     &metadata,
                 )
                 .await
@@ -420,7 +440,7 @@ pub async fn handle_connection<S, SM>(
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
 
     use bytes::Bytes;
     use futures::StreamExt;
@@ -446,6 +466,8 @@ mod tests {
 
     struct MockSessionManager {}
     struct MockSession {}
+
+    const STREAMING_TEST_QUERY: &str = "SELECT 'pgwire_streaming_test'";
 
     impl SessionManager for MockSessionManager {
         type Error = BoxedError;
@@ -505,26 +527,42 @@ mod tests {
 
         async fn parse(
             self: Arc<Self>,
-            _sql: Option<Statement>,
+            sql: Option<Statement>,
             _params_types: Vec<Option<DataType>>,
         ) -> Result<String, Self::Error> {
-            Ok(String::new())
+            Ok(sql.map(|stmt| stmt.to_string()).unwrap_or_default())
         }
 
         fn bind(
             self: Arc<Self>,
-            _prepare_statement: String,
+            prepare_statement: String,
             _params: Vec<Option<Bytes>>,
             _param_formats: Vec<types::Format>,
             _result_formats: Vec<types::Format>,
         ) -> Result<String, Self::Error> {
-            Ok(String::new())
+            Ok(prepare_statement)
         }
 
         async fn execute(
             self: Arc<Self>,
-            _portal: String,
+            portal: String,
         ) -> Result<PgResponse<BoxStream<'static, RowSetResult>>, Self::Error> {
+            if portal == STREAMING_TEST_QUERY {
+                let first_row = futures::stream::once(async {
+                    Ok(vec![Row::new(vec![Some(Bytes::from(vec![
+                        b'x';
+                        128 * 1024
+                    ]))])])
+                });
+                let remaining_rows = futures::stream::pending();
+                return Ok(PgResponse::builder(StatementType::SELECT)
+                    .values(
+                        first_row.chain(remaining_rows).boxed(),
+                        vec![PgFieldDescriptor::new("".to_owned(), 1043, -1)],
+                    )
+                    .into());
+            }
+
             Ok(PgResponse::builder(StatementType::SELECT)
                 .values(
                     futures::stream::iter(vec![Ok(vec![Row::new(vec![Some(Bytes::new())])])])
@@ -616,6 +654,7 @@ mod tests {
                     redact_sql_option_keywords: None,
                     message_memory_manager: MessageMemoryManager::new(u64::MAX, u64::MAX, u64::MAX)
                         .into(),
+                    stream_flush_threshold_bytes: 64 * 1024,
                 },
                 CancellationToken::new(), // dummy
             )
@@ -668,6 +707,56 @@ mod tests {
         .await;
     }
 
+    #[cfg(not(madsim))]
+    #[tokio::test]
+    async fn test_large_query_row_is_streamed_before_query_finishes() {
+        let port: i16 = 10001;
+        let dir = tempfile::TempDir::new().unwrap();
+        let sock = dir.path().join(format!(".s.PGSQL.{port}"));
+        let bind_addr = format!("unix:{}", sock.to_str().unwrap());
+        let pg_config = format!("host={} port={port}", dir.path().to_str().unwrap());
+        let cancellation = CancellationToken::new();
+
+        let server_cancellation = cancellation.clone();
+        tokio::spawn(async move {
+            pg_serve(
+                &bind_addr,
+                socket2::TcpKeepalive::new(),
+                Arc::new(MockSessionManager {}),
+                ConnectionContext {
+                    tls_config: None,
+                    redact_sql_option_keywords: None,
+                    message_memory_manager: MessageMemoryManager::new(u64::MAX, u64::MAX, u64::MAX)
+                        .into(),
+                    stream_flush_threshold_bytes: 64 * 1024,
+                },
+                server_cancellation,
+            )
+            .await
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let (client, connection) = tokio_postgres::connect(&pg_config, NoTls).await.unwrap();
+        let connection_handle = tokio::spawn(connection);
+        let params: &[&str] = &[];
+        let rows = client
+            .query_raw(STREAMING_TEST_QUERY, params)
+            .await
+            .unwrap();
+        futures::pin_mut!(rows);
+
+        let first_row = tokio::time::timeout(Duration::from_secs(5), rows.next())
+            .await
+            .expect("first row should be sent before the result stream finishes")
+            .unwrap()
+            .unwrap();
+        assert_eq!(first_row.get::<_, &str>(0).len(), 128 * 1024);
+
+        drop(client);
+        cancellation.cancel();
+        connection_handle.abort();
+    }
+
     mod jwt_validation_tests {
         use std::collections::HashMap;
         use std::time::{SystemTime, UNIX_EPOCH};
@@ -679,7 +768,7 @@ mod tests {
         use rsa::{RsaPrivateKey, RsaPublicKey};
         use serde_json::json;
 
-        use crate::pg_server::{Jwk, Jwks, validate_jwt_with_jwks};
+        use crate::pg_server::{Jwk, Jwks, resolve_oauth_audience, validate_jwt_with_jwks};
 
         fn create_test_rsa_keys() -> (RsaPrivateKey, RsaPublicKey) {
             let mut rng = rand::thread_rng();
@@ -778,12 +867,53 @@ mod tests {
                 &jwt,
                 &jwks,
                 "https://test-issuer.com",
-                "test-cluster-id",
+                "urn:risingwave:cluster:test-cluster-id",
                 &metadata,
             );
 
             let error = result.unwrap_err();
             assert!(error.to_string().contains("InvalidAudience"));
+        }
+
+        #[test]
+        fn test_jwt_with_configured_audience() {
+            let (private_key, public_key) = create_test_rsa_keys();
+            let jwks = create_test_jwks(&public_key, "test-kid", Some("RS256"));
+
+            let mut additional_claims = HashMap::new();
+            additional_claims.insert("aud".to_owned(), json!(["urn:sn:cloud:o-for6u"]));
+            let jwt = create_jwt_token(
+                &private_key,
+                "test-kid",
+                Algorithm::RS256,
+                "https://test-issuer.com",
+                None,
+                get_future_timestamp(),
+                additional_claims,
+            );
+
+            let result = validate_jwt_with_jwks(
+                &jwt,
+                &jwks,
+                "https://test-issuer.com",
+                "urn:sn:cloud:o-for6u",
+                &HashMap::new(),
+            );
+
+            assert!(result.unwrap());
+        }
+
+        #[test]
+        fn test_empty_configured_audience() {
+            let error =
+                resolve_oauth_audience(Some("  ".to_owned()), "test-cluster-id").unwrap_err();
+            assert!(error.to_string().contains("cannot be empty"));
+        }
+
+        #[test]
+        fn test_default_audience_from_cluster_id() {
+            let audience = resolve_oauth_audience(None, "test-cluster-id").unwrap();
+            assert_eq!(audience, "urn:risingwave:cluster:test-cluster-id");
         }
 
         #[test]
@@ -807,7 +937,7 @@ mod tests {
                 &jwt,
                 &jwks,
                 "https://test-issuer.com",
-                "test-cluster-id",
+                "urn:risingwave:cluster:test-cluster-id",
                 &metadata,
             );
 
@@ -836,7 +966,7 @@ mod tests {
                 &jwt,
                 &jwks,
                 "https://test-issuer.com",
-                "test-cluster-id",
+                "urn:risingwave:cluster:test-cluster-id",
                 &metadata,
             );
 
@@ -865,7 +995,7 @@ mod tests {
                 &jwt,
                 &jwks,
                 "https://test-issuer.com",
-                "test-cluster-id",
+                "urn:risingwave:cluster:test-cluster-id",
                 &metadata,
             );
 
@@ -896,7 +1026,7 @@ mod tests {
                 &jwt,
                 &jwks,
                 "https://test-issuer.com",
-                "test-cluster-id",
+                "urn:risingwave:cluster:test-cluster-id",
                 &HashMap::new(),
             );
 
@@ -929,7 +1059,7 @@ mod tests {
                 &jwt,
                 &jwks,
                 "https://test-issuer.com",
-                "test-cluster-id",
+                "urn:risingwave:cluster:test-cluster-id",
                 &metadata,
             );
 
@@ -960,7 +1090,7 @@ mod tests {
                 &jwt,
                 &jwks,
                 "https://test-issuer.com",
-                "test-cluster-id",
+                "urn:risingwave:cluster:test-cluster-id",
                 &metadata,
             );
 
@@ -996,7 +1126,7 @@ mod tests {
                 &jwt,
                 &jwks,
                 "https://test-issuer.com",
-                "test-cluster-id",
+                "urn:risingwave:cluster:test-cluster-id",
                 &metadata,
             );
 
@@ -1030,7 +1160,7 @@ mod tests {
                 &jwt,
                 &jwks,
                 "https://test-issuer.com",
-                "test-cluster-id",
+                "urn:risingwave:cluster:test-cluster-id",
                 &metadata,
             );
 
@@ -1060,7 +1190,7 @@ mod tests {
                 &jwt,
                 &jwks,
                 "https://test-issuer.com",
-                "test-cluster-id",
+                "urn:risingwave:cluster:test-cluster-id",
                 &HashMap::new(),
             );
 
@@ -1093,7 +1223,7 @@ mod tests {
                 &jwt,
                 &jwks,
                 "https://test-issuer.com",
-                "test-cluster-id",
+                "urn:risingwave:cluster:test-cluster-id",
                 &HashMap::new(),
             );
 
@@ -1157,7 +1287,7 @@ mod tests {
                 &jwt,
                 &jwks,
                 "https://test-issuer.com",
-                "test-cluster-id",
+                "urn:risingwave:cluster:test-cluster-id",
                 &HashMap::new(),
             );
 
@@ -1191,7 +1321,7 @@ mod tests {
                 &jwt,
                 &jwks,
                 "https://test-issuer.com",
-                "test-cluster-id",
+                "urn:risingwave:cluster:test-cluster-id",
                 &HashMap::new(),
             );
 
@@ -1223,7 +1353,7 @@ mod tests {
                 &jwt,
                 &jwks,
                 "https://test-issuer.com",
-                "test-cluster-id",
+                "urn:risingwave:cluster:test-cluster-id",
                 &HashMap::new(),
             );
 

@@ -229,7 +229,7 @@ impl Connection for IcebergConnection {
                         builder = builder.secret_access_key(secret_key);
                     }
                     builder = builder.root(root.as_str()).bucket(bucket.as_str());
-                    let op = Operator::new(builder)?.finish();
+                    let op = Operator::new(builder)?;
                     op.check().await?;
                 }
                 "gs" | "gcs" => {
@@ -238,7 +238,7 @@ impl Connection for IcebergConnection {
                         builder = builder.credential(credential);
                     }
                     builder = builder.root(root.as_str()).bucket(bucket.as_str());
-                    let op = Operator::new(builder)?.finish();
+                    let op = Operator::new(builder)?;
                     op.check().await?;
                 }
                 "azblob" => {
@@ -253,7 +253,7 @@ impl Connection for IcebergConnection {
                         builder = builder.endpoint(azblob_endpoint_url);
                     }
                     builder = builder.root(root.as_str()).container(bucket.as_str());
-                    let op = Operator::new(builder)?.finish();
+                    let op = Operator::new(builder)?;
                     op.check().await?;
                 }
                 _ => {

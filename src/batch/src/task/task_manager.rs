@@ -35,6 +35,12 @@ use crate::monitor::BatchManagerMetrics;
 use crate::rpc::service::exchange::GrpcExchangeWriter;
 use crate::task::{BatchTaskExecution, StateReporter, TaskId, TaskOutput, TaskOutputId};
 
+pub mod await_tree_key {
+    /// Await-tree key type for batch tasks.
+    #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+    pub struct BatchTask(pub crate::task::TaskId);
+}
+
 /// `BatchManager` is responsible for managing all batch tasks.
 #[derive(Clone)]
 pub struct BatchManager {
@@ -52,10 +58,18 @@ pub struct BatchManager {
 
     /// Metrics for batch manager.
     metrics: Arc<BatchManagerMetrics>,
+
+    /// Registry for await-tree.
+    await_tree_reg: Option<await_tree::Registry>,
 }
 
 impl BatchManager {
-    pub fn new(config: BatchConfig, metrics: Arc<BatchManagerMetrics>, mem_limit: u64) -> Self {
+    pub fn new(
+        config: BatchConfig,
+        metrics: Arc<BatchManagerMetrics>,
+        mem_limit: u64,
+        await_tree_config: Option<await_tree::Config>,
+    ) -> Self {
         let runtime = {
             let mut builder = tokio::runtime::Builder::new_multi_thread();
             if let Some(worker_threads_num) = config.worker_threads_num {
@@ -75,7 +89,13 @@ impl BatchManager {
             config,
             metrics,
             mem_context,
+            await_tree_reg: await_tree_config.map(await_tree::Registry::new),
         }
+    }
+
+    /// Get the registry of await-trees.
+    pub fn await_tree_reg(&self) -> Option<&await_tree::Registry> {
+        self.await_tree_reg.as_ref()
     }
 
     pub(crate) fn metrics(&self) -> Arc<BatchManagerMetrics> {
@@ -96,7 +116,13 @@ impl BatchManager {
         expr_context: ExprContext,
     ) -> Result<()> {
         trace!("Received task id: {:?}, plan: {:?}", tid, plan);
-        let task = BatchTaskExecution::new(tid, plan, context, self.runtime())?;
+        let task = BatchTaskExecution::new(
+            tid,
+            plan,
+            context,
+            self.runtime(),
+            self.await_tree_reg.clone(),
+        )?;
         let task_id = task.get_task_id().clone();
         let task = Arc::new(task);
         // Here the task id insert into self.tasks is put in front of `.async_execute`, cuz when
@@ -116,7 +142,7 @@ impl BatchManager {
             Ok(())
         } else {
             bail!(
-                "can not create duplicate task with the same id: {:?}",
+                "cannot create a duplicate task with the same ID: {:?}",
                 task_id,
             );
         };
@@ -195,16 +221,19 @@ impl BatchManager {
         let mut task_output = self.take_output(pb_task_output_id)?;
         self.runtime.spawn(async move {
             let mut writer = GrpcExchangeWriter::new(tx.clone());
-            match task_output.take_data(&mut writer).await {
-                Ok(_) => {
-                    tracing::trace!(
-                        from = ?task_id,
-                        "exchanged {} chunks",
-                        writer.written_chunks(),
-                    );
-                    Ok(())
-                }
-                Err(e) => tx.send(Err(e.into())).await,
+            tokio::select! {
+                result = task_output.take_data(&mut writer) => match result {
+                    Ok(_) => {
+                        tracing::trace!(
+                            from = ?task_id,
+                            "exchanged {} chunks",
+                            writer.written_chunks(),
+                        );
+                        Ok(())
+                    }
+                    Err(e) => tx.send(Err(e.into())).await,
+                },
+                _ = tx.closed() => Ok(()),
             }
         });
         Ok(())
@@ -300,6 +329,7 @@ mod tests {
             BatchConfig::default(),
             BatchManagerMetrics::for_test(),
             u64::MAX,
+            None,
         ));
         let task_id = TaskId {
             task_id: 0,
@@ -330,6 +360,7 @@ mod tests {
             BatchConfig::default(),
             BatchManagerMetrics::for_test(),
             u64::MAX,
+            None,
         ));
         let plan = PlanFragment {
             root: Some(PlanNode {
@@ -361,6 +392,7 @@ mod tests {
             BatchConfig::default(),
             BatchManagerMetrics::for_test(),
             u64::MAX,
+            None,
         ));
         let plan = PlanFragment {
             root: Some(PlanNode {

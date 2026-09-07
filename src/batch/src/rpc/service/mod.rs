@@ -13,4 +13,6 @@
 // limitations under the License.
 
 pub mod exchange;
+#[cfg(madsim)]
+pub mod madsim_test_utils;
 pub mod task_service;

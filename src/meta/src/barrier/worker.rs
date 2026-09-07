@@ -14,7 +14,7 @@
 
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
-use std::mem::{replace, take};
+use std::mem::replace;
 use std::pin::pin;
 use std::sync::Arc;
 use std::time::Duration;
@@ -112,8 +112,6 @@ pub(super) struct GlobalBarrierWorker<C> {
 mod tests {
     use std::collections::HashMap;
 
-    use tokio::sync::oneshot;
-
     use super::*;
     use crate::barrier::RescheduleContext;
     use crate::barrier::notifier::Notifier;
@@ -124,13 +122,7 @@ mod tests {
         let database_id = DatabaseId::new(1);
         let database_info =
             InflightDatabaseInfo::empty(database_id, env.shared_actor_infos().clone());
-        let (started_tx, started_rx) = oneshot::channel();
-        let (_collected_tx, _collected_rx) = oneshot::channel();
-
-        let notifier = Notifier {
-            started: Some(started_tx),
-            collected: Some(_collected_tx),
-        };
+        let (notifier, started_rx) = Notifier::new();
 
         let new_barrier = schedule::NewBarrier {
             database_id,
@@ -139,7 +131,7 @@ mod tests {
                     context: RescheduleContext::empty(),
                     reschedule_plan: None,
                 },
-                vec![notifier],
+                notifier,
             )),
             span: tracing::Span::none(),
             checkpoint: false,
@@ -193,7 +185,7 @@ fn resolve_reschedule_intent(
     database_info: Option<&InflightDatabaseInfo>,
     mut new_barrier: schedule::NewBarrier,
 ) -> MetaResult<Option<schedule::NewBarrier>> {
-    let Some((command, notifiers)) = new_barrier.command.take() else {
+    let Some((command, notifier)) = new_barrier.command.take() else {
         return Ok(Some(new_barrier));
     };
 
@@ -208,7 +200,7 @@ fn resolve_reschedule_intent(
                         context,
                         reschedule_plan: Some(reschedule_plan),
                     },
-                    notifiers,
+                    notifier,
                 ));
                 return Ok(Some(new_barrier));
             }
@@ -238,28 +230,23 @@ fn resolve_reschedule_intent(
                             context: RescheduleContext::empty(),
                             reschedule_plan: Some(reschedule_plan),
                         },
-                        notifiers,
+                        notifier,
                     ));
                     Ok(Some(new_barrier))
                 }
                 Ok(None) => {
                     // No-op intent: notify to unblock callers even though no barrier is injected.
-                    for mut notifier in notifiers {
-                        notifier.notify_started();
-                        notifier.notify_collected();
-                    }
+                    notifier.start().started();
                     Ok(None)
                 }
                 Err(err) => {
-                    for notifier in notifiers {
-                        notifier.notify_start_failed(err.clone());
-                    }
+                    notifier.notify_start_failed(err);
                     Ok(None)
                 }
             }
         }
         _ => {
-            new_barrier.command = Some((command, notifiers));
+            new_barrier.command = Some((command, notifier));
             Ok(Some(new_barrier))
         }
     }
@@ -455,7 +442,7 @@ impl<C: GlobalBarrierWorkerContext> GlobalBarrierWorker<C> {
                     },
                 ..
             },
-            notifiers,
+            _,
         )) = &mut new_barrier.command
         else {
             return Ok(true);
@@ -498,9 +485,11 @@ impl<C: GlobalBarrierWorkerContext> GlobalBarrierWorker<C> {
                     err = %err.as_report(),
                     "failed to resolve log store epoch for since_timestamp"
                 );
-                for notifier in take(notifiers) {
-                    notifier.notify_start_failed(err.clone());
-                }
+                let (_, notifier) = new_barrier
+                    .command
+                    .take()
+                    .expect("matched command should still exist");
+                notifier.notify_start_failed(err);
                 Ok(false)
             }
         }
@@ -1018,7 +1007,8 @@ impl<C> GlobalBarrierWorker<C> {
 mod retry_strategy {
     use std::time::Duration;
 
-    use tokio_retry::strategy::{ExponentialBackoff, jitter};
+    use risingwave_common::util::retry::exponential_backoff;
+    use tokio_retry::strategy::jitter;
 
     // Retry base interval in milliseconds.
     const RECOVERY_RETRY_BASE_INTERVAL: u64 = 20;
@@ -1055,9 +1045,12 @@ mod retry_strategy {
     /// Initialize a retry strategy for operation in recovery.
     #[inline(always)]
     pub(crate) fn get_retry_strategy() -> impl Iterator<Item = Duration> + Send + 'static {
-        ExponentialBackoff::from_millis(RECOVERY_RETRY_BASE_INTERVAL)
-            .max_delay(RECOVERY_RETRY_MAX_INTERVAL)
-            .map(jitter)
+        exponential_backoff(
+            Duration::from_millis(RECOVERY_RETRY_BASE_INTERVAL),
+            RECOVERY_RETRY_BASE_INTERVAL,
+            RECOVERY_RETRY_MAX_INTERVAL,
+        )
+        .map(jitter)
     }
 
     #[define_opaque(RetryBackoffStrategy)]
@@ -1123,10 +1116,8 @@ impl<C: GlobalBarrierWorkerContext> GlobalBarrierWorker<C> {
 
         let recovery_future = tokio_retry::Retry::spawn(retry_strategy, || async {
             self.env.stream_client_pool().invalidate_all();
-            // We need to notify_creating_job_failed in every recovery retry, because in outer create_streaming_job handler,
-            // it holds the reschedule_read_lock and wait for creating job to finish, and caused the following scale_actor fail
-            // to acquire the reschedule_write_lock, and then keep recovering, and then deadlock.
-            // TODO: refactor and fix this hacky implementation.
+            // Notify in every recovery retry so foreground creation handlers can either cancel an
+            // early-failing job or re-register their finish notifier after recovery.
             self.context
                 .notify_creating_job_failed(None, recovery_reason.clone())
                 .await;
@@ -1141,7 +1132,7 @@ impl<C: GlobalBarrierWorkerContext> GlobalBarrierWorker<C> {
                 mut state_table_committed_epochs,
                 mut state_table_log_epochs,
                 mut mv_depended_subscriptions,
-                mut background_jobs,
+                mut creating_jobs,
                 hummock_version_stats,
                 database_infos,
                 mut cdc_table_snapshot_splits,
@@ -1198,7 +1189,7 @@ impl<C: GlobalBarrierWorkerContext> GlobalBarrierWorker<C> {
                             &recovery_context.fragment_relations,
                             &stream_actors,
                             &mut source_splits,
-                            &mut background_jobs,
+                            &mut creating_jobs,
                             &mut mv_depended_subscriptions,
                             is_paused,
                             &hummock_version_stats,
@@ -1306,8 +1297,8 @@ impl<C: GlobalBarrierWorkerContext> GlobalBarrierWorker<C> {
                     }
                 }
                 debug!("collected initial barrier");
-                if !background_jobs.is_empty() {
-                    warn!(job_ids = ?background_jobs.iter().collect_vec(), "unused recovered background mview in recovery");
+                if !creating_jobs.is_empty() {
+                    warn!(job_ids = ?creating_jobs.iter().collect_vec(), "unused recovered creating jobs in recovery");
                 }
                 if !mv_depended_subscriptions.is_empty() {
                     warn!(?mv_depended_subscriptions, "unused subscription infos in recovery");

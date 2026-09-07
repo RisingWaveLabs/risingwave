@@ -22,7 +22,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
 use std::time::Duration;
 
 use anyhow::Result;
@@ -32,10 +32,16 @@ use iceberg::spec::{Snapshot, TableMetadata, TableMetadataRef};
 use iceberg::table::Table;
 use iceberg::{
     Catalog, Error as IcebergError, ErrorKind as IcebergErrorKind, Namespace, NamespaceIdent,
-    Result as IcebergResult, TableCommit, TableCreation, TableIdent, TableUpdate,
+    Result as IcebergResult, Runtime, TableCommit, TableCreation, TableIdent, TableUpdate,
 };
 use rand::Rng;
 use tokio::time::sleep;
+
+static ICEBERG_RUNTIME: LazyLock<rw_tokio::runtime::Runtime> = LazyLock::new(|| {
+    rw_tokio::runtime::Builder::new_current_thread()
+        .build()
+        .expect("failed to build the Iceberg test runtime")
+});
 
 /// Snapshot data tracked by the mock (file-level only).
 #[derive(Debug, Default, Clone)]
@@ -283,15 +289,18 @@ impl MockIcebergV3Catalog {
     // -------- internal helpers --------
 
     fn build_table_with_metadata(&self, metadata: TableMetadata) -> IcebergResult<Table> {
-        let file_io = FileIO::from_path("memory://")
-            .map_err(to_unexpected)?
-            .build()
-            .map_err(to_unexpected)?;
+        let file_io = FileIO::new_with_memory();
         let ident = self.inner().table_ident.clone();
+        // This mock uses `Table` only as a metadata container, but `TableBuilder` requires an
+        // Iceberg runtime. Simulation runs on madsim-tokio while Iceberg uses crates.io Tokio,
+        // so `Runtime::try_current()` cannot see the simulator runtime. This real Tokio handle
+        // is a test-only shim; do not use it to spawn work because the current-thread runtime is
+        // not driven by the test.
         Table::builder()
             .metadata(TableMetadataRef::from(metadata))
             .identifier(ident)
             .file_io(file_io)
+            .runtime(Runtime::new(&ICEBERG_RUNTIME))
             .build()
             .map_err(to_unexpected)
     }
@@ -482,6 +491,10 @@ impl Catalog for MockIcebergV3Catalog {
 
     async fn drop_table(&self, _t: &TableIdent) -> IcebergResult<()> {
         unimplemented!("mock V3 catalog: drop_table should not be called by V3")
+    }
+
+    async fn purge_table(&self, _t: &TableIdent) -> IcebergResult<()> {
+        unimplemented!("mock V3 catalog: purge_table should not be called by V3")
     }
 
     async fn table_exists(&self, _t: &TableIdent) -> IcebergResult<bool> {

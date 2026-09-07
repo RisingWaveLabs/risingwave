@@ -75,7 +75,7 @@ When opening or updating a pull request, changing PR labels, or marking a PR rea
 1. Read `.agents/PR_LABELING.md`.
 2. Inspect the current PR labels and draft state before adding anything:
    `gh pr view <PR> --json isDraft,labels,title,body,files`
-3. Add only validated missing labels. Do not remove existing labels unless explicitly instructed by a maintainer.
+3. Add only validated missing labels. Do not remove labels that existed before the current agent operation unless explicitly instructed by a maintainer. An agent may remove a label it just added if validation shows it was a mistake, but it must report the correction.
 4. In the final PR report, list labels added, labels intentionally not added, local tests run, and CI labels requested.
 
 ## Connector Development

@@ -404,6 +404,27 @@ alter source variant_alter_source_t add column s struct<v variant>;
 statement ok
 drop source variant_alter_source_t;
 
+# ENCODE PARQUET reads variant via the Parquet Variant extension type, so ALTER may add one.
+# Skipped under madsim: once the source is created, the meta split enumerator lists the
+# directory via real tokio::fs, which panics outside a tokio runtime.
+
+skipif madsim
+statement ok
+create source variant_alter_parquet_source_t (id int)
+with (
+    connector = 'posix_fs',
+    posix_fs.root = '/tmp',
+    match_pattern = '*.parquet'
+) format plain encode parquet;
+
+skipif madsim
+statement ok
+alter source variant_alter_parquet_source_t add column v variant;
+
+skipif madsim
+statement ok
+drop source variant_alter_parquet_source_t;
+
 # VARIANT is rejected in non-SQL UDF signatures (both argument and return types).
 
 statement error VARIANT is not supported in UDFs yet
@@ -411,3 +432,70 @@ create function variant_arg_udf(variant) returns int as 'variant_arg_udf' using 
 
 statement error VARIANT is not supported in UDFs yet
 create function variant_ret_udf(int) returns variant as 'variant_ret_udf' using link 'http://localhost:8815';
+
+# Most external encoders cannot serialize VARIANT values yet: creation is rejected
+# unless the sink does not encode (blackhole, sink-into-table). Iceberg is supported
+# separately through its native Parquet Variant layout.
+
+statement ok
+create table variant_sink_t (id int primary key, v variant, s struct<sv variant>);
+
+# External sink with a variant column: rejected before any connection is attempted.
+statement error sinking VARIANT columns is not supported yet
+create sink variant_sink_rejected from variant_sink_t
+with (connector = 'kafka', properties.bootstrap.server = 'localhost:29092', topic = 'variant_sink')
+format upsert encode json;
+
+# A variant nested inside a struct is rejected too.
+statement error sinking VARIANT columns is not supported yet
+create sink variant_sink_rejected as select id, s from variant_sink_t
+with (connector = 'kafka', properties.bootstrap.server = 'localhost:29092', topic = 'variant_sink')
+format upsert encode json;
+
+# Blackhole sinks do not encode values: allowed.
+statement ok
+create sink variant_sink_blackhole from variant_sink_t with (connector = 'blackhole');
+
+statement ok
+drop sink variant_sink_blackhole;
+
+# Sink-into-table does not use an external encoder: allowed.
+statement ok
+create table variant_sink_target (id int primary key, v variant, s struct<sv variant>);
+
+statement ok
+create sink variant_sink_into_table into variant_sink_target from variant_sink_t;
+
+statement ok
+drop sink variant_sink_into_table;
+
+statement ok
+drop table variant_sink_target;
+
+statement ok
+drop table variant_sink_t;
+
+# ALTER TABLE on a plain table may add and drop VARIANT columns, with data intact.
+
+statement ok
+create table variant_alter_plain_t (id int primary key);
+
+statement ok
+alter table variant_alter_plain_t add column v variant;
+
+statement ok
+insert into variant_alter_plain_t values (1, '{"a":1}'::variant);
+
+statement ok
+flush;
+
+query T
+select v::jsonb = '{"a":1}'::jsonb from variant_alter_plain_t;
+----
+t
+
+statement ok
+alter table variant_alter_plain_t drop column v;
+
+statement ok
+drop table variant_alter_plain_t;

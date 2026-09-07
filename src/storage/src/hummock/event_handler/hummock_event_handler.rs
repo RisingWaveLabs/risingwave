@@ -32,7 +32,6 @@ use risingwave_common::config::Role;
 use risingwave_common::config::streaming::CacheRefillPolicy;
 use risingwave_common::metrics::UintGauge;
 use risingwave_hummock_sdk::compaction_group::hummock_version_ext::SstDeltaInfo;
-use risingwave_hummock_sdk::version::LocalHummockVersionDelta;
 use risingwave_hummock_sdk::{HummockEpoch, SyncResult};
 use risingwave_pb::meta::table_cache_refill_policies::table_cache_refill_policy::PbCacheRefillPolicy;
 use risingwave_pb::meta::{PbServingTableVnodeMappings, PbTableRefillRuntimeConfig};
@@ -742,16 +741,12 @@ impl HummockEventHandler {
                 {
                     for version_delta in version_deltas {
                         assert_eq!(version_to_apply.id, version_delta.prev_id);
-                        let local_hummock_version_delta =
-                            LocalHummockVersionDelta::from(version_delta);
                         if let Some(sst_delta_infos) = &mut sst_delta_infos {
-                            sst_delta_infos.extend(
-                                version_to_apply
-                                    .build_sst_delta_infos(&local_hummock_version_delta),
-                            );
+                            sst_delta_infos
+                                .extend(version_to_apply.build_sst_delta_infos(&version_delta));
                         }
 
-                        version_to_apply.apply_version_delta(&local_hummock_version_delta);
+                        version_to_apply.apply_version_delta(&version_delta);
                     }
                 }
 

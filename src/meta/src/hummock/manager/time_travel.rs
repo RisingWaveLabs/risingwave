@@ -46,7 +46,10 @@ use crate::hummock::error::{Error, Result};
 impl HummockManager {
     pub(crate) async fn init_time_travel_state(&self) -> Result<()> {
         let sql_store = self.env.meta_store_ref();
-        let mut guard = self.versioning.write().await;
+        let mut guard = self
+            .versioning
+            .write_with_process_name("init_time_travel_state")
+            .await;
         guard.mark_next_time_travel_version_snapshot();
 
         guard.last_time_travel_snapshot_sst_ids = HashSet::new();
@@ -73,7 +76,11 @@ impl HummockManager {
             .metrics
             .time_travel_vacuum_metadata_latency
             .start_timer();
-        let min_pinned_version_id = self.context_info.read().await.min_pinned_version_id();
+        let min_pinned_version_id = self
+            .context_info
+            .read_with_process_name("truncate_time_travel_metadata")
+            .await
+            .min_pinned_version_id();
         let sql_store = self.env.meta_store_ref();
         let txn = sql_store.conn.begin().await?;
 
@@ -139,8 +146,8 @@ impl HummockManager {
             pinned_snapshot_object_ids.extend(resolved.replay_version.get_object_ids());
             for delta in resolved.deltas {
                 pinned_delta_ids.insert(delta.id);
-                pinned_snapshot_sst_ids.extend(delta.newly_added_sst_ids(true));
-                pinned_snapshot_object_ids.extend(delta.newly_added_object_ids(true));
+                pinned_snapshot_sst_ids.extend(delta.newly_added_sst_ids());
+                pinned_snapshot_object_ids.extend(delta.newly_added_object_ids());
             }
         }
 
@@ -312,7 +319,7 @@ impl HummockManager {
                 let delta_to_delete = IncompleteHummockVersionDelta::from_persisted_protobuf_owned(
                     delta_to_delete.version_delta.to_protobuf(),
                 );
-                let new_sst_ids = delta_to_delete.newly_added_sst_ids(true);
+                let new_sst_ids = delta_to_delete.newly_added_sst_ids();
                 // The SST ids added and then deleted by compaction between the 2 versions.
                 sst_ids_to_delete.extend(&new_sst_ids - &retained_snapshot_sst_ids);
                 if sst_ids_to_delete.len() >= delete_sst_batch_size {
@@ -323,7 +330,7 @@ impl HummockManager {
                     )
                     .await?;
                 }
-                let new_object_ids = delta_to_delete.newly_added_object_ids(true);
+                let new_object_ids = delta_to_delete.newly_added_object_ids();
                 object_ids_to_delete.extend(&new_object_ids - &retained_snapshot_object_ids);
             }
         }
@@ -501,8 +508,7 @@ impl HummockManager {
                     let version_delta = HummockVersionDelta::from_persisted_protobuf_owned(
                         model.version_delta.to_protobuf(),
                     );
-                    // set exclude_table_change_log to true because in time travel delta we ignore the table change log
-                    for object_id in version_delta.newly_added_object_ids(true) {
+                    for object_id in version_delta.newly_added_object_ids() {
                         result.remove(&object_id);
                     }
                     next_prev_version_id = Some(model.version_id);
@@ -759,7 +765,7 @@ impl HummockManager {
             return Ok(version_sst_ids);
         }
         let written = write_sstable_infos(
-            delta.newly_added_sst_infos(true).filter(|s| {
+            delta.newly_added_sst_infos().filter(|s| {
                 !skip_sst_ids.contains(&s.sst_id)
                     && s.table_ids
                         .iter()

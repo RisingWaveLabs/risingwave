@@ -98,7 +98,7 @@ impl FallibleRule<Logical> for IcebergIntermediateScanRule {
             let Some(IcebergListResult {
                 mut data_files,
                 mut equality_delete_files,
-                mut position_delete_files,
+                position_delete_files,
                 equality_delete_columns,
                 format_version,
                 schema: table_schema,
@@ -136,9 +136,8 @@ impl FallibleRule<Logical> for IcebergIntermediateScanRule {
                 }
                 FormatVersion::V3 => {
                     for file in &mut data_files {
-                        file.deletes.retain(|delete| {
-                            delete.data_file_content == DataContentType::PositionDeletes
-                        });
+                        file.deletes
+                            .retain(|delete| delete.file_type == DataContentType::PositionDeletes);
                     }
                 }
             }
@@ -181,11 +180,6 @@ impl FallibleRule<Logical> for IcebergIntermediateScanRule {
 
             // Add anti-join for position delete files
             if use_position_delete_join {
-                set_project_field_ids(
-                    &mut position_delete_files,
-                    table_schema.as_ref(),
-                    std::iter::empty::<&str>(),
-                )?;
                 plan = build_position_delete_hashjoin_scan(
                     scan,
                     &column_catalog_map,

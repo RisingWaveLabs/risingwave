@@ -20,6 +20,7 @@ postmaster pause_on_next_bootstrap
 postmaster per_database_isolation
 postmaster time_travel_retention_ms
 user application_name
+user auto_locality_backfill_min_size
 user backfill_rate_limit
 user background_ddl
 user batch_enable_distributed_dml
@@ -55,6 +56,7 @@ user iceberg_query_storage_mode
 user idle_in_transaction_session_timeout
 user implicit_flush
 user intervalstyle
+user locality_backfill_mode
 user lock_timeout
 user max_split_range_gap
 user query_epoch
@@ -72,6 +74,7 @@ user standard_conforming_strings
 user statement_timeout
 user streaming_allow_jsonb_in_stream_key
 user streaming_asof_join_use_cache
+user streaming_cache_refill_policy
 user streaming_enable_bushy_join
 user streaming_enable_delta_join
 user streaming_enable_unaligned_join

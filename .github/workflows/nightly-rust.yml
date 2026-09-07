@@ -1,5 +1,8 @@
 name: Build with Latest Nightly Rust
 
+permissions:
+  contents: read
+
 # Helpful to know when it does not compile.
 
 on:

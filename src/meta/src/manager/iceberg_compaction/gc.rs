@@ -285,28 +285,28 @@ impl IcebergCompactionManager {
             return Ok(());
         }
 
-        let processing_gc_watermark_snapshot = {
+        let active_attempt_gc_watermark_snapshot = {
             let guard = self.inner.read();
             guard
                 .sink_schedules
                 .get(&sink_id)
-                .and_then(|track| track.processing_gc_watermark_snapshot())
+                .and_then(|track| track.active_attempt_gc_watermark_snapshot())
                 .map(|snapshot| snapshot.cloned())
         };
 
         let mut snapshot_expiration_timestamp_ms =
             snapshot_expiration_cutoff_ms(&iceberg_config, now);
 
-        // Outer `None` means no active compaction task. Inner `None` means an
-        // active task exists without a safe snapshot watermark, so GC skips.
-        match processing_gc_watermark_snapshot {
+        // Outer `None` means there is no active compaction attempt. Inner `None`
+        // means an active attempt has no safe snapshot watermark, so GC skips.
+        match active_attempt_gc_watermark_snapshot {
             None => {}
             Some(None) => {
                 tracing::info!(
                     catalog_name = iceberg_config.catalog_name(),
                     table_name = iceberg_config.full_table_name()?.to_string(),
                     %sink_id,
-                    "Skip snapshots expiration because an iceberg compaction task has no observed GC watermark",
+                    "Skip snapshot expiration because an active iceberg compaction attempt has no observed GC watermark",
                 );
                 return Ok(());
             }
@@ -359,13 +359,14 @@ impl IcebergCompactionManager {
         let txn = Transaction::new(&table);
 
         let mut expired_snapshots = txn
-            .expire_snapshot()
-            .expire_older_than(snapshot_expiration_timestamp_ms)
-            .clear_expire_files(iceberg_config.snapshot_expiration_clear_expired_files)
+            .expire_snapshots()
+            .expire_older_than_ms(snapshot_expiration_timestamp_ms)
             .clear_expired_meta_data(iceberg_config.snapshot_expiration_clear_expired_meta_data);
 
         if let Some(retain_last) = iceberg_config.snapshot_expiration_retain_last {
-            expired_snapshots = expired_snapshots.retain_last(retain_last);
+            expired_snapshots = expired_snapshots.retain_last(
+                usize::try_from(retain_last).map_err(|e| SinkError::Config(e.into()))?,
+            );
         }
 
         let before_metadata = table.metadata_ref();
@@ -529,8 +530,9 @@ impl IcebergCompactionManager {
             return Ok(());
         };
         let current_snapshot_id = current_snapshot.snapshot_id();
-        let manifest_list = current_snapshot
-            .load_manifest_list(table.file_io(), table.metadata())
+        let manifest_list = table
+            .object_cache()
+            .get_manifest_list(current_snapshot, &table.metadata_ref())
             .await
             .map_err(|e| SinkError::Iceberg(e.into()))?;
 

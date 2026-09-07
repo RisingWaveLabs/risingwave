@@ -296,6 +296,28 @@ select id, name, location from test_geo where id = 4;
 ----
 4 NullLocation NULL
 
+# Test automatic schema discovery maps geometry to bytea.
+system ok
+psql -c "
+    DROP TABLE IF EXISTS test_geo_auto_discovery CASCADE;
+    CREATE TABLE test_geo_auto_discovery (
+        id int PRIMARY KEY,
+        location geometry(Point, 4326)
+    );
+"
+
+statement ok
+create table test_geo_auto_discovery_rw (*)
+from geo_source table 'public.test_geo_auto_discovery';
+
+query T
+select c.data_type
+from rw_catalog.rw_columns c
+join rw_catalog.rw_tables t on c.relation_id = t.id
+where t.name = 'test_geo_auto_discovery_rw' and c.name = 'location';
+----
+bytea
+
 # Test with different geometry types (LineString)
 system ok
 psql -c "
@@ -336,6 +358,9 @@ statement ok
 drop table test_geo_line;
 
 statement ok
+drop table test_geo_auto_discovery_rw;
+
+statement ok
 drop table test_geo_array;
 
 statement ok
@@ -348,5 +373,6 @@ system ok
 psql -c "
     DROP TABLE IF EXISTS test_geo CASCADE;
     DROP TABLE IF EXISTS test_geo_array CASCADE;
+    DROP TABLE IF EXISTS test_geo_auto_discovery CASCADE;
     DROP TABLE IF EXISTS test_geo_line CASCADE;
 "

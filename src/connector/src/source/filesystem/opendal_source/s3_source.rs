@@ -69,8 +69,7 @@ impl<Src: OpendalSource> OpendalEnumerator<Src> {
         }
         let op: Operator = Operator::new(builder)?
             .layer(LoggingLayer::default())
-            .layer(RetryLayer::default())
-            .finish();
+            .layer(RetryLayer::default());
 
         Ok(Self {
             op,

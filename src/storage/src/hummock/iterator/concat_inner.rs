@@ -15,6 +15,7 @@
 use std::cmp::Ordering::{Equal, Greater, Less};
 use std::sync::Arc;
 
+use fail::fail_point;
 use risingwave_hummock_sdk::key::FullKey;
 use risingwave_hummock_sdk::sstable_info::SstableInfo;
 
@@ -23,7 +24,7 @@ use crate::hummock::iterator::{
 };
 use crate::hummock::sstable::SstableIteratorReadOptions;
 use crate::hummock::value::HummockValue;
-use crate::hummock::{HummockResult, SstableIteratorType, SstableStoreRef};
+use crate::hummock::{HummockResult, IteratorStatsGuard, SstableIteratorType, SstableStoreRef};
 use crate::monitor::StoreLocalStatistic;
 
 fn smallest_key(sstable_info: &SstableInfo) -> &[u8] {
@@ -86,23 +87,29 @@ impl<TI: SstableIteratorType> ConcatIteratorInner<TI> {
                 .sstable_store
                 .sstable(&self.sstable_infos[idx], &mut self.stats)
                 .await?;
-            let mut sstable_iter = TI::create(
+            let sstable_iter = TI::create(
                 table,
                 self.sstable_store.clone(),
                 self.read_options.clone(),
                 &self.sstable_infos[idx],
             );
 
+            let mut pending = IteratorStatsGuard::new(sstable_iter, &mut self.stats);
             if let Some(key) = seek_key {
-                sstable_iter.seek(key).await?;
+                pending.iter_mut().seek(key).await?;
             } else {
-                sstable_iter.rewind().await?;
+                pending.iter_mut().rewind().await?;
             }
+            fail_point!("concat_iter_after_seek_before_init_complete", |_| Err(
+                crate::hummock::HummockError::meta_error(
+                    "test error after concat iterator seek before initialization completes"
+                )
+            ));
 
+            let sstable_iter = pending.handoff();
             if let Some(old_iter) = self.sstable_iter.take() {
                 old_iter.collect_local_statistic(&mut self.stats);
             }
-
             self.sstable_iter = Some(sstable_iter);
             self.cur_idx = idx;
         }

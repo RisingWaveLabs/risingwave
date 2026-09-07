@@ -60,6 +60,7 @@ opentelemetry = { workspace = true }
 opentelemetry_sdk = { workspace = true }
 parking_lot = { workspace = true }
 parquet-variant = { workspace = true }
+parquet-variant-compute = { workspace = true }
 parquet-variant-json = { workspace = true }
 parse-display = "0.11"
 paste = "1"

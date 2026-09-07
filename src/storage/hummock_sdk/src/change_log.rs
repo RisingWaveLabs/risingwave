@@ -16,7 +16,6 @@ use std::collections::{HashMap, VecDeque};
 use std::ops::RangeBounds;
 
 use risingwave_common::catalog::TableId;
-use risingwave_pb::hummock::hummock_version_delta::PbChangeLogDelta;
 use risingwave_pb::hummock::{PbEpochNewChangeLog, PbSstableInfo, PbTableChangeLog};
 use tracing::warn;
 
@@ -321,21 +320,18 @@ pub fn build_table_change_log_delta<'a>(
     old_value_ssts: impl Iterator<Item = SstableInfo>,
     new_value_ssts: impl Iterator<Item = &'a SstableInfo>,
     epochs: &Vec<u64>,
-    log_store_table_ids: impl Iterator<Item = (TableId, u64)>,
-) -> HashMap<TableId, ChangeLogDelta> {
+    log_store_table_ids: impl Iterator<Item = TableId>,
+) -> HashMap<TableId, EpochNewChangeLog> {
     let mut table_change_log: HashMap<_, _> = log_store_table_ids
-        .map(|(table_id, truncate_epoch)| {
+        .map(|table_id| {
             let (non_checkpoint_epochs, checkpoint_epoch) = resolve_pb_log_epochs(epochs);
             (
                 table_id,
-                ChangeLogDelta {
-                    truncate_epoch,
-                    new_log: EpochNewChangeLog {
-                        new_value: vec![],
-                        old_value: vec![],
-                        non_checkpoint_epochs,
-                        checkpoint_epoch,
-                    },
+                EpochNewChangeLog {
+                    new_value: vec![],
+                    old_value: vec![],
+                    non_checkpoint_epochs,
+                    checkpoint_epoch,
                 },
             )
         })
@@ -344,7 +340,7 @@ pub fn build_table_change_log_delta<'a>(
         for table_id in &sst.table_ids {
             match table_change_log.get_mut(table_id) {
                 Some(log) => {
-                    log.new_log.old_value.push(sst.clone());
+                    log.old_value.push(sst.clone());
                 }
                 None => {
                     warn!(%table_id, ?sst, "old value sst contains non-log-store table");
@@ -355,67 +351,11 @@ pub fn build_table_change_log_delta<'a>(
     for sst in new_value_ssts {
         for table_id in &sst.table_ids {
             if let Some(log) = table_change_log.get_mut(table_id) {
-                log.new_log.new_value.push(sst.clone());
+                log.new_value.push(sst.clone());
             }
         }
     }
     table_change_log
-}
-
-#[derive(Debug, PartialEq, Clone)]
-pub struct ChangeLogDeltaCommon<T> {
-    pub truncate_epoch: u64,
-    pub new_log: EpochNewChangeLogCommon<T>,
-}
-
-pub type ChangeLogDelta = ChangeLogDeltaCommon<SstableInfo>;
-
-impl<T> From<&ChangeLogDeltaCommon<T>> for PbChangeLogDelta
-where
-    PbSstableInfo: for<'a> From<&'a T>,
-{
-    fn from(val: &ChangeLogDeltaCommon<T>) -> Self {
-        Self {
-            truncate_epoch: val.truncate_epoch,
-            new_log: Some((&val.new_log).into()),
-        }
-    }
-}
-
-impl<T> From<&PbChangeLogDelta> for ChangeLogDeltaCommon<T>
-where
-    T: for<'a> From<&'a PbSstableInfo>,
-{
-    fn from(val: &PbChangeLogDelta) -> Self {
-        Self {
-            truncate_epoch: val.truncate_epoch,
-            new_log: val.new_log.as_ref().unwrap().into(),
-        }
-    }
-}
-
-impl<T> From<ChangeLogDeltaCommon<T>> for PbChangeLogDelta
-where
-    PbSstableInfo: From<T>,
-{
-    fn from(val: ChangeLogDeltaCommon<T>) -> Self {
-        Self {
-            truncate_epoch: val.truncate_epoch,
-            new_log: Some(val.new_log.into()),
-        }
-    }
-}
-
-impl<T> From<PbChangeLogDelta> for ChangeLogDeltaCommon<T>
-where
-    T: From<PbSstableInfo>,
-{
-    fn from(val: PbChangeLogDelta) -> Self {
-        Self {
-            truncate_epoch: val.truncate_epoch,
-            new_log: val.new_log.unwrap().into(),
-        }
-    }
 }
 
 #[cfg(test)]

@@ -35,7 +35,6 @@ use serde::{Deserialize, Serialize};
 use crate::WithPropertiesExt;
 use crate::connector_common::{PgConnectionConfig, PostgresExternalTable, SslMode};
 use crate::error::{ConnectorError, ConnectorResult};
-use crate::parser::mysql_row_to_owned_row;
 use crate::source::CdcTableSnapshotSplit;
 use crate::source::cdc::CdcSourceType;
 use crate::source::cdc::external::mock_external_table::MockExternalTableReader;
@@ -91,7 +90,7 @@ impl ExternalCdcTableType {
     ) -> ConnectorResult<ExternalTableReaderImpl> {
         match self {
             Self::MySql => Ok(ExternalTableReaderImpl::MySql(
-                MySqlExternalTableReader::new(config, schema).await?,
+                MySqlExternalTableReader::new(config, schema, pk_indices).await?,
             )),
             Self::Postgres => Ok(ExternalTableReaderImpl::Postgres(
                 PostgresExternalTableReader::new(config, schema, pk_indices, schema_table_name)
@@ -506,8 +505,14 @@ impl ExternalTableImpl {
             CdcSourceType::Postgres => {
                 let pg_conn = config.pg_connection_config()?;
                 Ok(ExternalTableImpl::Postgres(
-                    PostgresExternalTable::connect(&pg_conn, &config.schema, &config.table, false)
-                        .await?,
+                    PostgresExternalTable::connect(
+                        &pg_conn,
+                        &config.schema,
+                        &config.table,
+                        false,
+                        Some("SELECT"),
+                    )
+                    .await?,
                 ))
             }
             CdcSourceType::SqlServer => Ok(ExternalTableImpl::SqlServer(

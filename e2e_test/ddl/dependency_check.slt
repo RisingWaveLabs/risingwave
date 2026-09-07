@@ -8,6 +8,15 @@ statement ok
 create index i_a1 on a(a1);
 
 statement ok
+create view v_index as select * from a where a1 = 1;
+
+statement error Permission denied
+drop index i_a1;
+
+statement ok
+drop view v_index;
+
+statement ok
 create table b (b1 int, b2 int);
 
 statement ok

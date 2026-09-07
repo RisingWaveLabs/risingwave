@@ -1,0 +1,169 @@
+# MongoDB CDC source TLS and mutual TLS test
+control substitution on
+
+statement ok
+SET RW_IMPLICIT_FLUSH TO true;
+
+# Wait for both TLS replica sets to elect a primary before preparing snapshot rows.
+system ok retry 30 backoff 1s
+mongosh --quiet --host mongodb-tls --tls --tlsCAFile /mongodb-tls/ca.pem --eval 'quit(db.hello().isWritablePrimary ? 0 : 1)'
+
+system ok retry 30 backoff 1s
+mongosh --quiet --host mongodb-mtls --tls --tlsCAFile /mongodb-tls/ca.pem --tlsCertificateKeyFile /mongodb-tls/client.pem --eval 'quit(db.hello().isWritablePrimary ? 0 : 1)'
+
+system ok
+mongosh --quiet --host mongodb-tls --tls --tlsCAFile /mongodb-tls/ca.pem <<'EOF'
+const db = db.getSiblingDB('rw_tls_ci');
+db.dropDatabase();
+db.optional_ca_only.insertOne({ _id: 1, phase: 'snapshot' });
+db.optional_with_identity.insertOne({ _id: 1, phase: 'snapshot' });
+EOF
+
+system ok
+mongosh --quiet --host mongodb-mtls --tls --tlsCAFile /mongodb-tls/ca.pem --tlsCertificateKeyFile /mongodb-tls/client.pem <<'EOF'
+const db = db.getSiblingDB('rw_mtls_ci');
+db.dropDatabase();
+db.strict_with_identity.insertOne({ _id: 1, phase: 'snapshot' });
+db.strict_with_pkcs1_identity.insertOne({ _id: 1, phase: 'snapshot' });
+EOF
+
+# A CA-only client can verify the optional-client-cert server and consume changes.
+statement ok
+CREATE TABLE mongodb_tls_optional_ca_only (
+  _id JSONB PRIMARY KEY,
+  payload JSONB
+) WITH (
+  connector = 'mongodb-cdc',
+  mongodb.url = 'mongodb://mongodb-tls:27017/?replicaSet=rs-tls&tls=true&tlsCAFile=/mongodb-tls/ca.pem',
+  collection.name = 'rw_tls_ci.optional_ca_only'
+);
+
+# Supplying a client identity also works when the server makes it optional.
+statement ok
+CREATE TABLE mongodb_tls_optional_with_identity (
+  _id JSONB PRIMARY KEY,
+  payload JSONB
+) WITH (
+  connector = 'mongodb-cdc',
+  mongodb.url = 'mongodb://mongodb-tls:27017/?replicaSet=rs-tls&tls=true&tlsCAFile=/mongodb-tls/ca.pem&tlsCertificateKeyFile=/mongodb-tls/client.pem',
+  collection.name = 'rw_tls_ci.optional_with_identity'
+);
+
+# A strict server rejects a client that trusts the server but has no client identity.
+# The exact low-level EOF wording differs across MongoDB driver versions.
+statement error
+CREATE TABLE mongodb_mtls_missing_identity (
+  _id JSONB PRIMARY KEY,
+  payload JSONB
+) WITH (
+  connector = 'mongodb-cdc',
+  mongodb.url = 'mongodb://mongodb-mtls:27017/?replicaSet=rs-mtls&tls=true&tlsCAFile=/mongodb-tls/ca.pem',
+  collection.name = 'rw_mtls_ci.missing_identity'
+);
+
+# A strict server accepts a client with both the test CA and a client identity.
+statement ok
+CREATE TABLE mongodb_mtls_with_identity (
+  _id JSONB PRIMARY KEY,
+  payload JSONB
+) WITH (
+  connector = 'mongodb-cdc',
+  mongodb.url = 'mongodb://mongodb-mtls:27017/?replicaSet=rs-mtls&tls=true&tlsCAFile=/mongodb-tls/ca.pem&tlsCertificateKeyFile=/mongodb-tls/client.pem',
+  collection.name = 'rw_mtls_ci.strict_with_identity'
+);
+
+# A client identity alone does not make the private server CA trusted.
+statement error PKIX path building failed
+CREATE TABLE mongodb_mtls_missing_ca (
+  _id JSONB PRIMARY KEY,
+  payload JSONB
+) WITH (
+  connector = 'mongodb-cdc',
+  mongodb.url = 'mongodb://mongodb-mtls:27017/?replicaSet=rs-mtls&tls=true&tlsCertificateKeyFile=/mongodb-tls/client.pem',
+  collection.name = 'rw_mtls_ci.missing_ca'
+);
+
+# Traditional RSA PKCS#1 client keys are converted to PKCS#8 in memory.
+statement ok
+CREATE TABLE mongodb_mtls_with_pkcs1_identity (
+  _id JSONB PRIMARY KEY,
+  payload JSONB
+) WITH (
+  connector = 'mongodb-cdc',
+  mongodb.url = 'mongodb://mongodb-mtls:27017/?replicaSet=rs-mtls&tls=true&tlsCAFile=/mongodb-tls/ca.pem&tlsCertificateKeyFile=/mongodb-tls/client-rsa-pkcs1.pem',
+  collection.name = 'rw_mtls_ci.strict_with_pkcs1_identity'
+);
+
+# All positive cases must read their pre-existing snapshot row.
+query I retry 20 backoff 1s
+SELECT count(*) FROM mongodb_tls_optional_ca_only;
+----
+1
+
+query I retry 20 backoff 1s
+SELECT count(*) FROM mongodb_tls_optional_with_identity;
+----
+1
+
+query I retry 20 backoff 1s
+SELECT count(*) FROM mongodb_mtls_with_identity;
+----
+1
+
+query I retry 20 backoff 1s
+SELECT count(*) FROM mongodb_mtls_with_pkcs1_identity;
+----
+1
+
+system ok
+mongosh --quiet --host mongodb-tls --tls --tlsCAFile /mongodb-tls/ca.pem <<'EOF'
+const db = db.getSiblingDB('rw_tls_ci');
+db.optional_ca_only.insertOne({ _id: 2, phase: 'live' });
+db.optional_with_identity.insertOne({ _id: 2, phase: 'live' });
+EOF
+
+system ok
+mongosh --quiet --host mongodb-mtls --tls --tlsCAFile /mongodb-tls/ca.pem --tlsCertificateKeyFile /mongodb-tls/client.pem <<'EOF'
+const db = db.getSiblingDB('rw_mtls_ci');
+db.strict_with_identity.insertOne({ _id: 2, phase: 'live' });
+db.strict_with_pkcs1_identity.insertOne({ _id: 2, phase: 'live' });
+EOF
+
+# Live rows exercise the long-running Debezium clients, not only DDL validation.
+query I retry 20 backoff 1s
+SELECT count(*) FROM mongodb_tls_optional_ca_only;
+----
+2
+
+query I retry 20 backoff 1s
+SELECT count(*) FROM mongodb_tls_optional_with_identity;
+----
+2
+
+query I retry 20 backoff 1s
+SELECT count(*) FROM mongodb_mtls_with_identity;
+----
+2
+
+query I retry 20 backoff 1s
+SELECT count(*) FROM mongodb_mtls_with_pkcs1_identity;
+----
+2
+
+statement ok
+DROP TABLE mongodb_tls_optional_ca_only;
+
+statement ok
+DROP TABLE mongodb_tls_optional_with_identity;
+
+statement ok
+DROP TABLE mongodb_mtls_with_identity;
+
+statement ok
+DROP TABLE mongodb_mtls_with_pkcs1_identity;
+
+system ok
+mongosh --quiet --host mongodb-tls --tls --tlsCAFile /mongodb-tls/ca.pem --eval "db.getSiblingDB('rw_tls_ci').dropDatabase()"
+
+system ok
+mongosh --quiet --host mongodb-mtls --tls --tlsCAFile /mongodb-tls/ca.pem --tlsCertificateKeyFile /mongodb-tls/client.pem --eval "db.getSiblingDB('rw_mtls_ci').dropDatabase()"

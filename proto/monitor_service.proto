@@ -25,6 +25,8 @@ message StackTraceResponse {
   // Per-worker error messages when collecting stack traces from the cluster.
   // Key: worker id.
   map<uint32, string> node_errors = 8;
+  // Key: batch task id in the format of "{query_id}-{stage_id}-{task_id}".
+  map<string, string> batch_traces = 9;
 }
 
 // CPU profiling

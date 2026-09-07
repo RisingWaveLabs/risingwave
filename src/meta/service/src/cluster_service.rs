@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use risingwave_common::RW_VERSION;
+use risingwave_common::util::version::{current_rw_version, is_compatible_rw_version};
 use risingwave_meta::barrier::BarrierManagerRef;
 use risingwave_meta::manager::MetadataManager;
 use risingwave_pb::common::worker_node::State;
@@ -56,14 +56,15 @@ impl ClusterService for ClusterServiceImpl {
             .property
             .ok_or_else(|| MetaError::invalid_parameter("worker node property is not provided"))?;
         let resource = req.resource.unwrap_or_default();
+        let current_rw_version = current_rw_version();
         if matches!(
             worker_type,
             PbWorkerType::Frontend | PbWorkerType::ComputeNode | PbWorkerType::Compactor
-        ) && resource.rw_version != RW_VERSION
+        ) && !is_compatible_rw_version(&resource.rw_version)
         {
             return Err(MetaError::invalid_parameter(format!(
                 "worker node version {} does not match meta node version {}",
-                resource.rw_version, RW_VERSION,
+                resource.rw_version, current_rw_version,
             ))
             .into());
         }

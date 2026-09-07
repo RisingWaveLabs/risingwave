@@ -1,5 +1,8 @@
 name: Grafana Generate Check
 
+permissions:
+  contents: read
+
 on:
   pull_request:
     branches: [main]

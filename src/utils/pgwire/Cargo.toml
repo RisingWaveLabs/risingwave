@@ -41,7 +41,7 @@ url = "2"
 workspace-hack = { path = "../../workspace-hack" }
 
 [dev-dependencies]
-base64 = "0.22"
+base64 = "0.23"
 jsonwebtoken = { workspace = true }
 rand = { version = "0.8" }
 rsa = "0.9"

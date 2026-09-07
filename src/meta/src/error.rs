@@ -42,7 +42,7 @@ pub type MetaResult<T> = std::result::Result<T, MetaError>;
     macro(path = "crate::error")
 )]
 pub enum MetaErrorInner {
-    #[error("MetadataModel error: {0}")]
+    #[error("Metadata model error: {0}")]
     MetadataModelError(
         #[from]
         #[backtrace]
@@ -63,7 +63,7 @@ pub enum MetaErrorInner {
         RpcError,
     ),
 
-    #[error("PermissionDenied: {0}")]
+    #[error("{0}")]
     PermissionDenied(String),
 
     #[error("Invalid worker: {0}, {1}")]
@@ -77,10 +77,10 @@ pub enum MetaErrorInner {
     #[construct(skip)]
     CatalogIdNotFound(&'static str, String),
 
-    #[error("table_fragment not exist: id={0}")]
+    #[error("table_fragment does not exist: id={0}")]
     FragmentNotFound(FragmentId),
 
-    #[error("{0} with name {1} exists{under_creation}", under_creation = (.2).map(|_| " but under creation").unwrap_or(""))]
+    #[error("{0} named {1} already exists{under_creation}", under_creation = (.2).map(|_| " and is still being created").unwrap_or(""))]
     Duplicated(
         &'static str,
         String,
@@ -97,10 +97,10 @@ pub enum MetaErrorInner {
     #[error("Cancelled: {0}")]
     Cancelled(String),
 
-    #[error("SystemParams error: {0}")]
+    #[error("System parameters error: {0}")]
     SystemParams(String),
 
-    #[error("SessionParams error: {0}")]
+    #[error("Session parameters error: {0}")]
     SessionConfig(
         #[from]
         #[backtrace]

@@ -1,11 +1,8 @@
 extend = "common.toml"
 
 [env]
-ADBC_VERSION = { value = "21", condition = { env_not_set = [
-    "ADBC_VERSION",
-] } }
-# Driver version in wheel filename (e.g., 1.9.0 for ADBC release 21)
-ADBC_DRIVER_VERSION = { value = "1.9.0", condition = { env_not_set = [
+# ADBC Driver Foundry Snowflake driver release version.
+ADBC_DRIVER_VERSION = { value = "1.12.0", condition = { env_not_set = [
     "ADBC_DRIVER_VERSION",
 ] } }
 ADBC_LIB_SUFFIX = { source = "${OS}", mapping = { linux = "so", darwin = "dylib" } }
@@ -33,7 +30,6 @@ fi
 # Note: cargo-make runs task scripts from a temp dir (e.g. /tmp/scripts),
 # so we must not rely on `${BASH_SOURCE[0]}` to locate repo files.
 SCRIPT_PATH="${CARGO_MAKE_WORKING_DIRECTORY:-$(pwd)}/src/risedevtool/scripts/download_adbc_snowflake_driver.sh"
-ADBC_VERSION="${ADBC_VERSION}" \
 ADBC_DRIVER_VERSION="${ADBC_DRIVER_VERSION}" \
 DEST_DIR="${PREFIX_BIN}/adbc" \
 TMP_DIR="${PREFIX_TMP}" \

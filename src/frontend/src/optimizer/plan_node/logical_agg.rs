@@ -1342,10 +1342,17 @@ impl PredicatePushdown for LogicalAgg {
             return gen_filter_and_pushdown(self, predicate, Condition::true_cond(), ctx);
         }
 
-        // If the filter references agg_calls, we can not push it.
+        // If the filter references agg_calls, we can not push it. An impure predicate must also
+        // remain above the aggregation because pushing it down changes its evaluation cardinality
+        // from once per group to once per input row.
         let mut agg_call_columns = FixedBitSet::with_capacity(num_group_key + num_agg_calls);
         agg_call_columns.insert_range(num_group_key..num_group_key + num_agg_calls);
-        let (agg_call_pred, pushed_predicate) = predicate.split_disjoint(&agg_call_columns);
+        let [agg_call_pred, pushed_predicate] = predicate.group_by::<_, 2>(|expr| {
+            (expr.is_pure()
+                && expr
+                    .collect_input_refs(self.schema().len())
+                    .is_disjoint(&agg_call_columns)) as usize
+        });
 
         // convert the predicate to one that references the child of the agg
         let mut subst = Substitute {
@@ -1554,7 +1561,11 @@ impl ToStream for LogicalAgg {
         let logical_input = if self.group_key().is_empty() {
             self.input()
         } else {
-            try_enforce_locality_requirement(self.input(), &self.group_key().to_vec())
+            try_enforce_locality_requirement(
+                self.input(),
+                &self.group_key().to_vec(),
+                ctx.locality_backfill_enabled(),
+            )
         };
         let (input, input_col_change) = logical_input.logical_rewrite_for_stream(ctx)?;
         let (agg, out_col_change) = self.rewrite_with_input(input, input_col_change);

@@ -16,7 +16,7 @@ use pgwire::pg_response::StatementType;
 use risingwave_common::util::worker_util::DEFAULT_RESOURCE_GROUP;
 use risingwave_sqlparser::ast::{ObjectName, SetVariableValue, SetVariableValueSingle, Value};
 
-use super::alter_utils::resolve_streaming_job_id_for_alter_parallelism;
+use super::alter_utils::resolve_streaming_job_id_for_alter;
 use super::{HandlerArgs, RwPgResponse};
 use crate::error::{ErrorCode, Result};
 
@@ -31,12 +31,8 @@ pub async fn handle_alter_resource_group(
 
     risingwave_common::license::Feature::ResourceGroup.check_available()?;
 
-    let job_id = resolve_streaming_job_id_for_alter_parallelism(
-        &session,
-        obj_name,
-        stmt_type,
-        "resource group",
-    )?;
+    let job_id =
+        resolve_streaming_job_id_for_alter(&session, obj_name, stmt_type, "resource group")?;
 
     let resource_group = resource_group
         .map(resolve_resource_group)

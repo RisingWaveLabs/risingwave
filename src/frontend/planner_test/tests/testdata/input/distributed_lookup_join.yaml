@@ -30,3 +30,26 @@
     select * from t1 natural join t2;
   expected_outputs:
     - batch_plan
+- id: lookup join on a lookup table with singleton distribution
+  sql: |
+    create table t1 (a int, b int);
+    create materialized view mv1 as select a, b from t1 order by a limit 100;
+    select * from t1 join mv1 on t1.a = mv1.a;
+  expected_outputs:
+    - batch_plan
+    - batch_local_plan
+- id: no lookup join on a singleton lookup table if the join key is not a prefix of its primary key
+  sql: |
+    create table t1 (a int, b int);
+    create materialized view mv1 as select a, b from t1 order by a limit 100;
+    select * from t1 join mv1 on t1.b = mv1.b;
+  expected_outputs:
+    - batch_plan
+- id: fix https://github.com/risingwavelabs/risingwave/issues/26730
+  sql: |
+    create table t1 (a int);
+    create materialized view mv1 as select a from t1 order by a, a limit 1;
+    select t1.a from t1 join mv1 on t1.a = mv1.a;
+  expected_outputs:
+    - batch_plan
+    - batch_local_plan

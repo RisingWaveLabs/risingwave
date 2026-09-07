@@ -26,6 +26,7 @@ use itertools::Itertools;
 use percent_encoding::percent_decode_str;
 use pgwire::pg_response::{PgResponse, StatementType};
 use prost::Message as _;
+use risingwave_common::acl::AclMode;
 use risingwave_common::catalog::{
     CdcTableDesc, ColumnCatalog, ColumnDesc, ConflictBehavior, DEFAULT_SCHEMA_NAME, Engine,
     ICEBERG_SINK_PREFIX, ICEBERG_SOURCE_PREFIX, RISINGWAVE_ICEBERG_ROW_ID, ROW_ID_COLUMN_NAME,
@@ -81,6 +82,7 @@ use crate::handler::create_source::{
     UPSTREAM_SOURCE_KEY, bind_connector_props, bind_create_source_or_table_with_connector,
     bind_source_watermark, handle_addition_columns, reject_variant_columns,
 };
+use crate::handler::privilege::ObjectCheckItem;
 use crate::handler::util::{
     LongRunningNotificationAction, SourceSchemaCompatExt, execute_with_long_running_notification,
 };
@@ -217,8 +219,8 @@ fn check_generated_column_constraints(
             .any(|c| c == referred_generated_column)
         {
             return Err(ErrorCode::BindError(format!(
-                "Generated can not reference another generated column. \
-                But here generated column \"{}\" referenced another generated column \"{}\"",
+                "A generated column cannot reference another generated column. \
+                Generated column \"{}\" references generated column \"{}\"",
                 column_name, referred_generated_column
             ))
             .into());
@@ -279,7 +281,7 @@ pub fn bind_sql_column_constraints(
 
                     let expr_impl = binder.bind_expr(expr).with_context(|| {
                         format!(
-                            "fail to bind expression in generated column \"{}\"",
+                            "failed to bind the expression in generated column \"{}\"",
                             column.name.real_value()
                         )
                     })?;
@@ -1421,6 +1423,7 @@ pub(super) async fn handle_create_table_plan(
                 )?;
                 source.clone()
             };
+            check_cdc_source_select_privilege(session, &source)?;
             let (cdc_with_options, normalized_external_table_name) =
                 derive_with_options_for_cdc_table(
                     &source.with_properties,
@@ -2126,14 +2129,14 @@ pub async fn create_iceberg_engine_table(
 
     // Create iceberg sink table, used for iceberg source column binding. See `bind_columns_from_source_for_non_cdc` for more details.
     // TODO: We can derive the columns directly from table definition in the future, so that we don't need to pre-create the table catalog.
-    let (iceberg_catalog, table_identifier) = {
+    let (iceberg_catalog, table_identifier, table_created) = {
         let sink_param = SinkParam::try_from_sink_catalog(sink_catalog.clone())?;
         let iceberg_sink = IcebergSink::try_from(sink_param)?;
-        iceberg_sink.create_table_if_not_exists().await?;
+        let table_created = iceberg_sink.create_table_if_not_exists().await?;
 
         let iceberg_catalog = iceberg_sink.config.create_catalog().await?;
         let table_identifier = iceberg_sink.config.full_table_name()?;
-        (iceberg_catalog, table_identifier)
+        (iceberg_catalog, table_identifier, table_created)
     };
 
     let create_source_type = CreateSourceType::for_newly_created(&session, &*with_properties);
@@ -2197,16 +2200,20 @@ pub async fn create_iceberg_engine_table(
     .await;
 
     if res.is_err() {
-        let _ = iceberg_catalog
-            .drop_table(&table_identifier)
-            .await
-            .inspect_err(|err| {
-                tracing::error!(
-                    "failed to drop iceberg table {} after create iceberg engine table failed: {}",
-                    table_identifier,
-                    err.as_report()
-                );
-            });
+        // Only clean up an iceberg table this statement created; a pre-existing
+        // external table must survive a failed CREATE.
+        if table_created {
+            let _ = iceberg_catalog
+                .drop_table(&table_identifier)
+                .await
+                .inspect_err(|err| {
+                    tracing::error!(
+                        "failed to drop iceberg table {} after create iceberg engine table failed: {}",
+                        table_identifier,
+                        err.as_report()
+                    );
+                });
+        }
         res?
     }
 
@@ -2464,8 +2471,18 @@ fn get_source_and_resolved_table_name(
         )?;
         source.clone()
     };
+    check_cdc_source_select_privilege(session, &source)?;
 
     Ok((source, resolved_table_name))
+}
+
+fn check_cdc_source_select_privilege(session: &SessionImpl, source: &SourceCatalog) -> Result<()> {
+    session.check_privileges(&[ObjectCheckItem::new(
+        source.owner,
+        AclMode::Select,
+        source.name.clone(),
+        source.id,
+    )])
 }
 
 // validate the webhook_info and also bind the webhook_info to protobuf
@@ -2595,6 +2612,80 @@ mod tests {
 
     fn pk_names() -> Vec<String> {
         vec!["plan_id".to_owned(), "site_id".to_owned()]
+    }
+
+    #[tokio::test]
+    async fn test_cdc_table_requires_select_privilege_on_source() {
+        let frontend = LocalFrontend::new(Default::default()).await;
+        frontend
+            .run_sql(
+                r#"
+                CREATE SOURCE cdc_source WITH (
+                    connector = 'mysql-cdc',
+                    hostname = 'localhost',
+                    port = '3306',
+                    username = 'root',
+                    password = '',
+                    database.name = 'db'
+                ) FORMAT PLAIN ENCODE JSON
+                "#,
+            )
+            .await
+            .unwrap();
+        frontend.run_sql("CREATE USER cdc_user").await.unwrap();
+        frontend
+            .run_sql("GRANT CREATE ON SCHEMA public TO cdc_user")
+            .await
+            .unwrap();
+
+        let user_id = frontend
+            .session_ref()
+            .env()
+            .user_info_reader()
+            .read_guard()
+            .get_user_by_name("cdc_user")
+            .unwrap()
+            .id;
+        let user_session = frontend.session_user_ref(
+            DEFAULT_DATABASE_NAME.to_owned(),
+            "cdc_user".to_owned(),
+            user_id,
+        );
+        let create_table =
+            "CREATE TABLE cdc_table (id INT PRIMARY KEY) FROM cdc_source TABLE 'db.t'";
+
+        let err = frontend
+            .run_sql_with_session(user_session.clone(), create_table)
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("permission denied for source \"cdc_source\": \"SELECT\""),
+            "{err:?}"
+        );
+
+        frontend
+            .run_sql("GRANT SELECT ON SOURCE cdc_source TO cdc_user")
+            .await
+            .unwrap();
+        frontend
+            .run_sql_with_session(user_session.clone(), create_table)
+            .await
+            .unwrap();
+
+        frontend
+            .run_sql("REVOKE SELECT ON SOURCE cdc_source FROM cdc_user")
+            .await
+            .unwrap();
+        let err = frontend
+            .run_sql_with_session(user_session, "ALTER TABLE cdc_table ADD COLUMN value INT")
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("permission denied for source \"cdc_source\": \"SELECT\""),
+            "{err:?}"
+        );
     }
 
     #[test]

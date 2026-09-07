@@ -206,7 +206,13 @@ impl SchemaCatalog {
     }
 
     pub fn drop_index(&mut self, id: IndexId) {
-        let index_ref = self.index_by_id.remove(&id).unwrap();
+        let Some(index_ref) = self.index_by_id.remove(&id) else {
+            tracing::warn!(
+                %id,
+                "index not found when dropping, frontend might not be notified yet"
+            );
+            return;
+        };
         self.index_by_name.remove(&index_ref.name).unwrap();
         match self.indexes_by_table_id.entry(index_ref.primary_table.id) {
             Occupied(mut entry) => {
@@ -241,7 +247,13 @@ impl SchemaCatalog {
     }
 
     pub fn drop_source(&mut self, id: SourceId) {
-        let source_ref = self.source_by_id.remove(&id).unwrap();
+        let Some(source_ref) = self.source_by_id.remove(&id) else {
+            tracing::warn!(
+                %id,
+                "source not found when dropping, frontend might not be notified yet"
+            );
+            return;
+        };
         self.source_by_name.remove(&source_ref.name).unwrap();
         if let Some(connection_id) = source_ref.connection_id
             && let Occupied(mut e) = self.connection_source_ref.entry(connection_id)
@@ -1143,5 +1155,19 @@ impl From<&PbSchema> for SchemaCatalog {
             subscription_by_name: HashMap::new(),
             subscription_by_id: HashMap::new(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use risingwave_pb::catalog::PbSchema;
+
+    use super::SchemaCatalog;
+
+    #[test]
+    fn test_drop_missing_relation_is_idempotent() {
+        let mut schema = SchemaCatalog::from(&PbSchema::default());
+        schema.drop_index(1.into());
+        schema.drop_source(2.into());
     }
 }

@@ -251,7 +251,7 @@ pub async fn scan_iceberg_metadata(
                             sort_order_id: file.sort_order_id(),
                             snapshot_id: entry.snapshot_id(),
                             data_sequence_number: entry.sequence_number(),
-                            file_sequence_number: entry.file_sequence_number(),
+                            file_sequence_number: entry.file_sequence_number,
                             manifest_path: manifest_path.clone(),
                             referenced_data_file: file.referenced_data_file(),
                             content_offset: file.content_offset(),

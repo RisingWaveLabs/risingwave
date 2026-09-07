@@ -141,6 +141,11 @@ pub struct FragmentServingInfo {
 
 #[easy_ext::ext(FragmentTypeMaskExt)]
 pub impl FragmentTypeMask {
+    /// Matches fragments whose creation progress cannot be recovered after a failure.
+    fn contains_non_recoverable_fragment() -> SimpleExpr {
+        Self::intersects(FragmentTypeFlag::Values)
+    }
+
     fn intersects(flag: FragmentTypeFlag) -> SimpleExpr {
         Expr::col(fragment::Column::FragmentTypeMask)
             .bit_and(Expr::value(flag as i32))
@@ -1747,7 +1752,7 @@ impl CatalogController {
             })?;
 
         if fragment_relation != DispatcherType::NoShuffle {
-            return Err(anyhow!("expect NoShuffle but get {:?}", fragment_relation).into());
+            return Err(anyhow!("expected NoShuffle but got {:?}", fragment_relation).into());
         }
 
         let load_fragment_distribution_type = |txn, fragment_id: FragmentId| async move {

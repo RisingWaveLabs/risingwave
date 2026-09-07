@@ -415,6 +415,9 @@ async fn test_over_window_evict_between_chunks() {
     let store = MemoryStateStore::new();
     let watermark = Arc::new(AtomicU64::new(0));
     let metrics = Arc::new(StreamingMetrics::unused());
+    let ow_metrics = metrics.new_over_window_metrics(TableId::new(1), 123.into(), 0.into());
+    let initial_lookup_count = ow_metrics.over_window_cache_lookup_count.get();
+    let initial_miss_count = ow_metrics.over_window_cache_miss_count.get();
     let calls = vec![
         // sum(x) over (partition by .. order by .. rows unbounded preceding)
         WindowFuncCall {
@@ -502,9 +505,14 @@ async fn test_over_window_evict_between_chunks() {
     // 4 partition lookups (p1, p2, p1, p1), all missing the cache: `p1` was evicted at
     // each chunk boundary in the second epoch. Without chunk-boundary eviction, the
     // last two lookups would hit the cache and the miss count would be 2.
-    let ow_metrics = metrics.new_over_window_metrics(TableId::new(1), 123.into(), 0.into());
-    assert_eq!(ow_metrics.over_window_cache_lookup_count.get(), 4);
-    assert_eq!(ow_metrics.over_window_cache_miss_count.get(), 4);
+    assert_eq!(
+        ow_metrics.over_window_cache_lookup_count.get(),
+        initial_lookup_count + 4
+    );
+    assert_eq!(
+        ow_metrics.over_window_cache_miss_count.get(),
+        initial_miss_count + 4
+    );
 }
 
 /// Regression test: deleting all rows of a fully-cached partition (no sentinels in the

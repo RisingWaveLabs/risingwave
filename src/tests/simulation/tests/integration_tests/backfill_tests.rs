@@ -308,7 +308,7 @@ async fn test_enable_arrangement_backfill() -> Result<()> {
 }
 
 #[tokio::test]
-async fn test_recovery_cancels_foreground_ddl() -> Result<()> {
+async fn test_recovery_cancels_early_foreground_ddl() -> Result<()> {
     let mut cluster = Cluster::start(Configuration::enable_arrangement_backfill()).await?;
     let mut session = cluster.start_session();
     session.run("SET BACKFILL_RATE_LIMIT=1").await?;
@@ -329,5 +329,19 @@ async fn test_recovery_cancels_foreground_ddl() -> Result<()> {
             assert!(e.to_string().contains("adhoc recovery"));
         }
     }
+    timeout(Duration::from_secs(30), async {
+        loop {
+            if cluster
+                .run("SELECT count(*) FROM rw_catalog.rw_ddl_progress;")
+                .await
+                .unwrap()
+                == "0"
+            {
+                break;
+            }
+            sleep(Duration::from_secs(1)).await;
+        }
+    })
+    .await?;
     Ok(())
 }

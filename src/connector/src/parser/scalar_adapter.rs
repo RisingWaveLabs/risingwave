@@ -15,12 +15,15 @@
 use std::str::FromStr;
 
 use anyhow::anyhow;
-use bytes::BytesMut;
+use bytes::{Buf, BufMut, BytesMut};
 use pg_bigdecimal::PgNumeric;
-use risingwave_common::types::{DataType, Decimal, Int256, ListValue, ScalarImpl, ScalarRefImpl};
+use risingwave_common::types::{
+    DataType, Decimal, Int256, ListValue, ScalarImpl, ScalarRefImpl, StructValue,
+};
 use thiserror_ext::AsReport;
 use tokio_postgres::types::{FromSql, IsNull, Kind, ToSql, Type, to_sql_checked};
 
+use crate::connector_common::postgres::postgres_point_type;
 use crate::error::ConnectorResult;
 
 #[derive(Clone, Debug)]
@@ -72,12 +75,60 @@ impl ToSql for EnumString {
     }
 }
 
+#[derive(Debug)]
+pub(crate) struct PgPoint {
+    x: f64,
+    y: f64,
+}
+
+impl<'a> FromSql<'a> for PgPoint {
+    fn from_sql(
+        _ty: &Type,
+        raw: &'a [u8],
+    ) -> Result<Self, Box<dyn std::error::Error + Sync + Send>> {
+        if raw.len() != 2 * std::mem::size_of::<f64>() {
+            return Err("invalid point binary payload length".into());
+        }
+
+        let mut buf = raw;
+
+        Ok(Self {
+            x: buf.get_f64(),
+            y: buf.get_f64(),
+        })
+    }
+
+    fn accepts(ty: &Type) -> bool {
+        *ty == Type::POINT
+    }
+}
+
+impl ToSql for PgPoint {
+    to_sql_checked!();
+
+    fn to_sql(
+        &self,
+        _ty: &Type,
+        out: &mut BytesMut,
+    ) -> Result<IsNull, Box<dyn std::error::Error + Sync + Send>> {
+        out.put_f64(self.x);
+        out.put_f64(self.y);
+
+        Ok(IsNull::No)
+    }
+
+    fn accepts(ty: &Type) -> bool {
+        *ty == Type::POINT
+    }
+}
+
 /// Adapter for `ScalarImpl` to Postgres data type,
 /// which can be used to encode/decode to/from Postgres value.
 #[derive(Debug)]
 pub(crate) enum ScalarAdapter {
     Builtin(ScalarImpl),
     Uuid(uuid::Uuid),
+    Point(PgPoint),
     // Currently in order to handle the decimal beyond RustDecimal,
     // we use the PgNumeric type to convert the decimal to a string/decimal/rw_int256.
     Numeric(PgNumeric),
@@ -100,6 +151,7 @@ impl ToSql for ScalarAdapter {
         match self {
             ScalarAdapter::Builtin(v) => v.to_sql(ty, out),
             ScalarAdapter::Uuid(v) => v.to_sql(ty, out),
+            ScalarAdapter::Point(v) => v.to_sql(ty, out),
             ScalarAdapter::Numeric(v) => v.to_sql(ty, out),
             ScalarAdapter::Enum(v) => v.to_sql(ty, out),
             ScalarAdapter::NumericList(v) => v.to_sql(ty, out),
@@ -122,6 +174,7 @@ impl<'a> FromSql<'a> for ScalarAdapter {
         match ty.kind() {
             Kind::Simple => match *ty {
                 Type::UUID => Ok(ScalarAdapter::Uuid(uuid::Uuid::from_sql(ty, raw)?)),
+                Type::POINT => Ok(ScalarAdapter::Point(PgPoint::from_sql(ty, raw)?)),
                 // In order to cover the decimal beyond RustDecimal(only 28 digits are supported),
                 // we use the PgNumeric to handle decimal from postgres.
                 Type::NUMERIC => Ok(ScalarAdapter::Numeric(PgNumeric::from_sql(ty, raw)?)),
@@ -142,7 +195,8 @@ impl<'a> FromSql<'a> for ScalarAdapter {
     fn accepts(ty: &Type) -> bool {
         match ty.kind() {
             Kind::Simple => {
-                matches!(ty, &Type::UUID | &Type::NUMERIC) || <ScalarImpl as FromSql>::accepts(ty)
+                matches!(ty, &Type::UUID | &Type::NUMERIC | &Type::POINT)
+                    || <ScalarImpl as FromSql>::accepts(ty)
             }
             Kind::Enum(_) => true,
             Kind::Array(inner_type) => <ScalarAdapter as FromSql>::accepts(inner_type),
@@ -156,6 +210,7 @@ impl ScalarAdapter {
         match self {
             ScalarAdapter::Builtin(_) => "Builtin",
             ScalarAdapter::Uuid(_) => "Uuid",
+            ScalarAdapter::Point(_) => "Point",
             ScalarAdapter::Numeric(_) => "Numeric",
             ScalarAdapter::Enum(_) => "Enum",
             ScalarAdapter::EnumList(_) => "EnumList",
@@ -171,6 +226,26 @@ impl ScalarAdapter {
     ) -> ConnectorResult<ScalarAdapter> {
         Ok(match (scalar, ty, ty.kind()) {
             (ScalarRefImpl::Utf8(s), &Type::UUID, _) => ScalarAdapter::Uuid(s.parse()?),
+            (ScalarRefImpl::Struct(point), &Type::POINT, _) => {
+                let mut fields = point.iter_fields_ref();
+
+                let (
+                    Some(Some(ScalarRefImpl::Float64(x))),
+                    Some(Some(ScalarRefImpl::Float64(y))),
+                    None,
+                ) = (fields.next(), fields.next(), fields.next())
+                else {
+                    return Err(anyhow!(
+                        "failed to convert struct to PostgreSQL point: expected exactly two non-null float64 fields"
+                    )
+                    .into());
+                };
+
+                ScalarAdapter::Point(PgPoint {
+                    x: x.into_inner(),
+                    y: y.into_inner(),
+                })
+            }
             (ScalarRefImpl::Utf8(s), &Type::NUMERIC, _) => {
                 ScalarAdapter::Numeric(string_to_pg_numeric(s))
             }
@@ -229,6 +304,15 @@ impl ScalarAdapter {
             (ScalarAdapter::Builtin(scalar), _) => Some(scalar),
             (ScalarAdapter::Uuid(uuid), &DataType::Varchar) => {
                 Some(ScalarImpl::from(uuid.to_string()))
+            }
+            (ScalarAdapter::Point(PgPoint { x, y }), &DataType::Struct(_)) => {
+                assert_eq!(
+                    ty,
+                    &postgres_point_type(),
+                    "PostgreSQL point must map to struct<x float64, y float64>"
+                );
+
+                Some(StructValue::new(vec![Some(x.into()), Some(y.into())]).into())
             }
             (ScalarAdapter::Numeric(numeric), &DataType::Varchar) => {
                 Some(ScalarImpl::from(pg_numeric_to_string(&numeric)))
@@ -393,5 +477,30 @@ fn rw_numeric_to_pg_numeric(val: Decimal) -> PgNumeric {
         Decimal::Normalized(inner) => PgNumeric::Normalized(inner.to_string().parse().unwrap()),
         Decimal::PositiveInf => PgNumeric::PositiveInf,
         Decimal::NaN => PgNumeric::NaN,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use risingwave_common::types::{ScalarImpl, StructValue};
+    use tokio_postgres::types::{FromSql, Type};
+
+    use super::ScalarAdapter;
+    use crate::connector_common::postgres::postgres_point_type;
+
+    #[test]
+    fn test_postgres_point_into_scalar() {
+        let mut raw = vec![];
+        raw.extend_from_slice(&16777217.25f64.to_be_bytes());
+        raw.extend_from_slice(&(-0.987654321098765f64).to_be_bytes());
+
+        let adapter = ScalarAdapter::from_sql(&Type::POINT, &raw).unwrap();
+        assert_eq!(
+            adapter.into_scalar(&postgres_point_type()),
+            Some(ScalarImpl::Struct(StructValue::new(vec![
+                Some(ScalarImpl::Float64(16777217.25.into())),
+                Some(ScalarImpl::Float64((-0.987654321098765).into())),
+            ])))
+        );
     }
 }

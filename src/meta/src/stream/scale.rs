@@ -1280,14 +1280,11 @@ impl GlobalStreamManager {
 
         let _reschedule_job_lock = self.reschedule_lock_write_guard().await;
 
-        let background_streaming_jobs = self
-            .metadata_manager
-            .list_background_creating_jobs()
-            .await?;
+        let creating_streaming_jobs = self.metadata_manager.list_creating_jobs().await?;
 
         let blocked_jobs = self
             .metadata_manager
-            .collect_reschedule_blocked_jobs_for_creating_jobs(&background_streaming_jobs, true)
+            .collect_reschedule_blocked_jobs_for_creating_jobs(&creating_streaming_jobs, true)
             .await?;
         let has_blocked_jobs = !blocked_jobs.is_empty();
 

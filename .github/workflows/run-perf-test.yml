@@ -1,4 +1,8 @@
 name: Run Perf Test
+
+permissions:
+  contents: read
+
 on:
   workflow_dispatch:
     inputs:

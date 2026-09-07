@@ -570,7 +570,7 @@
   sql: |
     create table t(x int[], y int[], k int primary key);
     select *, (select sum(i) from (select unnest(x) i) Q where k = i ) as sum_x from t;
-  optimizer_error: 'internal error: Subquery can not be unnested.'
+  optimizer_error: 'internal error: Subquery cannot be unnested.'
 - name: test over window subquery 1
   sql: |
     CREATE TABLE integers(i INTEGER);

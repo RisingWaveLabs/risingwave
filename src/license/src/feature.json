@@ -112,6 +112,11 @@
             "description": "Create sinks from a historical timestamp.",
             "type": "string",
             "const": "SinkSinceTimestamp"
+        },
+        {
+            "description": "Ingest data into tables through the WebSocket API.",
+            "type": "string",
+            "const": "WebSocketIngest"
         }
     ]
 }

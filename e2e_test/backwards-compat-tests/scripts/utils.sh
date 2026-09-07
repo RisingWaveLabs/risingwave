@@ -6,16 +6,20 @@
 #
 # 1. Setup old cluster binaries.
 # 2. Seed old cluster.
-# 3. Setup new cluster binaries.
-# 4. Run validation on new cluster.
+# 3. Start the latest stable patch of each intermediate release line and wait
+#    for successful recovery.
+# 4. Setup new cluster binaries and wait for successful recovery.
+# 5. Run validation on new cluster.
 #
-# Steps 1,3 are specific to the execution environment, CI / Local.
-# This script only provides utilities for 2, 4.
+# Steps 1,3,4 are specific to the execution environment, CI / Local.
+# This script provides the shared version, recovery, seeding, and validation utilities.
 
 ################################### ENVIRONMENT CONFIG
 
-# Duration to wait for recovery (seconds)
-RECOVERY_DURATION=20
+# Maximum duration to wait for recovery (seconds)
+RECOVERY_TIMEOUT=300
+# The `RECOVER` command was introduced in this version.
+RECOVER_COMMAND_MIN_VERSION=1.9.0
 
 # Setup test directory
 TEST_DIR=.risingwave/e2e_test/backwards-compat-tests/
@@ -90,6 +94,27 @@ run_sql_scalar_db() {
   local db="$1"
   shift
   psql -h localhost -p 4566 -d "$db" -U root -At -c "$@" | tr -d '[:space:]'
+}
+
+wait_for_recovery() {
+  local version="$1"
+  local deadline=$((SECONDS + RECOVERY_TIMEOUT))
+  local recover_output=""
+
+  echo "--- Wait for a successful RECOVER command on version ${version}"
+  while (( SECONDS < deadline )); do
+    if recover_output=$(run_sql "RECOVER;" 2>&1); then
+      echo "$recover_output"
+      echo "--- RECOVER succeeded on version ${version}"
+      return
+    fi
+    echo "RECOVER is not ready on version ${version}; retry in 1 second"
+    sleep 1
+  done
+
+  echo "$recover_output"
+  echo "Timed out after ${RECOVERY_TIMEOUT}s waiting for RECOVER on version ${version}"
+  return 1
 }
 
 run_risectl() (
@@ -436,8 +461,7 @@ restart_meta_node() {
 
   echo "--- Restart meta node"
   $tmux_cmd respawn-window -k -t "risedev:${meta_window_index}"
-  echo "--- Wait ${RECOVERY_DURATION}s for recovery after meta restart"
-  sleep "$RECOVERY_DURATION"
+  wait_for_recovery "$NEW_VERSION after meta restart"
 }
 
 validate_cross_db_subscription_after_upgrade() {
@@ -552,6 +576,31 @@ get_rw_versions() {
   fi
 }
 
+get_intermediate_versions() {
+  local version
+  local series
+  local latest_series=""
+  local latest_version=""
+
+  while read -r version; do
+    if version_lt "$OLD_VERSION" "$version" && version_lt "$version" "$NEW_VERSION"; then
+      series="${version%.*}"
+      if [[ -n "$latest_series" && "$series" != "$latest_series" ]]; then
+        echo "$latest_version"
+      fi
+      latest_series="$series"
+      latest_version="$version"
+    fi
+  done < <(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' \
+    | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
+    | sed 's/^v//' \
+    | sort -V)
+
+  if [[ -n "$latest_version" ]]; then
+    echo "$latest_version"
+  fi
+}
+
 # Setup table and materialized view.
 # Run updates and deletes on the table.
 # Get the results.
@@ -571,6 +620,9 @@ seed_old_cluster() {
   # `ENABLE_PYTHON_UDF` and `ENABLE_JS_UDF` are set for backwards-compartibility
   ENABLE_PYTHON_UDF=1 ENABLE_JS_UDF=1 ENABLE_UDF=1 ./risedev d full-without-monitoring && rm .risingwave/log/*
 
+  if version_le "$RECOVER_COMMAND_MIN_VERSION" "$OLD_VERSION"; then
+    wait_for_recovery "$OLD_VERSION"
+  fi
   check_version "$OLD_VERSION"
 
   echo "--- BASIC TEST: Seeding old cluster with data"
@@ -692,8 +744,7 @@ validate_new_cluster() {
   echo "--- Start cluster on latest"
   ENABLE_UDF=1 ./risedev d full-without-monitoring
 
-  echo "--- Wait ${RECOVERY_DURATION}s for Recovery on Old Cluster Data"
-  sleep $RECOVERY_DURATION
+  wait_for_recovery "$NEW_VERSION"
 
   check_version "$NEW_VERSION"
 

@@ -17,6 +17,7 @@ use std::pin::pin;
 use std::time::Instant;
 
 use async_trait::async_trait;
+use await_tree::InstrumentAwait;
 use futures::TryFuture;
 use futures::future::{Either, select};
 use risingwave_common::array::StreamChunk;
@@ -142,7 +143,10 @@ impl<W: SinkWriter<CommitMetadata = ()>> LogSinker for LogSinkerOf<W> {
             // begin_epoch when not previously began
             state = match state {
                 LogConsumerState::Uninitialized => {
-                    sink_writer.begin_epoch(epoch).await?;
+                    sink_writer
+                        .begin_epoch(epoch)
+                        .instrument_await(await_tree::span!("sink_begin_epoch epoch={epoch}"))
+                        .await?;
                     LogConsumerState::EpochBegun { curr_epoch: epoch }
                 }
                 LogConsumerState::EpochBegun { curr_epoch } => {
@@ -161,14 +165,21 @@ impl<W: SinkWriter<CommitMetadata = ()>> LogSinker for LogSinkerOf<W> {
                         epoch,
                         prev_epoch
                     );
-                    sink_writer.begin_epoch(epoch).await?;
+                    sink_writer
+                        .begin_epoch(epoch)
+                        .instrument_await(await_tree::span!("sink_begin_epoch epoch={epoch}"))
+                        .await?;
                     LogConsumerState::EpochBegun { curr_epoch: epoch }
                 }
             };
             match item {
                 LogStoreReadItem::StreamChunk { chunk, .. } => {
-                    if let Err(e) = sink_writer.write_batch(chunk).await {
-                        sink_writer.abort().await?;
+                    if let Err(e) = sink_writer
+                        .write_batch(chunk)
+                        .instrument_await(await_tree::span!("sink_write_batch").verbose())
+                        .await
+                    {
+                        sink_writer.abort().instrument_await("sink_abort").await?;
                         return Err(e);
                     }
                 }
@@ -183,14 +194,24 @@ impl<W: SinkWriter<CommitMetadata = ()>> LogSinker for LogSinkerOf<W> {
                     };
                     if is_checkpoint {
                         let start_time = Instant::now();
-                        sink_writer.barrier(true).await?;
+                        sink_writer
+                            .barrier(true)
+                            .instrument_await(await_tree::span!(
+                                "sink_barrier checkpoint=true epoch={epoch}"
+                            ))
+                            .await?;
                         metrics
                             .sink_commit_duration
                             .observe(start_time.elapsed().as_secs_f64());
                         log_reader.truncate(TruncateOffset::Barrier { epoch })?;
                     } else {
                         assert!(new_vnode_bitmap.is_none());
-                        sink_writer.barrier(false).await?;
+                        sink_writer
+                            .barrier(false)
+                            .instrument_await(await_tree::span!(
+                                "sink_barrier checkpoint=false epoch={epoch}"
+                            ))
+                            .await?;
                     }
                     state = LogConsumerState::BarrierReceived { prev_epoch }
                 }
@@ -231,12 +252,12 @@ impl<W: AsyncTruncateSinkWriter> LogSinker for AsyncTruncateLogSinkerOf<W> {
     async fn consume_log_and_sink(mut self, mut log_reader: impl SinkLogReader) -> Result<!> {
         log_reader.start_from(None).await?;
         loop {
+            let next_truncate_offset = self
+                .future_manager
+                .next_truncate_offset()
+                .instrument_await("sink_wait_delivery");
             let select_result = drop_either_future(
-                select(
-                    pin!(log_reader.next_item()),
-                    pin!(self.future_manager.next_truncate_offset()),
-                )
-                .await,
+                select(pin!(log_reader.next_item()), pin!(next_truncate_offset)).await,
             );
             match select_result {
                 Either::Left(item_result) => {
@@ -244,10 +265,18 @@ impl<W: AsyncTruncateSinkWriter> LogSinker for AsyncTruncateLogSinkerOf<W> {
                     match item {
                         LogStoreReadItem::StreamChunk { chunk_id, chunk } => {
                             let add_future = self.future_manager.start_write_chunk(epoch, chunk_id);
-                            self.writer.write_chunk(chunk, add_future).await?;
+                            self.writer
+                                .write_chunk(chunk, add_future)
+                                .instrument_await(await_tree::span!("sink_write_batch").verbose())
+                                .await?;
                         }
                         LogStoreReadItem::Barrier { is_checkpoint, .. } => {
-                            self.writer.barrier(is_checkpoint).await?;
+                            self.writer
+                                .barrier(is_checkpoint)
+                                .instrument_await(await_tree::span!(
+                                    "sink_barrier checkpoint={is_checkpoint} epoch={epoch}"
+                                ))
+                                .await?;
                             self.future_manager.add_barrier(epoch);
                         }
                     }

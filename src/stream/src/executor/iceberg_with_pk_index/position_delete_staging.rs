@@ -60,8 +60,8 @@ impl StagedEntry {
         self.delete_vector = Some(merged);
     }
 
-    pub fn current_file(&self) -> Option<DataFile> {
-        self.current_file.clone()
+    pub fn current_file(&self) -> Option<&DataFile> {
+        self.current_file.as_ref()
     }
 }
 

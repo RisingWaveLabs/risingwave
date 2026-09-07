@@ -603,6 +603,13 @@ impl IcebergCommon {
         self.enable_config_load.unwrap_or(false)
     }
 
+    fn effective_s3_path_style_access(&self) -> bool {
+        // RisingWave historically inherited OpenDAL's path-style default. Iceberg now
+        // defaults to virtual-host style, so preserve existing connector behavior unless
+        // the user explicitly opts into virtual-host style with `false`.
+        self.s3_path_style_access.unwrap_or(true)
+    }
+
     fn build_storage_catalog_config(&self) -> ConnectorResult<CatalogBuildPlan> {
         let warehouse = self
             .warehouse_path
@@ -619,7 +626,7 @@ impl IcebergCommon {
                     .secret_key(self.s3_secret_key.clone())
                     .region(self.s3_region.clone())
                     .endpoint(self.s3_endpoint.clone())
-                    .path_style_access(self.s3_path_style_access)
+                    .path_style_access(Some(self.effective_s3_path_style_access()))
                     .enable_config_load(Some(self.enable_config_load()))
                     .build(),
             ),
@@ -733,12 +740,10 @@ impl IcebergCommon {
         if let Some(role_arn) = &self.s3_iam_role_arn {
             iceberg_configs.insert(S3_ASSUME_ROLE_ARN.to_owned(), role_arn.clone());
         }
-        if let Some(path_style_access) = &self.s3_path_style_access {
-            iceberg_configs.insert(
-                S3_PATH_STYLE_ACCESS.to_owned(),
-                path_style_access.to_string(),
-            );
-        }
+        iceberg_configs.insert(
+            S3_PATH_STYLE_ACCESS.to_owned(),
+            self.effective_s3_path_style_access().to_string(),
+        );
         iceberg_configs.insert(
             iceberg_catalog_glue::GLUE_CATALOG_PROP_WAREHOUSE.to_owned(),
             self.warehouse_path
@@ -955,12 +960,10 @@ impl IcebergCommon {
                 (!enable_config_load).to_string(),
             );
 
-            if let Some(path_style_access) = self.s3_path_style_access {
-                iceberg_configs.insert(
-                    S3_PATH_STYLE_ACCESS.to_owned(),
-                    path_style_access.to_string(),
-                );
-            }
+            iceberg_configs.insert(
+                S3_PATH_STYLE_ACCESS.to_owned(),
+                self.effective_s3_path_style_access().to_string(),
+            );
 
             iceberg_configs
         };
@@ -1305,6 +1308,18 @@ mod tests {
             common.resolve_catalog_kind().unwrap(),
             IcebergCatalogKind::Rest(IcebergCatalogRuntime::JavaJni)
         );
+    }
+
+    #[test]
+    fn test_s3_path_style_access_preserves_existing_default() {
+        let common = test_common("storage");
+        assert!(common.effective_s3_path_style_access());
+
+        let common = IcebergCommon {
+            s3_path_style_access: Some(false),
+            ..common
+        };
+        assert!(!common.effective_s3_path_style_access());
     }
 
     #[test]

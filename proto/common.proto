@@ -91,12 +91,11 @@ message WorkerNode {
   // Ranges from 0 to 1023, used to generate the machine ID field in the global unique ID.
   optional uint32 transactional_id = 7;
   // Resource spec.
-  // It's populated by meta node with the value reported by worker node, when the worker node is added by meta node.
-  // It's not persistent in meta store.
+  // It's populated by meta node with the value reported by worker node and persisted in meta store.
   optional Resource resource = 8;
   // Timestamp the worker node is added by meta node, in seconds.
   // It's populated by meta node, when the worker node is added by meta node.
-  // It's not persistent in meta store.
+  // It's persisted in meta store.
   optional uint64 started_at = 9;
 
   // Moved to `Property` message.

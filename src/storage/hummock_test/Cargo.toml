@@ -9,7 +9,7 @@ repository = { workspace = true }
 
 [features]
 failpoints = ["risingwave_storage/failpoints"]
-sync_point = ["sync-point/sync_point", "serial_test"]
+sync_point = ["risingwave_storage/sync_point", "sync-point/sync_point", "serial_test"]
 test = []
 
 [dependencies]

@@ -1,0 +1,79 @@
+# Regression test for moving an Iceberg table engine and objects that belong to it.
+
+statement ok
+CREATE SECRET iceberg_set_schema_secret WITH (
+  backend = 'meta'
+) AS 'hummockadmin';
+
+statement ok
+CREATE CONNECTION iceberg_set_schema_connection WITH (
+  type = 'iceberg',
+  warehouse.path = 's3://hummock001/iceberg_engine_set_schema',
+  s3.access.key = SECRET iceberg_set_schema_secret,
+  s3.secret.key = SECRET iceberg_set_schema_secret,
+  s3.endpoint = 'http://127.0.0.1:9301',
+  s3.region = 'us-west-2',
+  catalog.type = 'storage'
+);
+
+statement ok
+SET iceberg_engine_connection = 'public.iceberg_set_schema_connection';
+
+statement ok
+CREATE SCHEMA iceberg_set_schema_target;
+
+statement ok
+CREATE TABLE iceberg_set_schema_table (
+  id INT PRIMARY KEY,
+  name VARCHAR
+) WITH (
+  commit_checkpoint_interval = 1
+) ENGINE = ICEBERG;
+
+statement ok
+ALTER TABLE iceberg_set_schema_table SET SCHEMA iceberg_set_schema_target;
+
+query TT rowsort
+SELECT object_type, schema_name
+FROM (
+  SELECT 'table' AS object_type, schemaname AS schema_name
+  FROM pg_tables
+  WHERE tablename = 'iceberg_set_schema_table'
+  UNION ALL
+  SELECT 'source', nspname
+  FROM rw_catalog.rw_sources
+  JOIN pg_namespace ON pg_namespace.oid = rw_sources.schema_id
+  WHERE rw_sources.name = '__iceberg_source_iceberg_set_schema_table'
+  UNION ALL
+  SELECT 'sink', nspname
+  FROM rw_catalog.rw_sinks
+  JOIN pg_namespace ON pg_namespace.oid = rw_sinks.schema_id
+  WHERE rw_sinks.name = '__iceberg_sink_iceberg_set_schema_table'
+);
+----
+sink iceberg_set_schema_target
+source iceberg_set_schema_target
+table iceberg_set_schema_target
+
+statement ok
+INSERT INTO iceberg_set_schema_target.iceberg_set_schema_table VALUES (1, 'moved');
+
+statement ok
+FLUSH;
+
+query IT retry 6 backoff 1s
+SELECT * FROM iceberg_set_schema_target.iceberg_set_schema_table;
+----
+1 moved
+
+statement ok
+DROP TABLE iceberg_set_schema_target.iceberg_set_schema_table;
+
+statement ok
+DROP SCHEMA iceberg_set_schema_target;
+
+statement ok
+DROP CONNECTION iceberg_set_schema_connection;
+
+statement ok
+DROP SECRET iceberg_set_schema_secret;

@@ -258,13 +258,15 @@ impl<S: StateStore> ParallelizedCdcBackfillExecutor<S> {
             // we now try to create the table reader with retry.
             let mut table_reader: Option<ExternalTableReaderImpl> = None;
             let external_table = self.external_table.clone();
+            let actor_id = self.actor_ctx.id;
+            let fragment_id = self.actor_ctx.fragment_id;
             let mut future = Box::pin(async move {
                 let backoff = get_infinite_backoff_strategy();
                 tokio_retry::Retry::spawn(backoff, || async {
                     match external_table.create_table_reader().await {
                         Ok(reader) => Ok(reader),
                         Err(e) => {
-                            tracing::warn!(error = %e.as_report(), "failed to create cdc table reader, retrying...");
+                            tracing::warn!(error = %e.as_report(), actor_id = %actor_id, fragment_id = %fragment_id, "failed to create cdc table reader, retrying...");
                             Err(e)
                         }
                     }

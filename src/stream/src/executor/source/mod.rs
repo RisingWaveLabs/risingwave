@@ -56,8 +56,9 @@ pub(crate) use source_backfill_state_table::BackfillStateTableHandler;
 
 pub mod state_table_handler;
 use futures_async_stream::try_stream;
+use risingwave_common::util::retry::exponential_backoff;
 use tokio::sync::mpsc::UnboundedReceiver;
-use tokio_retry::strategy::{ExponentialBackoff, jitter};
+use tokio_retry::strategy::jitter;
 
 use crate::executor::error::StreamExecutorError;
 use crate::executor::{Barrier, Message};
@@ -258,8 +259,5 @@ pub fn get_infinite_backoff_strategy() -> impl Iterator<Item = Duration> {
     const BASE_DELAY: Duration = Duration::from_secs(1);
     const BACKOFF_FACTOR: u64 = 2;
     const MAX_DELAY: Duration = Duration::from_secs(10);
-    ExponentialBackoff::from_millis(BASE_DELAY.as_millis() as u64)
-        .factor(BACKOFF_FACTOR)
-        .max_delay(MAX_DELAY)
-        .map(jitter)
+    exponential_backoff(BASE_DELAY, BACKOFF_FACTOR, MAX_DELAY).map(jitter)
 }

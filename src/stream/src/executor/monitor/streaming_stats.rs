@@ -36,7 +36,7 @@ use risingwave_connector::sink::catalog::SinkId;
 use risingwave_pb::id::ExecutorId;
 
 use crate::common::log_store_impl::kv_log_store::{
-    REWIND_BACKOFF_FACTOR, REWIND_BASE_DELAY, REWIND_MAX_DELAY,
+    REWIND_BACKOFF_MULTIPLIER, REWIND_INITIAL_DELAY, REWIND_MAX_DELAY,
 };
 use crate::executor::prelude::ActorId;
 use crate::task::FragmentId;
@@ -1102,16 +1102,12 @@ impl StreamingMetrics {
         .unwrap();
 
         let kv_log_store_rewind_delay_opts = {
-            assert_eq!(2, REWIND_BACKOFF_FACTOR);
-            let bucket_count = (REWIND_MAX_DELAY.as_secs_f64().log2()
-                - REWIND_BASE_DELAY.as_secs_f64().log2())
-            .ceil() as usize;
-            let buckets = exponential_buckets(
-                REWIND_BASE_DELAY.as_secs_f64(),
-                REWIND_BACKOFF_FACTOR as _,
-                bucket_count,
-            )
-            .unwrap();
+            let first_delay_secs = REWIND_INITIAL_DELAY.as_secs_f64();
+            let base = REWIND_BACKOFF_MULTIPLIER as f64;
+            let bucket_count = (REWIND_MAX_DELAY.as_secs_f64() / first_delay_secs)
+                .log(base)
+                .ceil() as usize;
+            let buckets = exponential_buckets(first_delay_secs, base, bucket_count).unwrap();
             histogram_opts!(
                 "kv_log_store_rewind_delay",
                 "Kv log store rewind delay",

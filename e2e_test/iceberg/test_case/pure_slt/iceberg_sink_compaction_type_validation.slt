@@ -1,0 +1,135 @@
+# COW selects its compaction policy automatically, so users must not configure its type.
+
+statement ok
+DROP SINK IF EXISTS iceberg_cow_without_explicit_compaction_type;
+
+statement ok
+DROP SINK IF EXISTS iceberg_mor_small_files_disabled;
+
+statement ok
+DROP SINK IF EXISTS iceberg_mor_files_with_delete_disabled;
+
+system ok
+sparksql --e "
+DROP TABLE IF EXISTS demo.demo_db.iceberg_cow_without_explicit_compaction_type PURGE;
+DROP TABLE IF EXISTS demo.demo_db.iceberg_mor_small_files_disabled PURGE;
+DROP TABLE IF EXISTS demo.demo_db.iceberg_mor_files_with_delete_disabled PURGE;
+"
+
+statement ok
+DROP CONNECTION IF EXISTS iceberg_compaction_type_validation_connection;
+
+statement ok
+DROP TABLE IF EXISTS iceberg_compaction_type_validation;
+
+statement ok
+CREATE TABLE iceberg_compaction_type_validation (
+    id bigint primary key,
+    data varchar
+);
+
+statement ok
+CREATE CONNECTION iceberg_compaction_type_validation_connection WITH (
+    type = 'iceberg',
+    catalog.name = 'demo',
+    catalog.type = 'storage',
+    warehouse.path = 's3a://icebergdata',
+    s3.endpoint = 'http://127.0.0.1:9301',
+    s3.region = 'us-east-1',
+    s3.access.key = 'hummockadmin',
+    s3.secret.key = 'hummockadmin'
+);
+
+statement error `compaction.type` must not be set when `write_mode` is `copy-on-write`
+CREATE SINK iceberg_cow_with_explicit_compaction_type
+AS SELECT * FROM iceberg_compaction_type_validation WITH (
+    connector = 'iceberg',
+    type = 'upsert',
+    primary_key = 'id',
+    database.name = 'demo_db',
+    table.name = 'iceberg_cow_with_explicit_compaction_type',
+    connection = iceberg_compaction_type_validation_connection,
+    create_table_if_not_exists = 'true',
+    write_mode = 'copy-on-write',
+    compaction.type = 'full'
+);
+
+statement ok
+CREATE SINK iceberg_cow_without_explicit_compaction_type
+AS SELECT * FROM iceberg_compaction_type_validation WITH (
+    connector = 'iceberg',
+    type = 'upsert',
+    primary_key = 'id',
+    database.name = 'demo_db',
+    table.name = 'iceberg_cow_without_explicit_compaction_type',
+    connection = iceberg_compaction_type_validation_connection,
+    create_table_if_not_exists = 'true',
+    write_mode = 'copy-on-write'
+);
+
+statement error `compaction.type` must not be set when `write_mode` is `copy-on-write`
+ALTER SINK iceberg_cow_without_explicit_compaction_type CONNECTOR WITH (
+    compaction.type = 'full'
+);
+
+statement ok
+CREATE SINK iceberg_mor_small_files_disabled
+AS SELECT * FROM iceberg_compaction_type_validation WITH (
+    connector = 'iceberg',
+    type = 'upsert',
+    primary_key = 'id',
+    database.name = 'demo_db',
+    table.name = 'iceberg_mor_small_files_disabled',
+    connection = iceberg_compaction_type_validation_connection,
+    create_table_if_not_exists = 'true',
+    write_mode = 'merge-on-read',
+    enable_compaction = 'false',
+    compaction.type = 'small-files'
+);
+
+statement error `compaction.delete_files_count_threshold` is not supported for 'small-files' compaction type
+ALTER SINK iceberg_mor_small_files_disabled CONNECTOR WITH (
+    compaction.delete_files_count_threshold = '1'
+);
+
+statement ok
+CREATE SINK iceberg_mor_files_with_delete_disabled
+AS SELECT * FROM iceberg_compaction_type_validation WITH (
+    connector = 'iceberg',
+    type = 'upsert',
+    primary_key = 'id',
+    database.name = 'demo_db',
+    table.name = 'iceberg_mor_files_with_delete_disabled',
+    connection = iceberg_compaction_type_validation_connection,
+    create_table_if_not_exists = 'true',
+    write_mode = 'merge-on-read',
+    enable_compaction = 'false',
+    compaction.type = 'files-with-delete'
+);
+
+statement error `compaction.small_files_threshold_mb` is not supported for 'files-with-delete' compaction type
+ALTER SINK iceberg_mor_files_with_delete_disabled CONNECTOR WITH (
+    compaction.small_files_threshold_mb = '128'
+);
+
+statement ok
+DROP SINK iceberg_cow_without_explicit_compaction_type;
+
+statement ok
+DROP SINK iceberg_mor_small_files_disabled;
+
+statement ok
+DROP SINK iceberg_mor_files_with_delete_disabled;
+
+system ok
+sparksql --e "
+DROP TABLE IF EXISTS demo.demo_db.iceberg_cow_without_explicit_compaction_type PURGE;
+DROP TABLE IF EXISTS demo.demo_db.iceberg_mor_small_files_disabled PURGE;
+DROP TABLE IF EXISTS demo.demo_db.iceberg_mor_files_with_delete_disabled PURGE;
+"
+
+statement ok
+DROP CONNECTION iceberg_compaction_type_validation_connection;
+
+statement ok
+DROP TABLE iceberg_compaction_type_validation;

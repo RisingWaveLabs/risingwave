@@ -47,16 +47,19 @@ use jni::sys::{
 pub use paste::paste;
 use prost::{DecodeError, Message};
 use risingwave_common::array::{ArrayError, StreamChunk};
+use risingwave_common::catalog::cdc_type_compatibility::cdc_source_column_type_compatible;
 use risingwave_common::hash::VirtualNode;
 use risingwave_common::row::{OwnedRow, Row};
 use risingwave_common::test_prelude::StreamChunkTestExt;
 use risingwave_common::types::{Decimal, ScalarRefImpl};
 use risingwave_common::util::panic::rw_catch_unwind;
+use risingwave_pb::catalog::table::CdcTableType as PbCdcTableType;
 use risingwave_pb::connector_service::{
     GetEventStreamResponse, SinkCoordinatorStreamRequest, SinkCoordinatorStreamResponse,
     SinkWriterStreamRequest, SinkWriterStreamResponse,
 };
 use risingwave_pb::data::Op;
+use risingwave_pb::data::data_type::TypeName as PbTypeName;
 use thiserror::Error;
 use thiserror_ext::AsReport;
 use tokio::runtime::Runtime;
@@ -351,6 +354,50 @@ extern "system" fn Java_com_risingwave_java_binding_Binding_defaultVnodeCount(
     _env: EnvParam<'_>,
 ) -> jint {
     VirtualNode::COUNT_FOR_COMPAT as jint
+}
+
+fn jstring_to_option(env: &mut EnvParam<'_>, value: JString<'_>) -> Result<Option<String>> {
+    if value.is_null() {
+        return Ok(None);
+    }
+
+    Ok(Some(env.get_string(&value)?.into()))
+}
+
+#[unsafe(no_mangle)]
+extern "system" fn Java_com_risingwave_java_binding_Binding_validateCdcSourceColumnType<'a>(
+    env: EnvParam<'a>,
+    cdc_table_type: jint,
+    upstream_type_name: JString<'a>,
+    rw_type_name: jint,
+    char_max_length: jlong,
+    is_unsigned: jboolean,
+    postgres_udt_name: JString<'a>,
+) -> jboolean {
+    execute_and_catch(env, move |env| {
+        let cdc_table_type =
+            PbCdcTableType::try_from(cdc_table_type).unwrap_or(PbCdcTableType::Unspecified);
+        let rw_type_name =
+            PbTypeName::try_from(rw_type_name).unwrap_or(PbTypeName::TypeUnspecified);
+        let upstream_type_name = jstring_to_option(env, upstream_type_name)?.unwrap_or_default();
+        let postgres_udt_name = jstring_to_option(env, postgres_udt_name)?;
+        let char_max_length = (char_max_length >= 0).then_some(char_max_length);
+
+        Ok(
+            if cdc_source_column_type_compatible(
+                cdc_table_type,
+                &upstream_type_name,
+                rw_type_name,
+                char_max_length,
+                is_unsigned != JNI_FALSE,
+                postgres_udt_name.as_deref(),
+            ) {
+                JNI_TRUE
+            } else {
+                JNI_FALSE
+            },
+        )
+    })
 }
 
 #[cfg_or_panic(not(madsim))]

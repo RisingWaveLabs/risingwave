@@ -8,6 +8,11 @@ alter table t set parallelism to 1;
 statement ok
 alter table t set dml_rate_limit to 0;
 
+query TI
+select node_name, rate_limit from rw_catalog.rw_rate_limit join rw_catalog.rw_relations on table_id = id where name = 't';
+----
+DML 0
+
 include ./inserts.slt.part
 
 
@@ -20,6 +25,10 @@ select count(*) from t;
 statement ok
 alter table t set dml_rate_limit to 1;
 
+query TI
+select node_name, rate_limit from rw_catalog.rw_rate_limit join rw_catalog.rw_relations on table_id = id where name = 't';
+----
+DML 1
 
 query II retry 6 backoff 1s
 select case when count(*) between 1 and 5 then 3 else 0 end from t;

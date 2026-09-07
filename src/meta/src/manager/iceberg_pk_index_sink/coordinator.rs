@@ -47,7 +47,7 @@ use prost::Message;
 use risingwave_connector::sink::catalog::SinkId;
 use risingwave_connector::sink::iceberg::commit_retry::{self, CommitError, CommitRetryLogContext};
 use risingwave_connector::sink::iceberg::{
-    IcebergCommitResult, IcebergConfig, IcebergPositionDeleteMergerCommitResult, commit_branch,
+    IcebergCommitResult, IcebergConfig, IcebergPositionDeleteCommitResult, commit_branch,
     resolve_partition_type,
 };
 use risingwave_meta_model::pending_sink_state::SinkState;
@@ -591,8 +591,8 @@ fn aggregate_reports(
                 data_files.extend(commit_result.data_files);
             }
             PbIcebergPkIndexSinkRole::PositionDeleteMerger => {
-                let commit_result = IcebergPositionDeleteMergerCommitResult::try_from(meta)
-                    .map_err(|e| {
+                let commit_result =
+                    IcebergPositionDeleteCommitResult::try_from(meta).map_err(|e| {
                         anyhow!(e).context("decode pk-index sink position-delete merger metadata")
                     })?;
                 align_report_id(

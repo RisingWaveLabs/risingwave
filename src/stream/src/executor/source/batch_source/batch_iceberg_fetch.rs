@@ -25,11 +25,9 @@ use risingwave_common::config::StreamingConfig;
 use risingwave_common::id::TableId;
 use risingwave_common::metrics::GLOBAL_ERROR_METRICS;
 use risingwave_common::types::{JsonbVal, Scalar, ScalarRef};
-use risingwave_connector::source::iceberg::metrics::{
-    GLOBAL_ICEBERG_SCAN_METRICS, IcebergScanMetrics,
-};
 use risingwave_connector::source::iceberg::{
-    IcebergScanOpts, PersistedFileScanTask, scan_task_to_chunk_with_deletes,
+    GLOBAL_ICEBERG_SCAN_METRICS, IcebergFileScanMetrics, IcebergScanMetricsLabels, IcebergScanOpts,
+    PersistedFileScanTask, scan_task_to_chunk_with_deletes,
 };
 use risingwave_connector::source::reader::desc::SourceDesc;
 use thiserror_ext::AsReport;
@@ -211,6 +209,9 @@ pub struct BatchIcebergFetchExecutor<S: StateStore> {
     streaming_config: Arc<StreamingConfig>,
 
     associated_table_id: TableId,
+
+    scan_metrics: Option<IcebergScanMetricsLabels>,
+    file_scan_metrics: Option<IcebergFileScanMetrics>,
 }
 
 impl<S: StateStore> BatchIcebergFetchExecutor<S> {
@@ -230,6 +231,8 @@ impl<S: StateStore> BatchIcebergFetchExecutor<S> {
             barrier_manager,
             streaming_config,
             associated_table_id: associated_table_id.unwrap(),
+            scan_metrics: None,
+            file_scan_metrics: None,
         }
     }
 }
@@ -264,11 +267,21 @@ impl<S: StateStore> BatchIcebergFetchExecutor<S> {
         };
         let source_id_str = core.source_id.to_string();
         let source_name_str = core.source_name.clone();
-        let metrics_labels = [
-            source_id_str.as_str(),
-            source_name_str.as_str(),
-            iceberg_table_name.as_str(),
-        ];
+        let scan_metrics = self
+            .scan_metrics
+            .insert(IcebergScanMetricsLabels::new(
+                source_id_str,
+                source_name_str,
+                iceberg_table_name.clone(),
+            ))
+            .clone();
+        let file_scan_metrics = self
+            .file_scan_metrics
+            .insert(IcebergFileScanMetrics::new(
+                iceberg_metrics,
+                &iceberg_table_name,
+            ))
+            .clone();
 
         // Initialize state and stream reader
         let mut state = FetchState::new();
@@ -291,15 +304,7 @@ impl<S: StateStore> BatchIcebergFetchExecutor<S> {
                         self.associated_table_id.to_string(),
                     ]);
 
-                    iceberg_metrics
-                        .iceberg_source_scan_errors_total
-                        .with_guarded_label_values(&[
-                            metrics_labels[0],
-                            metrics_labels[1],
-                            metrics_labels[2],
-                            "fetch_error",
-                        ])
-                        .inc();
+                    scan_metrics.record_fetch_error();
 
                     let in_flight_count = state.in_flight_files.len();
                     state.handle_error_recovery();
@@ -360,12 +365,10 @@ impl<S: StateStore> BatchIcebergFetchExecutor<S> {
                                 &mut stream,
                                 source_desc.clone(),
                                 &self.streaming_config,
+                                file_scan_metrics.clone(),
                             )?;
 
-                            iceberg_metrics
-                                .iceberg_source_inflight_file_count
-                                .with_guarded_label_values(&metrics_labels)
-                                .set(state.splits_on_fetch as i64);
+                            scan_metrics.set_inflight_file_count(state.splits_on_fetch);
                         }
                     }
 
@@ -382,10 +385,7 @@ impl<S: StateStore> BatchIcebergFetchExecutor<S> {
                 Ok(Either::Right(ChunksWithState { chunks, .. })) => {
                     state.mark_file_fetched();
 
-                    iceberg_metrics
-                        .iceberg_source_inflight_file_count
-                        .with_guarded_label_values(&metrics_labels)
-                        .set(state.splits_on_fetch as i64);
+                    scan_metrics.set_inflight_file_count(state.splits_on_fetch);
 
                     for chunk in &chunks {
                         let pruned = prune_additional_cols(
@@ -468,8 +468,8 @@ impl<S: StateStore> BatchIcebergFetchExecutor<S> {
         stream: &mut StreamReaderWithPause<true, ChunksWithState>,
         source_desc: SourceDesc,
         streaming_config: &StreamingConfig,
+        file_scan_metrics: IcebergFileScanMetrics,
     ) -> StreamExecutorResult<()> {
-        let metrics = Arc::new(GLOBAL_ICEBERG_SCAN_METRICS.clone());
         // Clear previous in-flight files (should already be empty on success, re-queued on error)
         state.in_flight_files.clear();
 
@@ -499,7 +499,7 @@ impl<S: StateStore> BatchIcebergFetchExecutor<S> {
                 batch,
                 streaming_config.developer.chunk_size,
                 state.is_batch_finished.clone(),
-                metrics,
+                file_scan_metrics,
             );
             stream.replace_data_stream(batch_reader.boxed());
         }
@@ -514,7 +514,7 @@ impl<S: StateStore> BatchIcebergFetchExecutor<S> {
         tasks: Vec<FileScanTask>,
         chunk_size: usize,
         batch_finished: Arc<RwLock<bool>>,
-        metrics: Arc<IcebergScanMetrics>,
+        file_scan_metrics: IcebergFileScanMetrics,
     ) {
         let properties = match source_desc.source.config.clone() {
             risingwave_connector::source::ConnectorProperties::Iceberg(props) => props,
@@ -529,7 +529,7 @@ impl<S: StateStore> BatchIcebergFetchExecutor<S> {
                 table.clone(),
                 task,
                 IcebergScanOpts::new(chunk_size, true, true, true),
-                Some(metrics.clone()),
+                Some(file_scan_metrics.clone()),
             ) {
                 let chunk = chunk_result?;
                 let ops = itertools::repeat_n(Op::Insert, chunk.capacity()).collect_vec();

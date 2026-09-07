@@ -49,9 +49,10 @@ pub mod prefix;
 
 pub use error::*;
 use object_metrics::ObjectStoreMetrics;
+use risingwave_common::util::retry::exponential_backoff;
 use thiserror_ext::AsReport;
 use tokio::io::{AsyncRead, ReadBuf};
-use tokio_retry::strategy::{ExponentialBackoff, jitter};
+use tokio_retry::strategy::jitter;
 
 #[cfg(madsim)]
 use self::sim::SimObjectStore;
@@ -1064,11 +1065,13 @@ fn get_retry_strategy(
     operation_type: OperationType,
 ) -> impl Iterator<Item = Duration> + use<> {
     let attempts = get_retry_attempts_by_type(config, operation_type);
-    ExponentialBackoff::from_millis(config.retry.req_backoff_interval_ms)
-        .max_delay(Duration::from_millis(config.retry.req_backoff_max_delay_ms))
-        .factor(config.retry.req_backoff_factor)
-        .take(attempts)
-        .map(jitter)
+    exponential_backoff(
+        Duration::from_millis(config.retry.req_backoff_interval_ms),
+        config.retry.req_backoff_factor,
+        Duration::from_millis(config.retry.req_backoff_max_delay_ms),
+    )
+    .take(attempts)
+    .map(jitter)
 }
 
 pub type ObjectMetadataIter = BoxStream<'static, ObjectResult<ObjectMetadata>>;

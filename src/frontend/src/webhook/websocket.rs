@@ -52,13 +52,14 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use axum::Router;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Extension, Path};
-use axum::http::HeaderMap;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::get;
 use futures::SinkExt;
 use futures::stream::StreamExt;
 use jsonbb::Value;
 use risingwave_common::array::{Op, StreamChunk};
+use risingwave_common::license::Feature;
 use risingwave_common::row::OwnedRow;
 use risingwave_common::types::{DataType, JsonbVal};
 use risingwave_common::util::chunk_coalesce::DataChunkBuilder;
@@ -76,7 +77,7 @@ use tower_http::add_extension::AddExtensionLayer;
 
 use crate::session::SESSION_MANAGER;
 use crate::webhook::payload::{build_json_access_builder, owned_row_from_payload_row};
-use crate::webhook::utils::{authenticate_webhook_payload, header_map_to_json};
+use crate::webhook::utils::{authenticate_webhook_payload, err, header_map_to_json};
 use crate::webhook::{PayloadSchema, acquire_table_info};
 
 const INIT_MESSAGE_TYPE: &str = "init";
@@ -136,12 +137,16 @@ impl TryFrom<RawDmlRequest> for DmlRequest {
     fn try_from(raw: RawDmlRequest) -> Result<Self, Self::Error> {
         let op = match raw.op.as_deref() {
             None => {
-                return Err("missing op, expected upsert/delete".to_owned());
+                return Err(
+                    "missing `op`; expected `upsert`, `insert`, `update`, or `delete`".to_owned(),
+                );
             }
             Some("upsert" | "insert" | "update") => DmlOp::Upsert,
             Some("delete") => DmlOp::Delete,
             Some(other) => {
-                return Err(format!("unknown op '{other}', expected upsert/delete"));
+                return Err(format!(
+                    "unknown `op` value `{other}`; expected `upsert`, `insert`, `update`, or `delete`"
+                ));
             }
         };
 
@@ -165,15 +170,24 @@ struct PreparedDmlBatch {
 type WsTx = futures::stream::SplitSink<WebSocket, Message>;
 type WsRx = futures::stream::SplitStream<WebSocket>;
 
+// Keep licensing at the WebSocket entry point so webhook ingestion remains unlicensed.
+fn check_websocket_ingest_license() -> crate::webhook::utils::Result<()> {
+    Feature::WebSocketIngest
+        .check_available()
+        .map_err(|e| err(e, StatusCode::FORBIDDEN))
+}
+
 pub async fn ws_handler(
     ws: WebSocketUpgrade,
     Extension(svc): Extension<ServiceRef>,
     headers: HeaderMap,
     Path((database, schema, table)): Path<(String, String, String)>,
-) -> impl IntoResponse {
+) -> crate::webhook::utils::Result<impl IntoResponse> {
+    check_websocket_ingest_license()?;
+
     let request_id = svc.counter.fetch_add(1, Ordering::Relaxed);
     let headers_jsonb = header_map_to_json(&headers);
-    ws.on_upgrade(move |socket| {
+    Ok(ws.on_upgrade(move |socket| {
         handle_connection(
             socket,
             database,
@@ -183,7 +197,7 @@ pub async fn ws_handler(
             headers,
             headers_jsonb,
         )
-    })
+    }))
 }
 
 async fn handle_connection(
@@ -243,7 +257,7 @@ async fn try_handle_connection(
         Ok(Some(Ok(Message::Text(text)))) => text,
         Ok(Some(Ok(Message::Close(_)))) | Ok(None) => return Ok(()),
         Ok(Some(Ok(_))) => {
-            return Err("the first WebSocket frame must be a text init message".to_owned());
+            return Err("the first WebSocket frame must be a text `init` message".to_owned());
         }
         Ok(Some(Err(e))) => {
             return Err(format!(
@@ -317,7 +331,7 @@ async fn try_handle_connection(
                                 || ack.dml_batch_id > last_forwarded_dml_batch_id
                             {
                                 return Err(format!(
-                                    "unexpected ack for dml_batch_id {}",
+                                    "received an unexpected ack for dml_batch_id {}",
                                     ack.dml_batch_id
                                 ));
                             }
@@ -329,7 +343,7 @@ async fn try_handle_connection(
                                 },
                             )
                             .await
-                            .map_err(|_| "websocket connection closed while sending ack".to_owned())?;
+                            .map_err(|_| "WebSocket connection closed while sending an ack".to_owned())?;
                         }
                         Some(ingest_dml_response::Response::Init(_)) => {
                             return Err("unexpected extra init response from ingest stream".to_owned());
@@ -372,7 +386,7 @@ async fn try_handle_connection(
                         },
                     )
                     .await
-                    .map_err(|_| "websocket connection closed while sending ack".to_owned())?;
+                    .map_err(|_| "WebSocket connection closed while sending an ack".to_owned())?;
                     continue;
                 }
 
@@ -422,7 +436,7 @@ fn parse_and_validate_init_request(
 
 fn validate_timestamp_skew(timestamp_ms: i64, max_clock_skew_ms: u64) -> Result<(), String> {
     if timestamp_ms < 0 {
-        return Err("timestamp must be a non-negative epoch millisecond".to_owned());
+        return Err("timestamp must be a non-negative Unix timestamp in milliseconds".to_owned());
     }
 
     let now_ms = SystemTime::now()
@@ -479,7 +493,7 @@ fn prepare_dml_batch_payload(
                     .map(|json_value| OwnedRow::new(vec![Some(JsonbVal::from(json_value).into())]))
                     .map_err(|e| {
                         format!(
-                            "dml_batch_id {dml_batch_id} item {item_index}: Failed to parse body: {}",
+                            "dml_batch_id {dml_batch_id} item {item_index}: failed to parse request body: {}",
                             e.as_report()
                         )
                     })?;
@@ -585,6 +599,7 @@ pub fn build_router(svc: ServiceRef) -> Router {
 #[cfg(test)]
 mod tests {
     use axum::http::{HeaderMap, HeaderValue};
+    use risingwave_common::license::{LicenseKey, LicenseManager};
     use risingwave_common::row::Row;
     use risingwave_common::types::{DataType, ScalarImpl, ToOwnedDatum};
 
@@ -607,6 +622,28 @@ mod tests {
             dml_batch_id,
             items,
         }
+    }
+
+    struct RestoreDefaultLicense;
+
+    impl Drop for RestoreDefaultLicense {
+        fn drop(&mut self) {
+            LicenseManager::get().refresh(LicenseKey::default().as_ref());
+        }
+    }
+
+    #[test]
+    fn test_websocket_ingest_requires_license() {
+        let _restore = RestoreDefaultLicense;
+        LicenseManager::get().refresh(LicenseKey::default().as_ref());
+        check_websocket_ingest_license().unwrap();
+
+        LicenseManager::get().refresh(LicenseKey::empty().as_ref());
+
+        let err = check_websocket_ingest_license().unwrap_err();
+
+        assert_eq!(err.code(), StatusCode::FORBIDDEN);
+        assert!(err.to_string().contains("WebSocketIngest"));
     }
 
     fn test_columns(columns: &[(&str, DataType, bool)]) -> Vec<WebhookTableColumnDesc> {
@@ -656,7 +693,10 @@ mod tests {
     #[test]
     fn test_dml_request_requires_op() {
         let err = DmlRequest::try_from(raw_req(None, r#"{"id":1}"#)).unwrap_err();
-        assert_eq!(err, "missing op, expected upsert/delete");
+        assert_eq!(
+            err,
+            "missing `op`; expected `upsert`, `insert`, `update`, or `delete`"
+        );
     }
 
     #[test]
@@ -929,7 +969,7 @@ mod tests {
             (
                 "x-rw-webhook-json-timestamp-handling-mode",
                 "invalid",
-                "unrecognized `x-rw-webhook-json-timestamp-handling-mode` value",
+                "unrecognized value `invalid` for `x-rw-webhook-json-timestamp-handling-mode`",
             ),
             (
                 "x-rw-webhook-json-timestamptz-handling-mode",
@@ -939,17 +979,17 @@ mod tests {
             (
                 "x-rw-webhook-json-time-handling-mode",
                 "invalid",
-                "unrecognized `x-rw-webhook-json-time-handling-mode` value",
+                "unrecognized value `invalid` for `x-rw-webhook-json-time-handling-mode`",
             ),
             (
                 "x-rw-webhook-json-bigint-unsigned-handling-mode",
                 "invalid",
-                "unrecognized `x-rw-webhook-json-bigint-unsigned-handling-mode` value",
+                "unrecognized value `invalid` for `x-rw-webhook-json-bigint-unsigned-handling-mode`",
             ),
             (
                 "x-rw-webhook-json-handle-toast-columns",
                 "invalid",
-                "unrecognized `x-rw-webhook-json-handle-toast-columns` value",
+                "unrecognized value `invalid` for `x-rw-webhook-json-handle-toast-columns`",
             ),
         ] {
             let mut headers = HeaderMap::new();

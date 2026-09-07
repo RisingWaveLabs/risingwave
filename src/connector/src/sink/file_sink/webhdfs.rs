@@ -59,9 +59,7 @@ impl<S: OpendalSinkBackend> FileSink<S> {
             .endpoint(&config.common.endpoint)
             .root(&config.common.path);
 
-        let operator: Operator = Operator::new(builder)?
-            .layer(LoggingLayer::default())
-            .finish();
+        let operator: Operator = Operator::new(builder)?.layer(LoggingLayer::default());
 
         Ok(operator)
     }

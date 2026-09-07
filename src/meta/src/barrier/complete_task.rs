@@ -163,7 +163,7 @@ impl CompleteBarrierTask {
                 let (database_id, job_id) = from_partial_graph_id(partial_graph_id);
                 let command_name = info.post_collect_command.command_name().to_owned();
                 let elapsed_secs = info.elapsed_secs();
-                notifiers.extend(info.notifiers);
+                notifiers.extend(info.notifier);
                 context
                     .post_collect_command(info.post_collect_command)
                     .await?;

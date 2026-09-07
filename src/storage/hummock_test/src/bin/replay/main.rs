@@ -183,7 +183,7 @@ async fn create_replay_hummock(r: Record, args: &Args) -> Result<impl GlobalRepl
         None,
     )
     .await
-    .expect("fail to create a HummockStorage object");
+    .expect("failed to create a HummockStorage object");
     let replay_interface = GlobalReplayImpl::new(storage, notifier);
 
     Ok(replay_interface)

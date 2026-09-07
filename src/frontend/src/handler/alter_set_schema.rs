@@ -15,6 +15,7 @@
 use pgwire::pg_response::StatementType;
 use risingwave_sqlparser::ast::{ObjectName, OperateFunctionArg};
 
+use super::alter_utils::validate_table_type_for_alter;
 use super::{HandlerArgs, RwPgResponse};
 use crate::catalog::root_catalog::SchemaPath;
 use crate::error::{ErrorCode, Result};
@@ -51,6 +52,7 @@ pub async fn handle_alter_set_schema(
                     schema_path,
                     &real_obj_name,
                 )?;
+                validate_table_type_for_alter(table, stmt_type, "schema")?;
                 if old_schema_name == new_schema_name {
                     return Ok(RwPgResponse::empty_result(stmt_type));
                 }

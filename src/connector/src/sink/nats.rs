@@ -16,6 +16,7 @@ use core::fmt::Debug;
 use core::future::IntoFuture;
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context as _, anyhow};
 use async_nats::jetstream::context::Context;
@@ -23,10 +24,11 @@ use futures::FutureExt;
 use futures::prelude::TryFuture;
 use risingwave_common::array::StreamChunk;
 use risingwave_common::catalog::Schema;
+use risingwave_common::util::retry::exponential_backoff;
 use serde::Deserialize;
 use serde_with::serde_as;
 use tokio_retry::Retry;
-use tokio_retry::strategy::{ExponentialBackoff, jitter};
+use tokio_retry::strategy::jitter;
 use with_options::WithOptions;
 
 use super::SinkWriterParam;
@@ -188,7 +190,9 @@ impl AsyncTruncateSinkWriter for NatsSinkWriter {
         let mut data = chunk_to_json(chunk, &self.json_encoder)?;
         for item in &mut data {
             let publish_ack_future = Retry::spawn(
-                ExponentialBackoff::from_millis(100).map(jitter).take(3),
+                exponential_backoff(Duration::from_millis(100), 2, Duration::MAX)
+                    .map(jitter)
+                    .take(3),
                 || async {
                     self.context
                         .publish(self.config.common.subject.clone(), item.clone().into())

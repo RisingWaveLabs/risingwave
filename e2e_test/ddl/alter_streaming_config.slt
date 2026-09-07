@@ -130,7 +130,7 @@ alter table cf set config (
 db error: ERROR: Failed to run the query
 
 Caused by:
-  Invalid Parameter Value: Invalid parameter: unrecognized configs: ["streaming.unknown", "streaming.developer.dev_unknown"]
+  Invalid parameter value: Invalid parameter: unrecognized configs: ["streaming.unknown", "streaming.developer.dev_unknown"]
 
 
 # Error: using deprecated prefixed config key
@@ -153,3 +153,30 @@ in `developer`
 
 statement ok
 drop table cf;
+
+statement ok
+set streaming_cache_refill_policy = both;
+
+statement ok
+create table cf_initial (v int);
+
+query TTT
+select name, key, value from rw_streaming_job_config where name = 'cf_initial';
+----
+cf_initial	streaming.developer.cache_refill_policy	"both"
+
+statement ok
+drop table cf_initial;
+
+statement ok
+set streaming_cache_refill_policy = default;
+
+statement ok
+create table cf_default (v int);
+
+query TTT
+select name, key, value from rw_streaming_job_config where name = 'cf_default';
+----
+
+statement ok
+drop table cf_default;

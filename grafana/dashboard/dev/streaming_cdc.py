@@ -1,6 +1,16 @@
 from ..common import *
 from . import section
 
+mysql_cdc_binlog_file_seq_min = metric(
+    "mysql_cdc_binlog_file_seq_min", node_filter_enabled=False
+)
+mysql_cdc_binlog_file_seq_max = metric(
+    "mysql_cdc_binlog_file_seq_max", node_filter_enabled=False
+)
+stream_mysql_cdc_state_binlog_file_seq = metric(
+    "stream_mysql_cdc_state_binlog_file_seq", node_filter_enabled=False
+)
+
 
 @section
 def _(outer_panels: Panels):
@@ -125,11 +135,31 @@ def _(outer_panels: Panels):
                         ),
                         panels.target(
                             f"{metric('mysql_cdc_binlog_file_seq_min')}",
-                            "{{hostname}}:{{port}} - Upstream Binlog File Min Seq (oldest)",
+                            "source_id {{source_id}} {{hostname}}:{{port}} - Upstream Binlog File Min Seq (oldest)",
                         ),
                         panels.target(
                             f"{metric('mysql_cdc_binlog_file_seq_max')}",
-                            "{{hostname}}:{{port}} - Upstream Binlog File Max Seq (newest)",
+                            "source_id {{source_id}} {{hostname}}:{{port}} - Upstream Binlog File Max Seq (newest)",
+                        ),
+                    ],
+                ),
+                panels.timeseries_count(
+                    "MySQL CDC Binlog File Lag",
+                    "Lag measured as the number of binlog files between the upstream newest file and the RisingWave checkpoint.",
+                    [
+                        panels.target(
+                            f"clamp_min({mysql_cdc_binlog_file_seq_max} - on(source_id) {stream_mysql_cdc_state_binlog_file_seq}, 0)",
+                            "source_id {{source_id}} {{hostname}}:{{port}} - Binlog File Lag",
+                        ),
+                    ],
+                ),
+                panels.timeseries_count(
+                    "MySQL CDC Binlog Retention Risk Margin",
+                    "Retained binlog range midpoint minus the RisingWave checkpoint file sequence. A non-negative value means the checkpoint has entered the older half of the retained range.",
+                    [
+                        panels.target(
+                            f"(({mysql_cdc_binlog_file_seq_max} + {mysql_cdc_binlog_file_seq_min}) / 2 - on(source_id) {stream_mysql_cdc_state_binlog_file_seq})",
+                            "source_id {{source_id}} {{hostname}}:{{port}} - Retention Risk Margin",
                         ),
                     ],
                 ),

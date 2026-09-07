@@ -126,6 +126,27 @@
     └─LogicalAgg { group_key: [t.v1, t.v2, t.v3], aggs: [count, count(1:Int32)] }
       └─LogicalProject { exprs: [t.v1, t.v2, t.v3, 1:Int32] }
         └─LogicalScan { table: t, columns: [t.v1, t.v2, t.v3], predicate: (t.v1 = 10:Int32) AND (t.v2 = 20:Int32) AND (t.v3 = 30:Int32) AND (t.v2 > t.v3) }
+- name: impure filter should not transpose grouped agg
+  sql: |
+    create table t(g int);
+    select *
+    from (
+      select g, count(*) as n
+      from t
+      group by g
+    ) grouped
+    where g = 1 and random() < 0.5;
+  logical_plan: |-
+    LogicalProject { exprs: [t.g, count] }
+    └─LogicalFilter { predicate: (t.g = 1:Int32) AND (Random < 0.5:Decimal::Float64) }
+      └─LogicalProject { exprs: [t.g, count] }
+        └─LogicalAgg { group_key: [t.g], aggs: [count] }
+          └─LogicalProject { exprs: [t.g] }
+            └─LogicalScan { table: t, columns: [t.g, t._row_id, t._rw_timestamp] }
+  optimized_logical_plan_for_batch: |-
+    LogicalFilter { predicate: (Random < 0.5:Decimal::Float64) }
+    └─LogicalAgg { group_key: [t.g], aggs: [count] }
+      └─LogicalScan { table: t, columns: [t.g], predicate: (t.g = 1:Int32) }
 - name: filter project set transpose
   sql: |
     create table t(v1 int, v2 int, v3 int, arr int[]);

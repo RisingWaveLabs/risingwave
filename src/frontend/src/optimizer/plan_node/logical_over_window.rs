@@ -23,10 +23,10 @@ use risingwave_expr::window_function::{Frame, FrameBound, WindowFuncKind};
 use super::generic::{GenericPlanRef, OverWindow, PlanWindowFunction, ProjectBuilder};
 use super::utils::impl_distill_by_unit;
 use super::{
-    BatchOverWindow, ColPrunable, ExprRewritable, Logical, LogicalFilter,
-    LogicalPlanRef as PlanRef, LogicalProject, PlanBase, PlanTreeNodeUnary, PredicatePushdown,
-    StreamEowcOverWindow, StreamEowcSort, StreamOverWindow, ToBatch, ToStream,
-    gen_filter_and_pushdown, try_enforce_locality_requirement,
+    BatchOverWindow, ColPrunable, ExprRewritable, Logical, LogicalPlanRef as PlanRef,
+    LogicalProject, PlanBase, PlanTreeNodeUnary, PredicatePushdown, StreamEowcOverWindow,
+    StreamEowcSort, StreamOverWindow, ToBatch, ToStream, gen_filter_and_pushdown,
+    try_enforce_locality_requirement,
 };
 use crate::error::{ErrorCode, Result, RwError};
 use crate::expr::{
@@ -600,7 +600,9 @@ impl PredicatePushdown for LogicalOverWindow {
     ) -> PlanRef {
         if !self.core.funcs_have_same_partition_and_order() {
             // Window function calls with different PARTITION BY and ORDER BY clauses are not split yet.
-            return LogicalFilter::create(self.clone().into(), predicate);
+            // No pushdown, but keep recursing with a `true` condition so that shares below
+            // still receive a contribution from this parent (see `PredicatePushdownContext`).
+            return gen_filter_and_pushdown(self, predicate, Condition::true_cond(), ctx);
         }
 
         let all_out_cols: FixedBitSet = (0..self.schema().len()).collect();
@@ -753,7 +755,11 @@ impl ToStream for LogicalOverWindow {
         let logical_input = if partition_key_indices.is_empty() {
             self.input()
         } else {
-            try_enforce_locality_requirement(self.input(), &partition_key_indices)
+            try_enforce_locality_requirement(
+                self.input(),
+                &partition_key_indices,
+                ctx.locality_backfill_enabled(),
+            )
         };
         let (input, input_col_change) = logical_input.logical_rewrite_for_stream(ctx)?;
         let (new_self, output_col_change) = self.rewrite_with_input(input, input_col_change);

@@ -18,6 +18,8 @@ package com.risingwave.connector.source.common;
 
 import com.risingwave.connector.api.TableSchema;
 import com.risingwave.connector.api.source.SourceTypeE;
+import com.risingwave.java.binding.Binding;
+import com.risingwave.proto.Catalog;
 import com.risingwave.proto.Data;
 import java.sql.Connection;
 import java.sql.DriverManager;
@@ -28,6 +30,8 @@ import org.slf4j.LoggerFactory;
 
 public class PostgresValidator extends DatabaseValidator implements AutoCloseable {
     static final Logger LOG = LoggerFactory.getLogger(PostgresValidator.class);
+    private static final int CDC_TABLE_TYPE =
+            Catalog.Table.CdcTableType.CDC_TABLE_TYPE_POSTGRES.getNumber();
     private final Map<String, String> userProps;
 
     private final TableSchema tableSchema;
@@ -743,133 +747,16 @@ public class PostgresValidator extends DatabaseValidator implements AutoCloseabl
     }
 
     private boolean isDataTypeCompatible(ColumnInfo colInfo, Data.DataType.TypeName typeName) {
-        int val = typeName.getNumber();
         LOG.info(
                 "Data type compatibility check: PostgreSQL type '{}', colInfo.udtName: {}",
                 colInfo.dataType,
                 colInfo.udtName);
-        switch (colInfo.dataType) {
-            case "boolean":
-                // BOOLEAN -> BOOLEAN
-                return val == Data.DataType.TypeName.BOOLEAN_VALUE;
-            case "bit":
-                // The bit type needs to be judged together with character_maximum_length
-                if (colInfo.charMaxLength == null || colInfo.charMaxLength == 1) {
-                    // bit(1) -> BOOLEAN
-                    return val == Data.DataType.TypeName.BOOLEAN_VALUE;
-                } else {
-                    // bit(n>1) is not supported
-                    return false;
-                }
-            case "smallint":
-                // SMALLINT -> SMALLINT
-                return val == Data.DataType.TypeName.INT16_VALUE;
-            case "integer":
-                // INTEGER -> INTEGER
-                return val == Data.DataType.TypeName.INT32_VALUE;
-            case "bigint":
-            case "oid":
-                // BIGINT, OID -> BIGINT
-                return val == Data.DataType.TypeName.INT64_VALUE;
-            case "real":
-                // REAL -> REAL
-                return val == Data.DataType.TypeName.FLOAT_VALUE;
-            case "double precision":
-                // DOUBLE PRECISION -> DOUBLE PRECISION
-                return val == Data.DataType.TypeName.DOUBLE_VALUE;
-            case "character varying":
-            case "character":
-            case "char":
-                // CHARACTER VARYING, CHARACTER, CHAR -> CHARACTER VARYING
-                return val == Data.DataType.TypeName.VARCHAR_VALUE;
-            case "text":
-            case "xml":
-            case "uuid":
-            case "inet":
-            case "cidr":
-            case "macaddr":
-            case "macaddr8":
-            case "int4range":
-            case "int8range":
-            case "numrange":
-            case "tsrange":
-            case "tstzrange":
-            case "daterange":
-                // TEXT, XML, UUID, INET, CIDR, MACADDR, MACADDR8, INT4RANGE, INT8RANGE,
-                // NUMRANGE, TSRANGE, TSTZRANGE, DATERANGE -> CHARACTER VARYING
-                return val == Data.DataType.TypeName.VARCHAR_VALUE;
-            case "timestamp with time zone":
-            case "timestamptz":
-                // TIMESTAMPTZ, TIMESTAMP WITH TIME ZONE -> TIMESTAMP WITH TIME ZONE
-                return val == Data.DataType.TypeName.TIMESTAMPTZ_VALUE;
-            case "timestamp without time zone":
-            case "timestamp":
-                // TIMESTAMP WITHOUT TIME ZONE, TIMESTAMP -> TIMESTAMP WITHOUT TIME ZONE
-                return val == Data.DataType.TypeName.TIMESTAMP_VALUE;
-            case "time with time zone":
-            case "timetz":
-                // TIMETZ, TIME WITH TIME ZONE -> TIME WITHOUT TIME ZONE (assume UTC)
-                return val == Data.DataType.TypeName.TIME_VALUE;
-            case "time without time zone":
-            case "time":
-                // TIME WITHOUT TIME ZONE, TIME -> TIME WITHOUT TIME ZONE
-                return val == Data.DataType.TypeName.TIME_VALUE;
-            case "interval":
-                // INTERVAL [P] -> INTERVAL
-                return val == Data.DataType.TypeName.INTERVAL_VALUE;
-            case "bytea":
-                // BYTEA -> BYTEA
-                return val == Data.DataType.TypeName.BYTEA_VALUE;
-            case "geometry":
-                // PostGIS GEOMETRY -> BYTEA (stored as EWKB bytes)
-                return val == Data.DataType.TypeName.BYTEA_VALUE;
-            case "json":
-            case "jsonb":
-                // JSON, JSONB -> JSONB
-                return val == Data.DataType.TypeName.JSONB_VALUE;
-            case "date":
-                // DATE -> DATE
-                return val == Data.DataType.TypeName.DATE_VALUE;
-            case "numeric":
-                // NUMERIC -> DECIMAL, INT256, VARCHAR
-                return val == Data.DataType.TypeName.DECIMAL_VALUE
-                        || val == Data.DataType.TypeName.INT256_VALUE
-                        || val == Data.DataType.TypeName.VARCHAR_VALUE;
-            case "money":
-                // MONEY -> NUMERIC
-                return val == Data.DataType.TypeName.DECIMAL_VALUE;
-            case "point":
-                // POINT -> STRUCT<x REAL, y REAL>
-                return val == Data.DataType.TypeName.STRUCT_VALUE;
-            case "ARRAY":
-                // ARRAY -> LIST
-                return val == Data.DataType.TypeName.LIST_VALUE;
-            case "USER-DEFINED":
-                // Handle user-defined types like enum, citext, geometry, etc.
-                if (colInfo.udtName != null) {
-                    switch (colInfo.udtName.toLowerCase()) {
-                        case "citext":
-                            // CITEXT -> CHARACTER VARYING
-                            return val == Data.DataType.TypeName.VARCHAR_VALUE;
-                        case "geometry":
-                            // PostGIS GEOMETRY -> BYTEA (stored as EWKB bytes)
-                            return val == Data.DataType.TypeName.BYTEA_VALUE;
-                        case "vector":
-                            // pgvector VECTOR -> VECTOR
-                            return val == Data.DataType.TypeName.VECTOR_VALUE;
-                        case "ltree":
-                            return false;
-                        case "hstore":
-                            return false;
-                        default:
-                            // For other user-defined types, assume they are enum types and check
-                            // if they are compatible with VARCHAR
-                            return val == Data.DataType.TypeName.VARCHAR_VALUE;
-                    }
-                }
-                return false;
-            default:
-                return false; // false for other uncovered types
-        }
+        return Binding.validateCdcSourceColumnType(
+                CDC_TABLE_TYPE,
+                colInfo.dataType,
+                typeName.getNumber(),
+                colInfo.charMaxLength == null ? -1 : colInfo.charMaxLength,
+                false,
+                colInfo.udtName);
     }
 }

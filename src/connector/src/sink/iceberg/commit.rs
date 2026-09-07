@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -19,16 +20,16 @@ use anyhow::{Context, anyhow};
 use async_trait::async_trait;
 use iceberg::Catalog;
 use iceberg::arrow::schema_to_arrow_schema;
-use iceberg::spec::{DataFile, Operation, SerializedDataFile, TableMetadata};
+use iceberg::spec::{DataFile, FormatVersion, Operation, SerializedDataFile, TableMetadata};
 use iceberg::table::Table;
-use iceberg::transaction::{ApplyTransactionAction, FastAppendAction, Transaction};
+use iceberg::transaction::{AddColumn, ApplyTransactionAction, FastAppendAction, Transaction};
 use itertools::Itertools;
 use risingwave_common::array::arrow::arrow_schema_iceberg::{
     DataType as ArrowDataType, Field as ArrowField, Fields as ArrowFields,
 };
 use risingwave_common::array::arrow::{IcebergArrowConvert, IcebergCreateTableArrowConvert};
 use risingwave_common::bail;
-use risingwave_common::catalog::Field;
+use risingwave_common::catalog::{Field, RISINGWAVE_ICEBERG_COMMIT_EPOCH};
 use risingwave_common::error::IcebergError;
 use risingwave_pb::connector_service::SinkMetadata;
 use risingwave_pb::connector_service::sink_metadata::Metadata::Serialized;
@@ -159,14 +160,14 @@ impl<'a> TryFrom<&'a IcebergCommitResult> for Vec<u8> {
 }
 
 #[derive(Default, Clone, Serialize, Deserialize)]
-pub struct IcebergPositionDeleteMergerCommitResult {
+pub struct IcebergPositionDeleteCommitResult {
     pub schema_id: i32,
     pub partition_spec_id: i32,
     pub delete_files: Vec<SerializedDataFile>,
     pub overwrite_files: Vec<SerializedDataFile>,
 }
 
-impl<'a> TryFrom<&'a SinkMetadata> for IcebergPositionDeleteMergerCommitResult {
+impl<'a> TryFrom<&'a SinkMetadata> for IcebergPositionDeleteCommitResult {
     type Error = SinkError;
 
     fn try_from(value: &'a SinkMetadata) -> Result<Self> {
@@ -179,10 +180,10 @@ impl<'a> TryFrom<&'a SinkMetadata> for IcebergPositionDeleteMergerCommitResult {
     }
 }
 
-impl<'a> TryFrom<&'a IcebergPositionDeleteMergerCommitResult> for SinkMetadata {
+impl<'a> TryFrom<&'a IcebergPositionDeleteCommitResult> for SinkMetadata {
     type Error = SinkError;
 
-    fn try_from(value: &'a IcebergPositionDeleteMergerCommitResult) -> Result<SinkMetadata> {
+    fn try_from(value: &'a IcebergPositionDeleteCommitResult) -> Result<SinkMetadata> {
         let bytes = serde_json::to_vec(value)
             .context("Can't serialize iceberg dv merger commit result to metadata")?;
         Ok(SinkMetadata {
@@ -252,13 +253,15 @@ pub struct IcebergSinkCommitter {
 impl IcebergSinkCommitter {
     fn latest_observed_snapshot(&self) -> Option<IcebergCommittedSnapshot> {
         let branch = commit_branch(self.config.r#type.as_str(), self.config.write_mode);
-        self.table
-            .metadata()
+        let metadata = self.table.metadata();
+        metadata
             .snapshot_for_ref(&branch)
             .map(|snapshot| IcebergCommittedSnapshot {
                 branch,
                 snapshot_id: snapshot.snapshot_id(),
                 timestamp_ms: snapshot.timestamp_ms(),
+                max_file_sequence_number: (metadata.format_version() >= FormatVersion::V2)
+                    .then_some(snapshot.sequence_number()),
             })
     }
 
@@ -739,6 +742,10 @@ impl IcebergSinkCommitter {
                         .fast_append()
                         .set_snapshot_id(snapshot_id)
                         .set_target_branch(target_branch.clone())
+                        .set_snapshot_properties(HashMap::from([(
+                            RISINGWAVE_ICEBERG_COMMIT_EPOCH.to_owned(),
+                            epoch.to_string(),
+                        )]))
                         .add_data_files(data_files);
 
                     let tx = append_action.apply(txn).map_err(|err| {
@@ -919,14 +926,7 @@ impl IcebergSinkCommitter {
     /// This function uses Transaction API to atomically update the table schema
     /// with optimistic locking to prevent concurrent conflicts.
     async fn commit_schema_change_impl(&mut self, schema_change: PbSinkSchemaChange) -> Result<()> {
-        use iceberg::spec::NestedField;
-
-        // Step 1: Get current table metadata
-        let metadata = self.table.metadata();
-        let mut next_field_id = metadata.last_column_id() + 1;
-        tracing::debug!("Starting schema change, next_field_id: {}", next_field_id);
-
-        // Step 2: Build new fields to add
+        // Step 1: Build new fields to add
         let iceberg_create_table_arrow_convert = IcebergCreateTableArrowConvert::default();
         let mut new_fields = Vec::new();
 
@@ -954,16 +954,8 @@ impl IcebergSinkCommitter {
                             )
                         })?;
 
-                    // Create NestedField with the next available field ID
-                    let nested_field = Arc::new(NestedField::optional(
-                        next_field_id,
-                        &field.name,
-                        iceberg_type,
-                    ));
-
-                    new_fields.push(nested_field);
-                    tracing::info!("Prepared field '{}' with ID {}", field.name, next_field_id);
-                    next_field_id += 1;
+                    new_fields.push(AddColumn::optional(&field.name, iceberg_type));
+                    tracing::info!("Prepared field '{}' for schema change", field.name);
                 }
             }
             Some(risingwave_pb::stream_plan::sink_schema_change::Op::DropColumns(
@@ -979,7 +971,7 @@ impl IcebergSinkCommitter {
             }
         }
 
-        // Step 3: Create Transaction with UpdateSchemaAction
+        // Step 2: Create Transaction with UpdateSchemaAction
         tracing::info!(
             "Committing schema change to catalog for table {}",
             self.table.identifier()
@@ -987,10 +979,13 @@ impl IcebergSinkCommitter {
 
         let txn = Transaction::new(&self.table);
         let action_fields_added = new_fields.len();
-        let action = txn
-            .update_schema()
-            .add_fields(new_fields)
-            .drop_fields(drop_column_names.clone());
+        let mut action = txn.update_schema();
+        for field in new_fields {
+            action = action.add_column(field);
+        }
+        for column_name in &drop_column_names {
+            action = action.delete_column(column_name);
+        }
 
         let updated_table = action
             .apply(txn)

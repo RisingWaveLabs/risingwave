@@ -224,7 +224,7 @@ format upsert encode avro (
   schema.registry = 'http://schemaregistry:8082',
   schema.registry.name.strategy = 'typo');
 
-statement error empty field key.message
+statement error requires a non-empty `key.message` field
 create sink sink_err from into_kafka with (
   connector = 'kafka',
   topic = 'test-rw-sink-upsert-avro',

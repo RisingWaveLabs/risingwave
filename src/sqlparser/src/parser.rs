@@ -4023,6 +4023,20 @@ impl Parser<'_> {
     }
 
     pub fn parse_alter_system(&mut self) -> ModalResult<Statement> {
+        if self.parse_word("CLEAR") {
+            self.expect_keywords(&[Keyword::FILE, Keyword::CACHE])?;
+            let cache_type = if self.parse_keyword(Keyword::META) {
+                FileCacheType::Meta
+            } else if self.parse_keyword(Keyword::DATA) {
+                FileCacheType::Data
+            } else if self.parse_keyword(Keyword::ALL) {
+                FileCacheType::All
+            } else {
+                return self.expected("META, DATA, or ALL after ALTER SYSTEM CLEAR FILE CACHE");
+            };
+            return Ok(Statement::AlterSystemClearFileCache { cache_type });
+        }
+
         self.expect_keyword(Keyword::SET)?;
         let param = self.parse_identifier()?;
         if self.expect_keyword(Keyword::TO).is_err() && self.expect_token(&Token::Eq).is_err() {

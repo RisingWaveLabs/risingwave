@@ -238,6 +238,7 @@ impl BatchPlanFragmenter {
                 1,
                 &self.catalog_reader,
                 &self.worker_node_manager,
+                self.batch_parallelism,
             )?),
         )?;
         self.stage_graph = Some(
@@ -309,6 +310,10 @@ impl Query {
 
     pub fn stage(&self, stage_id: StageId) -> &QueryStage {
         &self.stage_graph.stages[&stage_id]
+    }
+
+    pub fn batch_parallelism(&self) -> usize {
+        self.stage_graph.batch_parallelism
     }
 }
 
@@ -907,6 +912,7 @@ impl StageGraph {
                     parallelism,
                     catalog_reader,
                     worker_node_manager,
+                    self.batch_parallelism,
                 )?)
             } else {
                 None
@@ -1043,6 +1049,13 @@ impl BatchPlanFragmenter {
         let mut has_lookup_join = false;
         let parallelism = match root.distribution() {
             Distribution::Single => {
+                // A lookup join on a lookup table with a singleton distribution is gathered
+                // into a single task. Mark `has_lookup_join` so that epoch unpin is delayed
+                // until the end of the query.
+                has_lookup_join = self
+                    .collect_stage_lookup_join_parallelism(root.clone())?
+                    .is_some();
+
                 if let Some(info) = &mut table_scan_info {
                     if let Some(partitions) = &mut info.partitions {
                         if partitions.len() != 1 {
@@ -1162,6 +1175,7 @@ impl BatchPlanFragmenter {
                 parallelism,
                 &self.catalog_reader,
                 &self.worker_node_manager,
+                self.batch_parallelism,
             )?)
         } else {
             None
@@ -1264,7 +1278,7 @@ impl BatchPlanFragmenter {
         let build_table_scan_info = |name, table_catalog: &TableCatalog, scan_range| {
             let vnode_mapping = self
                 .worker_node_manager
-                .fragment_mapping(table_catalog.fragment_id)?;
+                .fragment_mapping(table_catalog.fragment_id, self.batch_parallelism)?;
             let partitions = derive_partitions(scan_range, table_catalog, &vnode_mapping)?;
             let info = TableScanInfo::new(name, partitions);
             Ok(Some(info))
@@ -1326,7 +1340,7 @@ impl BatchPlanFragmenter {
             let table_catalog = lookup_join.right_table();
             let vnode_mapping = self
                 .worker_node_manager
-                .fragment_mapping(table_catalog.fragment_id)?;
+                .fragment_mapping(table_catalog.fragment_id, self.batch_parallelism)?;
             let parallelism = vnode_mapping.iter().sorted().dedup().count();
             Ok(Some(parallelism))
         } else {

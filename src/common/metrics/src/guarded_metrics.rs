@@ -268,6 +268,11 @@ impl<T: MetricVecBuilder> LabelGuardedMetricVec<T> {
     /// Instead, we should store the returned `LabelGuardedMetric` in a scope with longer
     /// lifetime so that the labels can be regarded as being used in its whole life scope.
     /// This is also the recommended way to use the raw metrics vec.
+    ///
+    /// A short-lived guard is safe for a gauge that is always updated with `set`: collection
+    /// observes the value before removing a dropped label, and the next `set` replaces the value
+    /// completely. Counters and histograms must retain the guard for their intended lifetime so
+    /// that values are not reset between collections.
     pub fn with_guarded_label_values<V: AsRef<str> + std::fmt::Debug>(
         &self,
         labels: &[V],
@@ -435,7 +440,7 @@ impl<T: MetricWithLocal> LabelGuardedMetric<T> {
 mod tests {
     use prometheus::core::Collector;
 
-    use crate::LabelGuardedIntCounterVec;
+    use crate::{LabelGuardedIntCounterVec, LabelGuardedIntGaugeVec};
 
     #[test]
     fn test_label_guarded_metrics_drop() {
@@ -459,5 +464,34 @@ mod tests {
         drop(m1_2);
         assert_eq!(1, vec.collect().pop().unwrap().get_metric().len());
         assert_eq!(0, vec.collect().pop().unwrap().get_metric().len());
+    }
+
+    #[test]
+    fn test_short_lived_guarded_gauge() {
+        let vec = LabelGuardedIntGaugeVec::test_int_gauge_vec::<1>();
+
+        vec.with_guarded_label_values(&["1"]).set(7);
+        vec.with_guarded_label_values(&["1"]).set(11);
+        let collected = vec.collect().pop().unwrap();
+        assert_eq!(
+            11.0,
+            collected.get_metric()[0]
+                .get_gauge()
+                .as_ref()
+                .unwrap()
+                .value()
+        );
+        assert!(vec.collect().pop().unwrap().get_metric().is_empty());
+
+        vec.with_guarded_label_values(&["1"]).set(13);
+        let collected = vec.collect().pop().unwrap();
+        assert_eq!(
+            13.0,
+            collected.get_metric()[0]
+                .get_gauge()
+                .as_ref()
+                .unwrap()
+                .value()
+        );
     }
 }

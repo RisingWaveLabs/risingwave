@@ -14,6 +14,12 @@ from .log import log, LogLevel
 from .spark_utils import get_spark
 
 
+def get_repo_root() -> str:
+    return os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "..", "..", "..")
+    )
+
+
 def strtobool(v):
     return v.lower() == "true"
 
@@ -163,14 +169,17 @@ def discover_test_cases() -> List[str]:
 def prepare_test_env():
     log("prepare test env", level=LogLevel.HEADER)
     log("create minio bucket", level=LogLevel.INFO)
+    repo_root = get_repo_root()
+    risedev = os.path.join(repo_root, "risedev")
     subprocess.run(
         [
-            "risedev",
+            risedev,
             "mc",
             "mb",
             "-p",
             "hummock-minio/icebergdata",
         ],
+        cwd=repo_root,
         check=True,
     )
     log("start spark connect server", level=LogLevel.INFO)

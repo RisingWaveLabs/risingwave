@@ -1,5 +1,6 @@
 disallowed-methods = [
     { path = "std::iter::Iterator::zip", reason = "Please use Itertools::zip_eq instead." },
+    { path = "tokio_retry::strategy::ExponentialBackoff::from_millis", reason = "Please use `risingwave_common::util::retry::exponential_backoff` instead; `from_millis` sets the exponent base, not the initial delay." },
 
     { path = "risingwave_expr::expr::build_from_prost", reason = "Expressions in streaming must be in non-strict mode. Please use `build_non_strict_from_prost` instead." },
     { path = "risingwave_expr::expr::build_func", reason = "Expressions in streaming must be in non-strict mode. Please use `build_func_non_strict` instead." },

@@ -1,0 +1,39 @@
+# Regression test for reading Parquet columns represented as Arrow Utf8View.
+#
+# Schema inference and array conversion already accepted Utf8View as varchar, but the
+# Parquet matcher rejected it first. Top-level values were therefore replaced with NULL;
+# for a nested field, the mismatch rejected the entire struct and also lost valid siblings.
+#
+# The committed fixture `data/utf8_view/data.parquet` was generated with parquet-rs
+# 58.4.0 (ArrowWriter) and contains both inline and out-of-line StringView values:
+#   id: int32                         = [1, 2, 3]
+#   v:  utf8view                      = ['short', 'a top-level string longer than twelve bytes', NULL]
+#   s:  struct<label: utf8view,
+#              score: int32>         = [('nested', 7),
+#                                        ('a nested string longer than twelve bytes', 42),
+#                                        (NULL, 9)]
+
+statement ok
+create table parquet_utf8_view (
+    id int,
+    v varchar,
+    s struct<label varchar, score int>
+) with (
+    connector = 'posix_fs',
+    posix_fs.root = 'e2e_test/source_inline/fs/data/utf8_view'
+) format plain encode parquet;
+
+query I retry 60 backoff 1s
+select count(*) from parquet_utf8_view;
+----
+3
+
+query ITTI
+select id, v, (s).label, (s).score from parquet_utf8_view order by id;
+----
+1 short nested 7
+2 a top-level string longer than twelve bytes a nested string longer than twelve bytes 42
+3 NULL NULL 9
+
+statement ok
+drop table parquet_utf8_view;

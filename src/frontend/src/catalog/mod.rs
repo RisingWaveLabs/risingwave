@@ -115,8 +115,8 @@ pub enum CatalogErrorInner {
     },
 
     #[error(
-        "{object_type} with name {name} exists{}",
-        if *.under_creation { " but under creation" } else { "" },
+        "{object_type} named {name} already exists{}",
+        if *.under_creation { " and is still being created" } else { "" },
     )]
     Duplicated {
         object_type: &'static str,

@@ -23,7 +23,7 @@ auto_enums = { workspace = true }
 auto_impl = "1"
 axum = { workspace = true }
 axum-server = { version = "0.8", features = ["tls-openssl"] }
-base64 = "0.22"
+base64 = "0.23"
 bk-tree = "0.5.0"
 bytes = "1"
 chrono = { workspace = true }

@@ -119,6 +119,22 @@ CREATE SINK s_bad_url FROM t_url WITH (
 statement ok
 DROP TABLE t_url;
 
+# ---- Validation: unsupported HTTP method should be rejected ----
+statement ok
+CREATE TABLE t_unsupported_method (payload varchar);
+
+statement error HTTP sink method must be POST or PUT, got 'DELETE'
+CREATE SINK s_unsupported_method FROM t_unsupported_method WITH (
+    connector = 'http',
+    url = 'http://localhost:18081',
+    method = 'DELETE',
+    type = 'append-only',
+    force_append_only = 'true'
+);
+
+statement ok
+DROP TABLE t_unsupported_method;
+
 # ---- Validation: auto schema change should be rejected ----
 statement ok
 CREATE TABLE t_auto_schema_change (payload varchar primary key);
@@ -200,6 +216,31 @@ DROP SINK s_varchar;
 
 statement ok
 DROP TABLE t_varchar;
+
+# ---- Success: PUT method ----
+statement ok
+CREATE TABLE t_put (payload varchar);
+
+statement ok
+CREATE SINK s_put FROM t_put WITH (
+    connector = 'http',
+    url = 'http://localhost:18081',
+    method = 'PUT',
+    type = 'append-only',
+    force_append_only = 'true'
+);
+
+statement ok
+INSERT INTO t_put VALUES ('put payload');
+
+statement ok
+FLUSH;
+
+statement ok
+DROP SINK s_put;
+
+statement ok
+DROP TABLE t_put;
 
 # ---- Success: jsonb payload ----
 statement ok

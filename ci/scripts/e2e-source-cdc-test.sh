@@ -30,7 +30,7 @@ wget --no-verbose https://repo.mongodb.org/apt/ubuntu/dists/noble/mongodb-org/8.
 dpkg -i mongodb-mongosh_2.5.8_amd64.deb
 
 echo "--- Run inline CDC source tests"
-risedev slt './e2e_test/source_inline/cdc/**/*.slt' --skip 'cron_only' -j8
+risedev slt './e2e_test/source_inline/cdc/**/*.slt' --skip 'cron_only' -j1
 risedev slt './e2e_test/source_inline/cdc/**/*.slt.serial' --skip 'cron_only'
 
 echo "--- Run TVF source tests"

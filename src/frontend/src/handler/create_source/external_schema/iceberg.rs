@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use anyhow::Context;
+
 use super::*;
 
 /// TODO: make hidden columns additional columns, instead of normal columns?
@@ -28,20 +30,27 @@ pub async fn extract_iceberg_columns(
             .fields()
             .iter()
             .enumerate()
-            .map(|(i, field)| {
+            .map(|(i, field)| -> anyhow::Result<ColumnCatalog> {
                 let column_desc = ColumnDesc::named(
                     field.name(),
                     ColumnId::new((i + 1).try_into().unwrap()),
-                    IcebergArrowConvert.type_from_field(field).unwrap(),
+                    IcebergArrowConvert
+                        .type_from_field(field)
+                        .with_context(|| {
+                            format!(
+                                "failed to infer RisingWave type for Iceberg field {}",
+                                field.name()
+                            )
+                        })?,
                 );
-                ColumnCatalog {
+                Ok(ColumnCatalog {
                     column_desc,
                     // hide the _row_id column for iceberg engine table
                     // This column is auto generated when users define a table without primary key
                     is_hidden: field.name() == ROW_ID_COLUMN_NAME,
-                }
+                })
             })
-            .collect();
+            .collect::<anyhow::Result<Vec<_>>>()?;
         columns.extend(ColumnCatalog::iceberg_hidden_cols());
 
         tracing::info!("iceberg columns: {:?}", columns);

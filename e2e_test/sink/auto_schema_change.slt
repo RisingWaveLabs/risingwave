@@ -17,7 +17,7 @@ create sink s as select * from t with (connector = 'blackhole', auto.schema.chan
 statement ok
 create materialized view m1 as select * from t;
 
-statement error auto schema change only support on TABLE, but got MaterializedView
+statement error auto schema change is supported only on TABLE, but got MaterializedView
 create sink s from m1 with (connector = 'blackhole', auto.schema.change = 'true');
 
 statement ok
@@ -33,7 +33,7 @@ create table t1 (id int primary key, name string, g int  as id + 1);
 statement error auto schema change not supported for sink-into-table
 create sink s into t1 from t with (auto.schema.change = 'true');
 
-statement error auto schema change not supported for table with non-hidden generated column or sys column
+statement error auto schema change is not supported for tables with visible generated columns or visible system columns, but found column g
 create sink s from t1 with (connector = 'blackhole', auto.schema.change = 'true');
 
 statement ok
@@ -308,7 +308,7 @@ create table table_in_other_database(id int, name string);
 statement ok
 set database to d2;
 
-statement error auto schema change sink does not support created from cross database table
+statement error auto schema change sinks do not support cross-database tables
 create sink s from d1.public.table_in_other_database with (connector = 'blackhole', auto.schema.change = 'true');
 
 statement ok

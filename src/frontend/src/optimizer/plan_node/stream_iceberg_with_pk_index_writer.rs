@@ -14,12 +14,14 @@
 
 use anyhow::Context;
 use pretty_xmlish::{Pretty, XmlNode};
-use risingwave_common::catalog::Field;
+use risingwave_common::catalog::{Field, Schema};
 use risingwave_common::types::DataType;
 use risingwave_common::util::sort_util::OrderType;
 use risingwave_connector::sink::catalog::desc::SinkDesc;
-use risingwave_pb::stream_plan::IcebergWithPkIndexWriterNode;
-use risingwave_pb::stream_plan::stream_node::NodeBody;
+use risingwave_pb::stream_plan::stream_node::{NodeBody, PbStreamKind};
+use risingwave_pb::stream_plan::{
+    DispatcherType, IcebergWithPkIndexWriterNode, MergeNode, PbStreamNode,
+};
 
 use super::stream::prelude::*;
 use crate::TableCatalog;
@@ -31,6 +33,7 @@ use crate::optimizer::plan_node::{
 use crate::optimizer::property::{
     Distribution, FunctionalDependencySet, MonotonicityMap, WatermarkColumns,
 };
+use crate::scheduler::SchedulerResult;
 use crate::stream_fragmenter::BuildFragmentGraphState;
 
 /// `StreamIcebergWithPkIndexWriter` is the stateful writer executor for the Iceberg
@@ -75,11 +78,26 @@ impl StreamIcebergWithPkIndexWriter {
     }
 }
 
-fn output_schema() -> risingwave_common::catalog::Schema {
-    risingwave_common::catalog::Schema::new(vec![
+fn output_schema() -> Schema {
+    Schema::new(vec![
         Field::with_name(DataType::Varchar, "file_path"),
         Field::with_name(DataType::Int64, "position"),
     ])
+}
+
+/// Schema of the transient compaction resolver output consumed by the writer's right input.
+fn resolver_output_schema(sink_desc: &SinkDesc) -> Result<Schema> {
+    let downstream_pk = sink_desc
+        .downstream_pk
+        .as_deref()
+        .context("Missing downstream PK in Iceberg sink desc")?;
+    let mut fields: Vec<Field> = downstream_pk
+        .iter()
+        .map(|&idx| Field::from(&sink_desc.columns[idx].column_desc))
+        .collect();
+    fields.push(Field::with_name(DataType::Varchar, "file_path"));
+    fields.push(Field::with_name(DataType::Int64, "position"));
+    Ok(Schema::new(fields))
 }
 
 fn build_iceberg_pk_state_table(sink_desc: &SinkDesc) -> Result<TableCatalog> {
@@ -147,16 +165,66 @@ impl PlanTreeNodeUnary<Stream> for StreamIcebergWithPkIndexWriter {
 impl_plan_tree_node_for_unary! { Stream, StreamIcebergWithPkIndexWriter }
 
 impl StreamNode for StreamIcebergWithPkIndexWriter {
-    fn to_stream_prost_body(&self, state: &mut BuildFragmentGraphState) -> NodeBody {
+    fn to_stream_prost_body(&self, _state: &mut BuildFragmentGraphState) -> NodeBody {
+        unreachable!(
+            "iceberg pk-index writer cannot be converted into a prost body -- call \
+             `adhoc_to_stream_prost` instead, since it declares a dormant second input."
+        )
+    }
+}
+
+impl StreamIcebergWithPkIndexWriter {
+    /// Serializes the writer with its normal upstream and a dormant compaction-resolver edge.
+    /// The resolver is dynamically attached to the second input by a later task.
+    pub fn adhoc_to_stream_prost(
+        &self,
+        state: &mut BuildFragmentGraphState,
+    ) -> SchedulerResult<PbStreamNode> {
         let pk_index_table = self
             .pk_index_table
             .clone()
             .with_id(state.gen_table_id_wrapped());
+        let resolver_fields = resolver_output_schema(&self.sink_desc)
+            .context("build compaction resolver output schema")?
+            .to_prost();
 
-        NodeBody::IcebergWithPkIndexWriter(Box::new(IcebergWithPkIndexWriterNode {
-            sink_desc: Some(self.sink_desc.to_proto()),
-            pk_index_table: Some(pk_index_table.to_internal_table_prost()),
-        }))
+        let left_input = self.input.to_stream_prost(state)?;
+        let right_dispatcher = match self.distribution() {
+            Distribution::Single => DispatcherType::Simple,
+            _ => DispatcherType::Hash,
+        };
+        let right_input = PbStreamNode {
+            node_body: Some(NodeBody::Merge(Box::new(MergeNode {
+                upstream_fragment_id: 0.into(),
+                upstream_dispatcher_type: right_dispatcher.into(),
+                allow_no_initial_upstream: true,
+                ..Default::default()
+            }))),
+            identity: "IcebergCompactionResolverEdge".into(),
+            fields: resolver_fields,
+            stream_kind: PbStreamKind::AppendOnly as i32,
+            ..Default::default()
+        };
+
+        Ok(PbStreamNode {
+            node_body: Some(NodeBody::IcebergWithPkIndexWriter(Box::new(
+                IcebergWithPkIndexWriterNode {
+                    sink_desc: Some(self.sink_desc.to_proto()),
+                    pk_index_table: Some(pk_index_table.to_internal_table_prost()),
+                },
+            ))),
+            input: vec![left_input, right_input],
+            identity: self.distill_to_string(),
+            operator_id: self.id().to_stream_node_operator_id(),
+            stream_key: self
+                .stream_key()
+                .unwrap_or_default()
+                .iter()
+                .map(|x| *x as u32)
+                .collect(),
+            fields: self.schema().to_prost(),
+            stream_kind: self.stream_kind().to_protobuf() as i32,
+        })
     }
 }
 

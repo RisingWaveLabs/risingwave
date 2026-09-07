@@ -20,6 +20,7 @@ use anyhow::anyhow;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use parking_lot::Mutex;
 use risingwave_common::catalog::{DatabaseId, FragmentTypeFlag, TableId};
+use risingwave_common::metrics::LabelGuardedIntCounter;
 use risingwave_common::util::epoch::Epoch;
 use risingwave_meta_model::ActorId;
 use risingwave_meta_model::refresh_job::{self, RefreshState};
@@ -42,6 +43,7 @@ pub struct GlobalRefreshManager {
     barrier_scheduler: BarrierScheduler,
     shared_actor_infos: SharedActorInfos,
     progress_trackers: Mutex<GlobalRefreshTableProgressTracker>,
+    refresh_job_metrics: Mutex<HashMap<TableId, RefreshJobMetrics>>,
     scheduler_notify: Notify,
     scheduler_interval: Duration,
 }
@@ -59,6 +61,7 @@ impl GlobalRefreshManager {
             barrier_scheduler,
             shared_actor_infos,
             progress_trackers: Mutex::new(GlobalRefreshTableProgressTracker::default()),
+            refresh_job_metrics: Mutex::new(HashMap::new()),
             scheduler_notify: Notify::new(),
             scheduler_interval,
         });
@@ -171,6 +174,10 @@ impl GlobalRefreshManager {
 
     async fn handle_scheduler_tick(self: &Arc<Self>) -> MetaResult<()> {
         let jobs = self.metadata_manager.list_refresh_jobs().await?;
+        let active_table_ids = jobs.iter().map(|job| job.table_id).collect::<HashSet<_>>();
+        self.refresh_job_metrics
+            .lock()
+            .retain(|table_id, _| active_table_ids.contains(table_id));
         for job in jobs {
             if let Err(err) = self.try_trigger_scheduled_refresh(&job).await {
                 tracing::warn!(
@@ -196,9 +203,11 @@ impl GlobalRefreshManager {
         job: &refresh_job::Model,
     ) -> MetaResult<()> {
         if job.current_status != RefreshState::Idle {
-            GLOBAL_META_METRICS
-                .refresh_cron_job_miss_cnt
-                .with_guarded_label_values(&[&job.table_id.to_string()])
+            self.refresh_job_metrics
+                .lock()
+                .entry(job.table_id)
+                .or_insert_with(|| RefreshJobMetrics::new(job.table_id))
+                .cron_miss_count
                 .inc();
             tracing::warn!(table_id = %job.table_id, "skip scheduled refresh: current status is not idle: {:?}", job.current_status);
             return Ok(());
@@ -257,10 +266,11 @@ impl GlobalRefreshManager {
         let associated_source_id = src_id;
 
         // Increment cron job trigger counter
-        let table_id_str = job.table_id.to_string();
-        GLOBAL_META_METRICS
-            .refresh_cron_job_trigger_cnt
-            .with_guarded_label_values(&[&table_id_str])
+        self.refresh_job_metrics
+            .lock()
+            .entry(job.table_id)
+            .or_insert_with(|| RefreshJobMetrics::new(job.table_id))
+            .cron_trigger_count
             .inc();
         tracing::info!(table_id = %job.table_id, "trigger scheduled refresh at interval {:?}", interval);
 
@@ -423,21 +433,68 @@ impl GlobalRefreshManager {
     }
 
     pub fn remove_progress_tracker(&self, table_id: TableId, status: &str) {
-        let mut guard = self.progress_trackers.lock();
-        if let Some(entry) = guard.inner.remove(&table_id) {
-            let status = status.to_owned();
+        let elapsed = {
+            let mut guard = self.progress_trackers.lock();
+            let elapsed = guard
+                .inner
+                .remove(&table_id)
+                .map(|entry| entry.start_time.elapsed().as_secs());
+            guard.table_id_by_database_id.values_mut().for_each(|set| {
+                set.remove(&table_id);
+            });
+            elapsed
+        };
+        if let Some(elapsed) = elapsed {
+            let table_id_label = table_id.to_string();
             GLOBAL_META_METRICS
                 .refresh_job_duration
-                .with_guarded_label_values(&[&table_id.to_string(), &status])
-                .set(entry.start_time.elapsed().as_secs());
-            GLOBAL_META_METRICS
-                .refresh_job_finish_cnt
-                .with_guarded_label_values(&[&table_id.to_string(), &status])
-                .inc();
+                .with_guarded_label_values(&[&table_id_label, status])
+                .set(elapsed);
+            let mut metrics = self.refresh_job_metrics.lock();
+            let metrics = metrics
+                .entry(table_id)
+                .or_insert_with(|| RefreshJobMetrics::new(table_id))
+                .finished
+                .entry(status.to_owned())
+                .or_insert_with(|| RefreshFinishedMetrics::new(table_id, status));
+            metrics.count.inc();
         }
-        guard.table_id_by_database_id.values_mut().for_each(|set| {
-            set.remove(&table_id);
-        });
+    }
+}
+
+struct RefreshJobMetrics {
+    cron_trigger_count: LabelGuardedIntCounter,
+    cron_miss_count: LabelGuardedIntCounter,
+    finished: HashMap<String, RefreshFinishedMetrics>,
+}
+
+impl RefreshJobMetrics {
+    fn new(table_id: TableId) -> Self {
+        let table_id = table_id.to_string();
+        Self {
+            cron_trigger_count: GLOBAL_META_METRICS
+                .refresh_cron_job_trigger_cnt
+                .with_guarded_label_values(&[&table_id]),
+            cron_miss_count: GLOBAL_META_METRICS
+                .refresh_cron_job_miss_cnt
+                .with_guarded_label_values(&[&table_id]),
+            finished: HashMap::new(),
+        }
+    }
+}
+
+struct RefreshFinishedMetrics {
+    count: LabelGuardedIntCounter,
+}
+
+impl RefreshFinishedMetrics {
+    fn new(table_id: TableId, status: &str) -> Self {
+        let table_id = table_id.to_string();
+        Self {
+            count: GLOBAL_META_METRICS
+                .refresh_job_finish_cnt
+                .with_guarded_label_values(&[&table_id, status]),
+        }
     }
 }
 

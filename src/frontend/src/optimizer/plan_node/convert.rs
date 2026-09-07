@@ -18,6 +18,7 @@ use risingwave_common::catalog::FieldDisplay;
 use risingwave_pb::stream_plan::StreamScanType;
 
 use super::*;
+use crate::optimizer::ShareId;
 use crate::optimizer::property::RequiredDist;
 
 /// `ToStream` converts a logical plan node to streaming physical node
@@ -66,15 +67,17 @@ pub trait ToStream {
 /// If no better plan can be found, and locality backfill is enabled, wrap the plan
 /// with `LogicalLocalityProvider`.
 /// Otherwise, return the plan as is.
-pub fn try_enforce_locality_requirement(plan: LogicalPlanRef, columns: &[usize]) -> LogicalPlanRef {
+pub fn try_enforce_locality_requirement(
+    plan: LogicalPlanRef,
+    columns: &[usize],
+    locality_backfill_enabled: bool,
+) -> LogicalPlanRef {
     assert!(!columns.is_empty());
     if let Some(better_plan) = plan.try_better_locality(columns) {
         better_plan
-    } else if plan.ctx().session_ctx().config().enable_locality_backfill() {
+    } else if locality_backfill_enabled {
         LogicalLocalityProvider::new(plan, columns.to_owned()).into()
     } else {
-        // TODO: remove this when locality backfill is enabled by default
-        plan.ctx().inc_missed_locality_providers();
         plan
     }
 }
@@ -111,18 +114,23 @@ pub fn stream_enforce_eowc_requirement(
 
 #[derive(Debug, Clone)]
 pub struct RewriteStreamContext {
-    share_rewrite_map: HashMap<PlanNodeId, (LogicalPlanRef, ColIndexMapping)>,
+    share_rewrite_map: HashMap<ShareId, (LogicalPlanRef, ColIndexMapping)>,
     // Snapshot backfill needs upstream table primary-key semantics during logical rewrite
     // so operators above `LogicalScan` can preserve hidden primary-key columns before
     // `StreamTableScan` is built. Other backfill types keep logical stream-key semantics.
     backfill_type: BackfillType,
+    locality_backfill_enabled: bool,
 }
 
 impl RewriteStreamContext {
-    pub fn new_with_backfill_type(backfill_type: BackfillType) -> Self {
+    pub fn new_with_backfill_type(
+        backfill_type: BackfillType,
+        locality_backfill_enabled: bool,
+    ) -> Self {
         Self {
             share_rewrite_map: HashMap::new(),
             backfill_type,
+            locality_backfill_enabled,
         }
     }
 
@@ -130,23 +138,27 @@ impl RewriteStreamContext {
         self.backfill_type
     }
 
+    pub fn locality_backfill_enabled(&self) -> bool {
+        self.locality_backfill_enabled
+    }
+
     pub fn add_rewrite_result(
         &mut self,
-        plan_node_id: PlanNodeId,
+        share_id: ShareId,
         plan_ref: LogicalPlanRef,
         col_change: ColIndexMapping,
     ) {
         let prev = self
             .share_rewrite_map
-            .insert(plan_node_id, (plan_ref, col_change));
+            .insert(share_id, (plan_ref, col_change));
         assert!(prev.is_none());
     }
 
     pub fn get_rewrite_result(
         &self,
-        plan_node_id: PlanNodeId,
+        share_id: ShareId,
     ) -> Option<&(LogicalPlanRef, ColIndexMapping)> {
-        self.share_rewrite_map.get(&plan_node_id)
+        self.share_rewrite_map.get(&share_id)
     }
 }
 
@@ -198,7 +210,7 @@ impl BackfillType {
 
 #[derive(Debug, Clone)]
 pub struct ToStreamContext {
-    share_to_stream_map: HashMap<PlanNodeId, StreamPlanRef>,
+    share_to_stream_map: HashMap<ShareId, StreamPlanRef>,
     emit_on_window_close: bool,
     backfill_type: BackfillType,
 }
@@ -216,14 +228,14 @@ impl ToStreamContext {
         self.backfill_type
     }
 
-    pub fn add_to_stream_result(&mut self, plan_node_id: PlanNodeId, plan_ref: StreamPlanRef) {
+    pub fn add_to_stream_result(&mut self, share_id: ShareId, plan_ref: StreamPlanRef) {
         self.share_to_stream_map
-            .try_insert(plan_node_id, plan_ref)
+            .try_insert(share_id, plan_ref)
             .unwrap();
     }
 
-    pub fn get_to_stream_result(&self, plan_node_id: PlanNodeId) -> Option<&StreamPlanRef> {
-        self.share_to_stream_map.get(&plan_node_id)
+    pub fn get_to_stream_result(&self, share_id: ShareId) -> Option<&StreamPlanRef> {
+        self.share_to_stream_map.get(&share_id)
     }
 
     pub fn emit_on_window_close(&self) -> bool {

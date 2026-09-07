@@ -258,7 +258,8 @@ impl IcebergScanInner {
             let stream = reader
                 .clone()
                 .read(tokio_stream::once(Ok(task.clone())).boxed())
-                .map_err(to_datafusion_error)?;
+                .map_err(to_datafusion_error)?
+                .stream();
             let mut pos_start: i64 = 0;
 
             #[for_await]

@@ -39,8 +39,7 @@ use crate::handler::flush::do_flush;
 use crate::handler::util::{DataChunkToRowSetAdapter, to_pg_field};
 use crate::optimizer::plan_node::{BatchPlanRef, Explain};
 use crate::optimizer::{
-    BatchPlanRoot, ExecutionModeDecider, OptimizerContext, OptimizerContextRef,
-    RelationCollectorVisitor, SysTableVisitor,
+    BatchPlanRoot, ExecutionModeDecider, OptimizerContext, OptimizerContextRef, SysTableVisitor,
 };
 use crate::planner::Planner;
 use crate::scheduler::plan_fragmenter::Query;
@@ -302,11 +301,6 @@ pub struct RwBatchQueryPlanResult {
     pub(crate) query_mode: QueryMode,
     pub(crate) schema: Schema,
     pub(crate) stmt_type: StatementType,
-    // Note that these relations are only resolved in the binding phase, and it may only be a
-    // subset of the final one. i.e. the final one may contain more implicit dependencies on
-    // indices.
-    pub(crate) dependent_relations: Vec<ObjectId>,
-    pub(crate) dependent_secrets: Vec<SecretId>,
 }
 
 fn gen_batch_query_plan(
@@ -318,8 +312,6 @@ fn gen_batch_query_plan(
         stmt_type,
         must_dist,
         bound,
-        dependent_relations,
-        dependent_secrets,
         ..
     } = bind_result;
 
@@ -361,9 +353,6 @@ fn gen_batch_query_plan(
 
     let batch_plan = optimized_logical.gen_batch_plan()?;
 
-    let dependent_relations =
-        RelationCollectorVisitor::collect_with(dependent_relations, batch_plan.plan.clone());
-
     let must_local = must_run_in_local_mode(&batch_plan);
 
     let query_mode = match (must_dist, must_local) {
@@ -393,8 +382,6 @@ fn gen_batch_query_plan(
         query_mode,
         schema,
         stmt_type,
-        dependent_relations: dependent_relations.into_iter().collect_vec(),
-        dependent_secrets: dependent_secrets.into_iter().collect_vec(),
     };
     Ok(BatchPlanChoice::Rw(result))
 }

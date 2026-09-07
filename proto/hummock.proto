@@ -353,7 +353,7 @@ message HummockVersion {
   reserved 4;
   reserved 'safe_epoch';
   map<uint32, TableWatermarks> table_watermarks = 5;
-  map<uint32, TableChangeLog> table_change_logs = 6;
+  map<uint32, TableChangeLog> table_change_logs = 6 [deprecated = true];
   map<uint32, StateTableInfo> state_table_info = 7;
   map<uint32, VectorIndex> vector_indexes = 8;
 }
@@ -379,7 +379,7 @@ message HummockVersionDelta {
     // only logs in epoch later than truncate_epoch will be preserved
     uint64 truncate_epoch = 2;
   }
-  map<uint32, ChangeLogDelta> change_log_delta = 10;
+  map<uint32, ChangeLogDelta> change_log_delta = 10 [deprecated = true];
   map<uint32, StateTableInfoDelta> state_table_info_delta = 11;
   map<uint32, VectorIndexDelta> vector_index_delta = 12;
 }

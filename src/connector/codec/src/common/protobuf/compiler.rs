@@ -48,11 +48,26 @@ pub fn compile_pb(
         }
     }
 
+    // Resolves imports from a static (import path, source) table — the bundled
+    // sets Confluent treats as ambient.
+    struct BundledFileResolver(&'static [(&'static str, &'static str)]);
+
+    impl FileResolver for BundledFileResolver {
+        fn open_file(&self, name: &str) -> Result<File, Error> {
+            let found = self.0.iter().find(|(path, _)| *path == name);
+            let (_, content) = found.ok_or_else(|| Error::file_not_found(name))?;
+            File::from_source(name, content)
+        }
+    }
+
     let main_file_name = main_file.0.clone();
 
+    // Confluent's Java / Go SDKs prioritize user overrides.
     let mut resolver = ChainFileResolver::new();
-    resolver.add(GoogleFileResolver::new());
     resolver.add(MyResolver::new(main_file, dependencies));
+    resolver.add(BundledFileResolver(proto_src_google_type::FILES));
+    resolver.add(BundledFileResolver(proto_src_confluent::FILES));
+    resolver.add(GoogleFileResolver::new());
 
     let fd = protox::Compiler::with_file_resolver(resolver)
         .include_imports(true)

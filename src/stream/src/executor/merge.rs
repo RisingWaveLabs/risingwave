@@ -110,6 +110,7 @@ mod upstream {
         Stream<Item = StreamExecutorResult<DispatcherMessage>> + Unpin + Send + 'static
     {
         fn upstream_input_ids(&self) -> impl Iterator<Item = ActorId> + '_;
+        fn is_empty(&self) -> bool;
         fn flush_buffered_watermarks(&mut self);
         fn update(&mut self, to_add: Vec<BoxedActorInput>, to_remove: &HashSet<ActorId>);
     }
@@ -117,6 +118,10 @@ mod upstream {
     impl Upstream for MergeUpstream {
         fn upstream_input_ids(&self) -> impl Iterator<Item = ActorId> + '_ {
             self.inner.upstream_input_ids()
+        }
+
+        fn is_empty(&self) -> bool {
+            self.inner.is_empty()
         }
 
         fn flush_buffered_watermarks(&mut self) {
@@ -136,6 +141,10 @@ mod upstream {
     impl Upstream for SingletonUpstream {
         fn upstream_input_ids(&self) -> impl Iterator<Item = ActorId> + '_ {
             std::iter::once(self.id())
+        }
+
+        fn is_empty(&self) -> bool {
+            false
         }
 
         fn flush_buffered_watermarks(&mut self) {
@@ -297,8 +306,9 @@ where
         );
 
         loop {
+            let upstream_is_empty = upstream.is_empty();
             let msg = barrier_buffer
-                .await_next_message(&mut upstream, &metrics)
+                .await_next_message(&mut upstream, &metrics, upstream_is_empty)
                 .await?;
             let msg = match msg {
                 DispatcherMessage::Watermark(watermark) => Message::Watermark(watermark),
@@ -449,8 +459,11 @@ where
                 }
 
                 Poll::Ready(None) => {
-                    // See also the comments in `DynamicReceivers::poll_next`.
-                    unreachable!("Merge should always have upstream inputs");
+                    return if let Some(chunk_out) = self.chunk_builder.take() {
+                        Poll::Ready(Some(Ok(MessageInner::Chunk(chunk_out))))
+                    } else {
+                        Poll::Pending
+                    };
                 }
             }
         }
@@ -460,11 +473,12 @@ where
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::task::Poll;
     use std::time::Duration;
 
     use assert_matches::assert_matches;
-    use futures::FutureExt;
     use futures::future::try_join_all;
+    use futures::{FutureExt, poll};
     use risingwave_common::array::Op;
     use risingwave_common::util::epoch::test_epoch;
     use risingwave_pb::task_service::stream_exchange_service_server::{
@@ -695,6 +709,177 @@ mod tests {
         for handle in handles {
             handle.await.unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn empty_dynamic_merge_progresses_across_attach_detach_and_reattach() {
+        let actor_id = 999.into();
+        let resolver_1 = 1000.into();
+        let resolver_2 = 1001.into();
+        let empty_fragment = 0.into();
+        let resolver_fragment_1 = 500.into();
+        let resolver_fragment_2 = 501.into();
+        let barrier_test_env = LocalBarrierTestEnv::for_test().await;
+        let e1 = Barrier::new_test_barrier(test_epoch(1));
+        barrier_test_env.inject_barrier(&e1, [actor_id]);
+        barrier_test_env.flush_all_events().await;
+
+        let metrics = Arc::new(StreamingMetrics::unused());
+        let actor_ctx = ActorContext::for_test(actor_id);
+        let barrier_rx = barrier_test_env
+            .local_barrier_manager
+            .subscribe_barrier(actor_id);
+        let upstream = MergeExecutor::new_merge_upstream(
+            vec![],
+            &metrics,
+            &actor_ctx,
+            100,
+            Schema::empty().clone(),
+        );
+        let merge = MergeExecutor::new(
+            actor_ctx,
+            514.into(),
+            empty_fragment,
+            upstream,
+            barrier_test_env.local_barrier_manager.clone(),
+            metrics,
+            barrier_rx,
+        );
+        let mut merge = merge.boxed().execute();
+
+        macro_rules! assert_recv_pending {
+            () => {
+                assert_matches!(
+                    poll!(merge.as_mut().next()),
+                    Poll::Pending,
+                    "an empty dynamic merge must wait for a barrier rather than terminate or busy-loop"
+                );
+            };
+        }
+
+        macro_rules! recv_barrier {
+            ($epoch:expr) => {
+                assert_matches!(
+                    merge.next().await.unwrap().unwrap(),
+                    Message::Barrier(Barrier { epoch, .. }) if epoch.curr == test_epoch($epoch)
+                );
+            };
+        }
+
+        async fn take_upstream_tx(
+            barrier_test_env: &LocalBarrierTestEnv,
+            upstream_actor_id: ActorId,
+            downstream_actor_id: ActorId,
+        ) -> crate::executor::exchange::permit::Sender {
+            let mut requests = barrier_test_env
+                .take_pending_new_output_requests(upstream_actor_id)
+                .await;
+            assert_eq!(requests.len(), 1);
+            let (actor_id, request) = requests.pop().unwrap();
+            assert_eq!(actor_id, downstream_actor_id);
+            let NewOutputRequest::Local(tx) = request else {
+                unreachable!()
+            };
+            tx
+        }
+
+        assert_recv_pending!();
+
+        recv_barrier!(1);
+        assert_recv_pending!();
+
+        let b1 = Barrier::new_test_barrier(test_epoch(2)).with_mutation(Mutation::Update(
+            UpdateMutation {
+                merges: maplit::hashmap! {
+                    (actor_id, empty_fragment) => MergeUpdate {
+                        actor_id,
+                        upstream_fragment_id: empty_fragment,
+                        new_upstream_fragment_id: Some(resolver_fragment_1),
+                        added_upstream_actors: vec![helper_make_local_actor(resolver_1)],
+                        removed_upstream_actor_id: vec![],
+                    },
+                },
+                ..Default::default()
+            },
+        ));
+        barrier_test_env.inject_barrier(&b1, [actor_id]);
+        barrier_test_env.flush_all_events().await;
+        assert_recv_pending!();
+        barrier_test_env.flush_all_events().await;
+        let resolver_1_tx = take_upstream_tx(&barrier_test_env, resolver_1, actor_id).await;
+        resolver_1_tx
+            .send(Message::Barrier(b1.clone().into_dispatcher()).into())
+            .await
+            .unwrap();
+        recv_barrier!(2);
+
+        resolver_1_tx
+            .send(Message::Chunk(build_test_chunk(1)).into())
+            .await
+            .unwrap();
+        assert_matches!(merge.next().await.unwrap().unwrap(), Message::Chunk(chunk) => {
+            assert_eq!(chunk.cardinality(), 1);
+        });
+
+        let b2 = Barrier::new_test_barrier(test_epoch(3)).with_mutation(Mutation::Update(
+            UpdateMutation {
+                merges: maplit::hashmap! {
+                    (actor_id, resolver_fragment_1) => MergeUpdate {
+                        actor_id,
+                        upstream_fragment_id: resolver_fragment_1,
+                        new_upstream_fragment_id: Some(empty_fragment),
+                        added_upstream_actors: vec![],
+                        removed_upstream_actor_id: vec![resolver_1],
+                    },
+                },
+                ..Default::default()
+            },
+        ));
+        barrier_test_env.inject_barrier(&b2, [actor_id]);
+        resolver_1_tx
+            .send(Message::Barrier(b2.clone().into_dispatcher()).into())
+            .await
+            .unwrap();
+        recv_barrier!(3);
+        assert_recv_pending!();
+
+        let e3 = Barrier::new_test_barrier(test_epoch(4));
+        barrier_test_env.inject_barrier(&e3, [actor_id]);
+        recv_barrier!(4);
+        assert_recv_pending!();
+
+        let b4 = Barrier::new_test_barrier(test_epoch(5)).with_mutation(Mutation::Update(
+            UpdateMutation {
+                merges: maplit::hashmap! {
+                    (actor_id, empty_fragment) => MergeUpdate {
+                        actor_id,
+                        upstream_fragment_id: empty_fragment,
+                        new_upstream_fragment_id: Some(resolver_fragment_2),
+                        added_upstream_actors: vec![helper_make_local_actor(resolver_2)],
+                        removed_upstream_actor_id: vec![],
+                    },
+                },
+                ..Default::default()
+            },
+        ));
+        barrier_test_env.inject_barrier(&b4, [actor_id]);
+        barrier_test_env.flush_all_events().await;
+        assert_recv_pending!();
+        barrier_test_env.flush_all_events().await;
+        let resolver_2_tx = take_upstream_tx(&barrier_test_env, resolver_2, actor_id).await;
+        resolver_2_tx
+            .send(Message::Barrier(b4.into_dispatcher()).into())
+            .await
+            .unwrap();
+        recv_barrier!(5);
+
+        resolver_2_tx
+            .send(Message::Chunk(build_test_chunk(1)).into())
+            .await
+            .unwrap();
+        assert_matches!(merge.next().await.unwrap().unwrap(), Message::Chunk(chunk) => {
+            assert_eq!(chunk.cardinality(), 1);
+        });
     }
 
     #[tokio::test]

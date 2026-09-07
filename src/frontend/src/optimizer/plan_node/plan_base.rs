@@ -216,6 +216,16 @@ impl PlanBase<Logical> {
         functional_dependency: FunctionalDependencySet,
     ) -> Self {
         let id = ctx.next_plan_node_id();
+        Self::new_logical_with_id(ctx, id, schema, stream_key, functional_dependency)
+    }
+
+    fn new_logical_with_id(
+        ctx: OptimizerContextRef,
+        id: PlanNodeId,
+        schema: Schema,
+        stream_key: Option<Vec<usize>>,
+        functional_dependency: FunctionalDependencySet,
+    ) -> Self {
         Self {
             id,
             ctx,
@@ -229,6 +239,16 @@ impl PlanBase<Logical> {
     pub fn new_logical_with_core(core: &impl GenericPlanNode) -> Self {
         Self::new_logical(
             core.ctx(),
+            core.schema(),
+            core.stream_key(),
+            core.functional_dependency(),
+        )
+    }
+
+    pub fn new_logical_share(core: &generic::Share<LogicalPlanRef>) -> Self {
+        Self::new_logical_with_id(
+            core.ctx(),
+            core.plan_node_id(),
             core.schema(),
             core.stream_key(),
             core.functional_dependency(),
@@ -249,6 +269,32 @@ impl PlanBase<Stream> {
         columns_monotonicity: MonotonicityMap,
     ) -> Self {
         let id = ctx.next_plan_node_id();
+        Self::new_stream_with_id(
+            ctx,
+            id,
+            schema,
+            stream_key,
+            functional_dependency,
+            dist,
+            stream_kind,
+            emit_on_window_close,
+            watermark_columns,
+            columns_monotonicity,
+        )
+    }
+
+    fn new_stream_with_id(
+        ctx: OptimizerContextRef,
+        id: PlanNodeId,
+        schema: Schema,
+        stream_key: Option<Vec<usize>>,
+        functional_dependency: FunctionalDependencySet,
+        dist: Distribution,
+        stream_kind: StreamKind,
+        emit_on_window_close: bool,
+        watermark_columns: WatermarkColumns,
+        columns_monotonicity: MonotonicityMap,
+    ) -> Self {
         Self {
             id,
             ctx,
@@ -275,6 +321,28 @@ impl PlanBase<Stream> {
     ) -> Self {
         Self::new_stream(
             core.ctx(),
+            core.schema(),
+            core.stream_key(),
+            core.functional_dependency(),
+            dist,
+            stream_kind,
+            emit_on_window_close,
+            watermark_columns,
+            columns_monotonicity,
+        )
+    }
+
+    pub fn new_stream_share(
+        core: &generic::Share<StreamPlanRef>,
+        dist: Distribution,
+        stream_kind: StreamKind,
+        emit_on_window_close: bool,
+        watermark_columns: WatermarkColumns,
+        columns_monotonicity: MonotonicityMap,
+    ) -> Self {
+        Self::new_stream_with_id(
+            core.ctx(),
+            core.plan_node_id(),
             core.schema(),
             core.stream_key(),
             core.functional_dependency(),

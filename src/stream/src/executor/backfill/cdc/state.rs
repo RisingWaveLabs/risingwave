@@ -69,12 +69,6 @@ impl<S: StateStore> CdcBackfillState<S> {
                 let state = self.cached_state.as_slice();
                 let state_len = state.len();
                 // schema: | `split_id` | `pk...` | `backfill_finished` | `row_count` | `cdc_offset` |
-                let cdc_offset = match state[state_len - 1] {
-                    Some(ScalarImpl::Jsonb(ref jsonb)) => {
-                        serde_json::from_value(jsonb.clone().take()).unwrap()
-                    }
-                    _ => return Err(anyhow!("invalid backfill state: cdc_offset").into()),
-                };
                 let row_count = match state[state_len - 2] {
                     Some(ScalarImpl::Int64(val)) => val,
                     _ => return Err(anyhow!("invalid backfill state: row_count").into()),
@@ -82,6 +76,19 @@ impl<S: StateStore> CdcBackfillState<S> {
                 let is_finished = match state[state_len - 3] {
                     Some(ScalarImpl::Bool(val)) => val,
                     _ => return Err(anyhow!("invalid backfill state: backfill_finished").into()),
+                };
+                let cdc_offset = match state[state_len - 1] {
+                    Some(ScalarImpl::Jsonb(ref jsonb)) => {
+                        serde_json::from_value(jsonb.clone().take()).unwrap()
+                    }
+                    None if is_finished => None,
+                    None => {
+                        return Err(anyhow!(
+                            "invalid backfill state: unfinished row has null cdc_offset"
+                        )
+                        .into());
+                    }
+                    _ => return Err(anyhow!("invalid backfill state: cdc_offset").into()),
                 };
 
                 let current_pk_pos = state[1..state_len - 3].to_vec();

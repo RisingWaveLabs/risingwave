@@ -729,3 +729,59 @@ fn test_recursive() -> anyhow::Result<()> {
 
     Ok(())
 }
+
+// Confluent skips uploading `google/type/*` or `confluent/*` as references by
+// default, in addition to standard well-known types. This test ensures we can
+// compile user protos importing `google/type/` and `confluent/type/` with zero
+// user-supplied dependencies.
+#[test]
+fn test_bundled_ambient_types() -> anyhow::Result<()> {
+    let main = r#"
+        syntax = "proto3";
+        package test;
+        import "google/type/date.proto";
+        import "confluent/type/decimal.proto";
+
+        message Invoice {
+          google.type.Date issued_on = 1;
+          confluent.type.Decimal amount = 2;
+        }
+    "#;
+
+    let fd_set = compile_pb(("test.proto".to_owned(), main.to_owned()), [])?;
+    let pool = DescriptorPool::from_file_descriptor_set(fd_set)?;
+
+    // Bundled files should be present in the descriptor set (include_imports).
+    assert!(pool.get_file_by_name("google/type/date.proto").is_some());
+    assert!(
+        pool.get_file_by_name("confluent/type/decimal.proto")
+            .is_some()
+    );
+
+    // Resolved field types should point at the bundled message definitions.
+    let invoice = pool
+        .get_message_by_name("test.Invoice")
+        .context("Invoice not found")?;
+    assert_eq!(
+        invoice
+            .get_field_by_name("issued_on")
+            .unwrap()
+            .kind()
+            .as_message()
+            .unwrap()
+            .full_name(),
+        "google.type.Date"
+    );
+    assert_eq!(
+        invoice
+            .get_field_by_name("amount")
+            .unwrap()
+            .kind()
+            .as_message()
+            .unwrap()
+            .full_name(),
+        "confluent.type.Decimal"
+    );
+
+    Ok(())
+}

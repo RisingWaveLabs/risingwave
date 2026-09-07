@@ -34,6 +34,9 @@ use crate::{MetaError, MetaResult};
 
 pub type SessionParamsControllerRef = Arc<SessionParamsController>;
 
+const ENABLE_LOCALITY_BACKFILL_PARAM: &str = "enable_locality_backfill";
+const LOCALITY_BACKFILL_MODE_PARAM: &str = "locality_backfill_mode";
+
 /// Manages the global default session params on meta.
 /// Note that the session params in each session will be initialized from the default value here.
 pub struct SessionParamsController {
@@ -74,6 +77,12 @@ impl SessionParamsController {
 
         // Persisted values take precedence over `[session_init]`.
         let params = SessionParameter::find().all(&db).await?;
+        let has_locality_backfill_mode = params
+            .iter()
+            .any(|param| param.name == LOCALITY_BACKFILL_MODE_PARAM);
+        let has_legacy_locality_backfill = params
+            .iter()
+            .any(|param| param.name == ENABLE_LOCALITY_BACKFILL_PARAM);
         for param in params {
             if let Some(configured) = session_init_values.get(&param.name)
                 && *configured != param.value
@@ -95,6 +104,10 @@ impl SessionParamsController {
                     }
                 }
             }
+        }
+        // Before the mode existed, enabling locality backfill always skipped the size check.
+        if !has_locality_backfill_mode && has_legacy_locality_backfill {
+            init_params.set(LOCALITY_BACKFILL_MODE_PARAM, "always".to_owned(), &mut ())?;
         }
 
         info!(?init_params, "session parameters");
@@ -404,7 +417,7 @@ mod tests {
         };
         assert!(err
             .to_string()
-            .contains("SessionParams error: Invalid value `bounded(2)` for `streaming_parallelism_for_backfill`"));
+            .contains("Session parameters error: Invalid value `bounded(2)` for `streaming_parallelism_for_backfill`"));
 
         let persisted = SessionParameter::find()
             .all(&meta_store.conn)

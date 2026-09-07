@@ -1,5 +1,7 @@
 name: Update Helm Charts and Risingwave Operator on New Release
 
+permissions: {}
+
 on:
   release:
     types: [published]

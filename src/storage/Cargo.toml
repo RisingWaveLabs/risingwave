@@ -13,6 +13,7 @@ repository = { workspace = true }
 test = ["risingwave_hummock_sdk/test"]
 failpoints = ["fail/failpoints"]
 hm-trace = []
+sync_point = ["sync-point/sync_point"]
 
 [dependencies]
 ahash = "0.8"
@@ -33,7 +34,7 @@ futures = { version = "0.3", default-features = false, features = ["alloc"] }
 futures-async-stream = { workspace = true }
 hex = "0.4"
 iceberg = { workspace = true }
-iceberg-compaction-core = { git = "https://github.com/nimtable/iceberg-compaction.git", rev = "b67029788bdb0a5489cfc2f6fefc1193039f8b78" }
+iceberg-compaction-core = { git = "https://github.com/nimtable/iceberg-compaction.git", rev = "58a4c3c274111b7eeaada0a6f15314ddcf537279" }
 itertools = { workspace = true }
 libc = "0.2"
 lz4 = "1.28.0"

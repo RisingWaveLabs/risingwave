@@ -194,12 +194,11 @@ impl StreamManagerService for StreamServiceImpl {
         let throttle_type = request.throttle_type();
 
         let raw_object_id: u32;
-        let jobs: HashSet<JobId>;
         let fragments: HashMap<FragmentId, _>;
 
         match (throttle_type, throttle_target) {
             (ThrottleType::Source, ThrottleTarget::Source | ThrottleTarget::Table) => {
-                (jobs, fragments) = self
+                fragments = self
                     .metadata_manager
                     .update_source_rate_limit_by_source_id(request.id.into(), request.rate)
                     .await?;
@@ -212,7 +211,6 @@ impl StreamManagerService for StreamServiceImpl {
                     .metadata_manager
                     .update_backfill_rate_limit_by_job_id(JobId::from(request.id), request.rate)
                     .await?;
-                jobs = [request.id.into()].into_iter().collect();
                 raw_object_id = request.id;
             }
             (ThrottleType::Dml, ThrottleTarget::Table) => {
@@ -220,7 +218,6 @@ impl StreamManagerService for StreamServiceImpl {
                     .metadata_manager
                     .update_dml_rate_limit_by_job_id(JobId::from(request.id), request.rate)
                     .await?;
-                jobs = [request.id.into()].into_iter().collect();
                 raw_object_id = request.id;
             }
             (ThrottleType::Sink, ThrottleTarget::Sink) => {
@@ -228,7 +225,6 @@ impl StreamManagerService for StreamServiceImpl {
                     .metadata_manager
                     .update_sink_rate_limit_by_sink_id(request.id.into(), request.rate)
                     .await?;
-                jobs = [request.id.into()].into_iter().collect();
                 raw_object_id = request.id;
             }
             // FIXME(kwannoel): specialize for throttle type x target
@@ -248,7 +244,6 @@ impl StreamManagerService for StreamServiceImpl {
                     .catalog_controller
                     .get_fragment_streaming_job_id(fragment_id)
                     .await?;
-                jobs = [job_id].into_iter().collect();
                 raw_object_id = job_id.as_raw_id();
             }
             _ => {
@@ -275,7 +270,7 @@ impl StreamManagerService for StreamServiceImpl {
             .collect();
         let _i = self
             .barrier_scheduler
-            .run_command(database_id, Command::Throttle { jobs, config })
+            .run_command(database_id, Command::Throttle { config })
             .await?;
 
         Ok(Response::new(ApplyThrottleResponse { status: None }))

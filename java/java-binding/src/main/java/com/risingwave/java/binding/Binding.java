@@ -41,6 +41,14 @@ public class Binding {
      */
     public static native int defaultVnodeCount();
 
+    public static native boolean validateCdcSourceColumnType(
+            int cdcTableType,
+            String upstreamTypeName,
+            int rwTypeName,
+            long charMaxLength,
+            boolean isUnsigned,
+            String postgresUdtName);
+
     static native long iteratorNewStreamChunk(long pointer);
 
     static native boolean iteratorNext(long pointer);

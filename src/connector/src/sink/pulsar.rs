@@ -369,7 +369,7 @@ impl PulsarPayloadWriter<'_> {
 
         for retry_num in 0..self.config.max_retry_num {
             if retry_num > 0 {
-                tracing::warn!("Failed to send message, at retry no. {retry_num}");
+                tracing::warn!("failed to send the message; retry {retry_num}");
             }
             match Box::pin(self.producer.send_non_blocking(message.clone())).await {
                 // If the message is sent successfully,

@@ -236,7 +236,10 @@ impl ActiveStreamingWorkerNodes {
                 }
             }
             Err(e) => {
-                warn!(e = ?e.as_report(), "fail to list_active_streaming_compute_nodes to compare with local snapshot");
+                warn!(
+                    e = ?e.as_report(),
+                    "failed to list active streaming compute nodes for comparison with the local snapshot",
+                );
             }
         }
     }
@@ -351,10 +354,14 @@ impl MetadataManager {
         Ok(ret)
     }
 
-    pub async fn list_background_creating_jobs(&self) -> MetaResult<HashSet<JobId>> {
-        self.catalog_controller
-            .list_background_creating_jobs(false, None)
-            .await
+    pub async fn list_creating_jobs(&self) -> MetaResult<HashSet<JobId>> {
+        Ok(self
+            .catalog_controller
+            .list_creating_jobs(false, None)
+            .await?
+            .into_iter()
+            .map(|(job_id, _, _, _, _)| job_id)
+            .collect())
     }
 
     pub async fn list_sources(&self) -> MetaResult<Vec<PbSource>> {
@@ -534,7 +541,7 @@ impl MetadataManager {
         &self,
         source_id: SourceId,
         rate_limit: Option<u32>,
-    ) -> MetaResult<(HashSet<JobId>, HashMap<FragmentId, PbStreamNode>)> {
+    ) -> MetaResult<HashMap<FragmentId, PbStreamNode>> {
         self.catalog_controller
             .update_source_rate_limit_by_source_id(source_id as _, rate_limit)
             .await
@@ -694,10 +701,10 @@ impl MetadataManager {
         Ok(backfill_types)
     }
 
-    pub async fn collect_unreschedulable_backfill_jobs(
+    /// Returns jobs containing a scan that cannot be rescheduled online.
+    pub async fn collect_online_unreschedulable_backfill_jobs(
         &self,
         job_ids: impl IntoIterator<Item = &JobId>,
-        is_online: bool,
     ) -> MetaResult<HashSet<JobId>> {
         let mut unreschedulable = HashSet::new();
 
@@ -708,7 +715,7 @@ impl MetadataManager {
                 .await?;
             if scan_types
                 .values()
-                .any(|scan_type| !scan_type.is_reschedulable(is_online))
+                .any(|scan_type| !scan_type.is_reschedulable(true))
             {
                 unreschedulable.insert(*job_id);
             }

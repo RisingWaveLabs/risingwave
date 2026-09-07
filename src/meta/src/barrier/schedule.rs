@@ -27,13 +27,13 @@ use risingwave_hummock_sdk::HummockVersionId;
 use risingwave_pb::catalog::Database;
 use rw_futures_util::pending_on_none;
 use tokio::select;
-use tokio::sync::{oneshot, watch};
+use tokio::sync::watch;
 use tokio::time::{Duration, Instant};
 use tokio_stream::wrappers::IntervalStream;
 use tokio_stream::{StreamExt, StreamMap};
 use tracing::{info, warn};
 
-use super::notifier::Notifier;
+use super::notifier::{Notifier, wait_collection};
 use super::{Command, Scheduled};
 use crate::barrier::context::GlobalBarrierWorkerContext;
 use crate::hummock::HummockManagerRef;
@@ -42,15 +42,12 @@ use crate::{MetaError, MetaResult};
 
 pub(super) struct NewBarrier {
     pub database_id: DatabaseId,
-    pub command: Option<(Command, Vec<Notifier>)>,
+    pub command: Option<(Command, Notifier)>,
     pub span: tracing::Span,
     pub checkpoint: bool,
 }
 
 /// A queue for scheduling barriers.
-///
-/// We manually implement one here instead of using channels since we may need to update the front
-/// of the queue to add some notifiers for instant flushes.
 struct Inner {
     queue: Mutex<ScheduledQueue>,
 
@@ -74,7 +71,7 @@ impl QueueStatus {
 
 struct ScheduledQueueItem {
     command: Command,
-    notifiers: Vec<Notifier>,
+    notifier: Notifier,
     span: tracing::Span,
 }
 
@@ -188,7 +185,7 @@ impl BarrierScheduler {
         for (command, notifier) in scheduleds {
             queue.queue.push_back(ScheduledQueueItem {
                 command,
-                notifiers: vec![notifier],
+                notifier,
                 span: tracing_span(),
             });
             if queue.queue.len() == 1 {
@@ -237,37 +234,30 @@ impl BarrierScheduler {
         let mut scheduleds = Vec::with_capacity(commands.len());
 
         for command in commands {
-            let (started_tx, started_rx) = oneshot::channel();
-            let (collect_tx, collect_rx) = oneshot::channel();
-
-            contexts.push((started_rx, collect_rx));
-            scheduleds.push((
-                command,
-                Notifier {
-                    started: Some(started_tx),
-                    collected: Some(collect_tx),
-                },
-            ));
+            let (notifier, started_rx) = Notifier::new();
+            contexts.push(started_rx);
+            scheduleds.push((command, notifier));
         }
 
         self.push(database_id, scheduleds)?;
 
-        for (injected_rx, collect_rx) in contexts {
+        for injected_rx in contexts {
             // Wait for this command to be injected, and record the result.
             tracing::trace!("waiting for injected_rx");
-            injected_rx
+            let collect_rxs = injected_rx
                 .instrument_await("wait_injected")
                 .await
                 .ok()
                 .context("failed to inject barrier")??;
 
-            tracing::trace!("waiting for collect_rx");
-            // Throw the error if it occurs when collecting this barrier.
-            collect_rx
+            tracing::trace!(
+                collection_count = collect_rxs.len(),
+                "waiting for collect_rx"
+            );
+            // Wait for every part before returning the first collection error.
+            wait_collection(collect_rxs)
                 .instrument_await("wait_collected")
-                .await
-                .ok()
-                .context("failed to collect barrier")??;
+                .await?;
         }
 
         Ok(())
@@ -286,7 +276,8 @@ impl BarrierScheduler {
     /// Schedule a command without waiting for it to be executed.
     pub fn run_command_no_wait(&self, database_id: DatabaseId, command: Command) -> MetaResult<()> {
         tracing::trace!("run_command_no_wait: {:?}", command);
-        self.push(database_id, vec![(command, Notifier::default())])
+        let (notifier, _started_rx) = Notifier::new();
+        self.push(database_id, vec![(command, notifier)])
     }
 
     /// Flush means waiting for the next barrier to collect.
@@ -507,7 +498,7 @@ impl PeriodicBarriers {
                     let checkpoint = scheduled.command.need_checkpoint() || self.try_get_checkpoint(database_id);
                     NewBarrier {
                         database_id: scheduled.database_id,
-                        command: Some((scheduled.command, scheduled.notifiers)),
+                        command: Some((scheduled.command, scheduled.notifier)),
                         span: scheduled.span,
                         checkpoint,
                     }
@@ -567,7 +558,7 @@ impl ScheduledBarriers {
                         break 'outer Scheduled {
                             database_id: *database_id,
                             command: item.command,
-                            notifiers: item.notifiers,
+                            notifier: item.notifier,
                             span: item.span,
                         };
                     }
@@ -618,10 +609,8 @@ impl ScheduledBarriers {
             let reason = database_blocked_reason(database_id, reason);
             let err: MetaError = anyhow!("{}", reason).into();
             queue.mark_blocked(reason);
-            while let Some(ScheduledQueueItem { notifiers, .. }) = queue.queue.pop_front() {
-                notifiers
-                    .into_iter()
-                    .for_each(|notify| notify.notify_collection_failed(err.clone()))
+            while let Some(ScheduledQueueItem { notifier, .. }) = queue.queue.pop_front() {
+                notifier.notify_start_failed(err.clone());
             }
         }
         if let Some(database_id) = database_id {
@@ -736,7 +725,7 @@ impl ScheduledBarriers {
 
         let mut pre_apply_drop_cancel = |queue: &mut DatabaseScheduledQueue| {
             while let Some(ScheduledQueueItem {
-                notifiers, command, ..
+                notifier, command, ..
             }) = queue.queue.pop_front()
             {
                 match command {
@@ -755,13 +744,8 @@ impl ScheduledBarriers {
                         unreachable!("only drop and cancel streaming jobs should be buffered");
                     }
                 }
-                // `run_command` waits for both the started and collected notifications. These
-                // buffered commands are pre-applied during recovery without injecting a real
-                // barrier, so complete both waiters here.
-                notifiers.into_iter().for_each(|mut notify| {
-                    notify.notify_started();
-                    notify.notify_collected();
-                });
+                // These buffered commands are pre-applied without injecting a real barrier.
+                notifier.start().started();
             }
         };
 
@@ -873,7 +857,6 @@ mod tests {
         async fn new_control_stream(
             &self,
             _node: &risingwave_pb::common::WorkerNode,
-            _init_request: &risingwave_pb::stream_service::streaming_control_stream_request::PbInitRequest,
         ) -> MetaResult<risingwave_rpc_client::StreamingControlHandle> {
             unimplemented!()
         }
@@ -1032,10 +1015,11 @@ mod tests {
         periodic.next_barrier(&context).await;
 
         // Schedule a command
+        let (notifier, _started_rx) = Notifier::new();
         let scheduled_command = Scheduled {
             database_id: DatabaseId::from(1),
             command: Command::Flush,
-            notifiers: vec![],
+            notifier,
             span: tracing::Span::none(),
         };
 

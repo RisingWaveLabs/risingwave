@@ -13,11 +13,14 @@
 // limitations under the License.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::Arc;
 use std::time::Duration;
 
 use foyer::{HybridCache, TracingOptions};
 use prometheus::core::Collector;
 use prometheus::proto::Metric;
+use risingwave_batch::task::BatchManager;
+use risingwave_batch::task::await_tree_key::BatchTask;
 use risingwave_common::bitmap::Bitmap;
 use risingwave_common::config::{MetricLevel, ServerConfig};
 use risingwave_common_heap_profiling::ProfileServiceImpl;
@@ -51,6 +54,7 @@ type BlockCache = HybridCache<SstableBlockIndex, Box<Block>>;
 #[derive(Clone)]
 pub struct MonitorServiceImpl {
     stream_mgr: LocalStreamManager,
+    batch_mgr: Arc<BatchManager>,
     profile_service: ProfileServiceImpl,
     meta_cache: Option<MetaCache>,
     block_cache: Option<BlockCache>,
@@ -60,6 +64,7 @@ pub struct MonitorServiceImpl {
 impl MonitorServiceImpl {
     pub fn new(
         stream_mgr: LocalStreamManager,
+        batch_mgr: Arc<BatchManager>,
         server_config: ServerConfig,
         meta_cache: Option<MetaCache>,
         block_cache: Option<BlockCache>,
@@ -67,6 +72,7 @@ impl MonitorServiceImpl {
     ) -> Self {
         Self {
             stream_mgr,
+            batch_mgr,
             profile_service: ProfileServiceImpl::new(server_config),
             meta_cache,
             block_cache,
@@ -110,10 +116,33 @@ impl MonitorService for MonitorServiceImpl {
             Default::default()
         };
 
-        let rpc_traces = if let Some(reg) = self.stream_mgr.await_tree_reg() {
+        let mut rpc_traces: BTreeMap<_, _> = if let Some(reg) = self.stream_mgr.await_tree_reg() {
             reg.collect::<GrpcCall>()
                 .into_iter()
                 .map(|(k, v)| (k.desc, v.to_string()))
+                .collect()
+        } else {
+            Default::default()
+        };
+
+        if let Some(reg) = self.batch_mgr.await_tree_reg() {
+            rpc_traces.extend(
+                reg.collect::<GrpcCall>()
+                    .into_iter()
+                    .map(|(k, v)| (k.desc, v.to_string())),
+            );
+        }
+
+        let batch_traces = if let Some(reg) = self.batch_mgr.await_tree_reg() {
+            reg.collect::<BatchTask>()
+                .into_iter()
+                .map(|(k, v)| {
+                    let id = &k.0;
+                    (
+                        format!("{}-{}-{}", id.query_id, id.stage_id, id.task_id),
+                        v.to_string(),
+                    )
+                })
                 .collect()
         } else {
             Default::default()
@@ -156,6 +185,7 @@ impl MonitorService for MonitorServiceImpl {
             },
             meta_traces: Default::default(),
             node_errors: Default::default(),
+            batch_traces,
         }))
     }
 

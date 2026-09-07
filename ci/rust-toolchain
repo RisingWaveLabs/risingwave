@@ -4,4 +4,4 @@
 # 3. (optional) **follow the instructions in `lints/README.md`** to update the toolchain and dependencies for lints
 
 [toolchain]
-channel = "nightly-2026-06-11"
+channel = "nightly-2026-06-21"

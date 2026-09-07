@@ -13,10 +13,294 @@
 // limitations under the License.
 
 use risingwave_common::catalog::FragmentTypeMask;
+use risingwave_pb::stream_plan::stream_node::NodeBody;
 
 use super::*;
 use crate::controller::fragment::FragmentTypeMaskExt;
 use crate::controller::utils::load_streaming_jobs_by_ids;
+
+pub(crate) async fn prepare_object_models_for_schema_change(
+    txn: &DatabaseTransaction,
+    object_models: &mut [PbObjectInfo],
+    database_id: DatabaseId,
+    new_schema: SchemaId,
+) -> MetaResult<()> {
+    // Names live in the type-specific catalog tables, not in `object`. Relations also share a
+    // namespace across object types, so preserve the existing type-specific duplicate checks.
+    let index_ids = object_models
+        .iter()
+        .filter_map(|object_info| match object_info {
+            PbObjectInfo::Index(index) => Some(index.id.as_object_id().as_table_id()),
+            _ => None,
+        })
+        .collect::<HashSet<_>>();
+
+    for object_info in object_models {
+        match object_info {
+            PbObjectInfo::Table(table) => table.schema_id = new_schema,
+            PbObjectInfo::Source(source) => source.schema_id = new_schema,
+            PbObjectInfo::Sink(sink) => sink.schema_id = new_schema,
+            PbObjectInfo::View(view) => view.schema_id = new_schema,
+            PbObjectInfo::Index(index) => index.schema_id = new_schema,
+            PbObjectInfo::Function(function) => function.schema_id = new_schema,
+            PbObjectInfo::Connection(connection) => connection.schema_id = new_schema,
+            PbObjectInfo::Subscription(subscription) => subscription.schema_id = new_schema,
+            PbObjectInfo::Secret(secret) => secret.schema_id = new_schema,
+            PbObjectInfo::Database(_) | PbObjectInfo::Schema(_) => {}
+        }
+
+        match object_info {
+            PbObjectInfo::Table(table) if !index_ids.contains(&table.id) => {
+                check_relation_name_duplicate(&table.name, database_id, new_schema, txn).await?;
+            }
+            PbObjectInfo::Source(source) => {
+                check_relation_name_duplicate(&source.name, database_id, new_schema, txn).await?;
+            }
+            PbObjectInfo::Sink(sink) => {
+                check_relation_name_duplicate(&sink.name, database_id, new_schema, txn).await?;
+            }
+            PbObjectInfo::Index(index) => {
+                check_relation_name_duplicate(&index.name, database_id, new_schema, txn).await?;
+            }
+            PbObjectInfo::View(view) => {
+                check_relation_name_duplicate(&view.name, database_id, new_schema, txn).await?;
+            }
+            PbObjectInfo::Subscription(subscription) => {
+                check_relation_name_duplicate(&subscription.name, database_id, new_schema, txn)
+                    .await?;
+                check_subscription_name_duplicate(subscription, txn).await?;
+            }
+            PbObjectInfo::Function(function) => {
+                check_function_signature_duplicate(function, txn).await?;
+            }
+            PbObjectInfo::Connection(connection) => {
+                check_connection_name_duplicate(connection, txn).await?;
+            }
+            PbObjectInfo::Secret(secret) => {
+                check_secret_name_duplicate(secret, txn).await?;
+            }
+            PbObjectInfo::Database(_) | PbObjectInfo::Schema(_) | PbObjectInfo::Table(_) => {}
+        }
+    }
+
+    Ok(())
+}
+
+pub(crate) async fn load_object_models(
+    txn: &DatabaseTransaction,
+    objects: &[object::Model],
+) -> MetaResult<Vec<PbObjectInfo>> {
+    let mut object_infos = vec![];
+
+    let table_ids = objects
+        .iter()
+        .filter(|object| object.obj_type == ObjectType::Table)
+        .map(|object| object.oid.as_table_id())
+        .collect_vec();
+    let table_objs = Table::find()
+        .find_also_related(Object)
+        .filter(table::Column::TableId.is_in(table_ids))
+        .all(txn)
+        .await?;
+    let streaming_jobs =
+        load_streaming_jobs_by_ids(txn, table_objs.iter().map(|(table, _)| table.job_id())).await?;
+    for (table, table_obj) in table_objs {
+        let streaming_job = streaming_jobs.get(&table.job_id()).cloned();
+        object_infos.push(PbObjectInfo::Table(
+            ObjectModel(table, table_obj.unwrap(), streaming_job).into(),
+        ));
+    }
+
+    let index_ids = objects
+        .iter()
+        .filter(|object| object.obj_type == ObjectType::Index)
+        .map(|object| object.oid.as_index_id())
+        .collect_vec();
+    let index_table_objs = Table::find()
+        .find_also_related(Object)
+        .filter(
+            table::Column::TableId
+                .is_in(index_ids.iter().map(|id| id.as_object_id().as_table_id())),
+        )
+        .all(txn)
+        .await?;
+    let index_streaming_jobs = load_streaming_jobs_by_ids(
+        txn,
+        index_table_objs.iter().map(|(table, _)| table.job_id()),
+    )
+    .await?;
+    for (table, table_obj) in index_table_objs {
+        let streaming_job = index_streaming_jobs.get(&table.job_id()).cloned();
+        object_infos.push(PbObjectInfo::Table(
+            ObjectModel(table, table_obj.unwrap(), streaming_job).into(),
+        ));
+    }
+    let index_objs = Index::find()
+        .find_also_related(Object)
+        .filter(index::Column::IndexId.is_in(index_ids))
+        .all(txn)
+        .await?;
+    for (index, index_obj) in index_objs {
+        let streaming_job = index_streaming_jobs
+            .get(&index.index_id.as_job_id())
+            .cloned();
+        object_infos.push(PbObjectInfo::Index(
+            ObjectModel(index, index_obj.unwrap(), streaming_job).into(),
+        ));
+    }
+
+    let source_ids = objects
+        .iter()
+        .filter(|object| object.obj_type == ObjectType::Source)
+        .map(|object| object.oid.as_source_id())
+        .collect_vec();
+    for (source, source_obj) in Source::find()
+        .find_also_related(Object)
+        .filter(source::Column::SourceId.is_in(source_ids))
+        .all(txn)
+        .await?
+    {
+        object_infos.push(PbObjectInfo::Source(
+            ObjectModel(source, source_obj.unwrap(), None).into(),
+        ));
+    }
+
+    let sink_ids = objects
+        .iter()
+        .filter(|object| object.obj_type == ObjectType::Sink)
+        .map(|object| object.oid.as_sink_id())
+        .collect_vec();
+    let sink_objs = Sink::find()
+        .find_also_related(Object)
+        .filter(sink::Column::SinkId.is_in(sink_ids))
+        .all(txn)
+        .await?;
+    let sink_streaming_jobs = load_streaming_jobs_by_ids(
+        txn,
+        sink_objs.iter().map(|(sink, _)| sink.sink_id.as_job_id()),
+    )
+    .await?;
+    for (sink, sink_obj) in sink_objs {
+        let streaming_job = sink_streaming_jobs.get(&sink.sink_id.as_job_id()).cloned();
+        object_infos.push(PbObjectInfo::Sink(
+            ObjectModel(sink, sink_obj.unwrap(), streaming_job).into(),
+        ));
+    }
+
+    let subscription_ids = objects
+        .iter()
+        .filter(|object| object.obj_type == ObjectType::Subscription)
+        .map(|object| object.oid.as_subscription_id())
+        .collect_vec();
+    for (subscription, subscription_obj) in Subscription::find()
+        .find_also_related(Object)
+        .filter(subscription::Column::SubscriptionId.is_in(subscription_ids))
+        .all(txn)
+        .await?
+    {
+        object_infos.push(PbObjectInfo::Subscription(
+            ObjectModel(subscription, subscription_obj.unwrap(), None).into(),
+        ));
+    }
+
+    let view_ids = objects
+        .iter()
+        .filter(|object| object.obj_type == ObjectType::View)
+        .map(|object| object.oid.as_view_id())
+        .collect_vec();
+    for (view, view_obj) in View::find()
+        .find_also_related(Object)
+        .filter(view::Column::ViewId.is_in(view_ids))
+        .all(txn)
+        .await?
+    {
+        object_infos.push(PbObjectInfo::View(
+            ObjectModel(view, view_obj.unwrap(), None).into(),
+        ));
+    }
+
+    let function_ids = objects
+        .iter()
+        .filter(|object| object.obj_type == ObjectType::Function)
+        .map(|object| object.oid.as_function_id())
+        .collect_vec();
+    for (function, function_obj) in Function::find()
+        .find_also_related(Object)
+        .filter(function::Column::FunctionId.is_in(function_ids))
+        .all(txn)
+        .await?
+    {
+        object_infos.push(PbObjectInfo::Function(
+            ObjectModel(function, function_obj.unwrap(), None).into(),
+        ));
+    }
+
+    let connection_ids = objects
+        .iter()
+        .filter(|object| object.obj_type == ObjectType::Connection)
+        .map(|object| object.oid.as_connection_id())
+        .collect_vec();
+    for (connection, connection_obj) in Connection::find()
+        .find_also_related(Object)
+        .filter(connection::Column::ConnectionId.is_in(connection_ids))
+        .all(txn)
+        .await?
+    {
+        object_infos.push(PbObjectInfo::Connection(
+            ObjectModel(connection, connection_obj.unwrap(), None).into(),
+        ));
+    }
+
+    let secret_ids = objects
+        .iter()
+        .filter(|object| object.obj_type == ObjectType::Secret)
+        .map(|object| object.oid.as_secret_id())
+        .collect_vec();
+    for (secret, secret_obj) in Secret::find()
+        .find_also_related(Object)
+        .filter(secret::Column::SecretId.is_in(secret_ids))
+        .all(txn)
+        .await?
+    {
+        object_infos.push(PbObjectInfo::Secret(
+            ObjectModel(secret, secret_obj.unwrap(), None).into(),
+        ));
+    }
+
+    let database_ids = objects
+        .iter()
+        .filter(|object| object.obj_type == ObjectType::Database)
+        .map(|object| object.oid.as_database_id())
+        .collect_vec();
+    for (database, database_obj) in Database::find()
+        .find_also_related(Object)
+        .filter(database::Column::DatabaseId.is_in(database_ids))
+        .all(txn)
+        .await?
+    {
+        object_infos.push(PbObjectInfo::Database(
+            ObjectModel(database, database_obj.unwrap(), None).into(),
+        ));
+    }
+
+    let schema_ids = objects
+        .iter()
+        .filter(|object| object.obj_type == ObjectType::Schema)
+        .map(|object| object.oid.as_schema_id())
+        .collect_vec();
+    for (schema, schema_obj) in Schema::find()
+        .find_also_related(Object)
+        .filter(schema::Column::SchemaId.is_in(schema_ids))
+        .all(txn)
+        .await?
+    {
+        object_infos.push(PbObjectInfo::Schema(
+            ObjectModel(schema, schema_obj.unwrap(), None).into(),
+        ));
+    }
+
+    Ok(object_infos)
+}
 
 pub(crate) async fn update_internal_tables(
     txn: &DatabaseTransaction,

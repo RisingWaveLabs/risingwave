@@ -8,8 +8,34 @@ auto-retry: &auto-retry
       limit: 3
 
 steps:
+  - label: "docker-sync: image between registries"
+    if: build.env("SYNC_DOCKER_IMAGE") == "true"
+    command: "ci/scripts/sync-docker-image.sh"
+    key: "sync-docker-image"
+    plugins:
+      - seek-oss/aws-sm#v2.3.2:
+          env:
+            GHCR_USERNAME: ghcr-username
+            GHCR_TOKEN: ghcr-token
+            DOCKER_TOKEN: docker-token
+    retry: *auto-retry
+
+  - label: "docker-tag: duplicate existing image"
+    if: build.env("DUPLICATE_DOCKER_IMAGE_TAG") == "true"
+    command: "ci/scripts/duplicate-docker-image-tag.sh"
+    key: "duplicate-docker-image-tag"
+    plugins:
+      - seek-oss/aws-sm#v2.3.2:
+          env:
+            GHCR_USERNAME: ghcr-username
+            GHCR_TOKEN: ghcr-token
+            DOCKER_TOKEN: docker-token
+    retry: *auto-retry
+
   - label: "docker-build-push: amd64"
-    if: build.env("SKIP_TARGET_AMD64") != "true"
+    if: |
+      build.env("AD_HOC") != "true" &&
+      build.env("SKIP_TARGET_AMD64") != "true"
     command: "ci/scripts/docker.sh"
     key: "build-amd64"
     plugins:
@@ -22,7 +48,9 @@ steps:
     retry: *auto-retry
 
   - label: "docker-build-push: aarch64"
-    if: build.env("SKIP_TARGET_AARCH64") != "true"
+    if: |
+      build.env("AD_HOC") != "true" &&
+      build.env("SKIP_TARGET_AARCH64") != "true"
     command: "ci/scripts/docker.sh"
     key: "build-aarch64"
     plugins:
@@ -37,6 +65,7 @@ steps:
     retry: *auto-retry
 
   - label: "multi-arch-image-create-push"
+    if: build.env("AD_HOC") != "true"
     command: "ci/scripts/multi-arch-docker.sh"
     depends_on:
       - "build-amd64"
@@ -51,7 +80,9 @@ steps:
     retry: *auto-retry
 
   - label: "pre build binary: amd64"
-    if: build.env("SKIP_TARGET_AMD64") != "true"
+    if: |
+      build.env("AD_HOC") != "true" &&
+      build.env("SKIP_TARGET_AMD64") != "true"
     command: "ci/scripts/release.sh"
     plugins:
       - seek-oss/aws-sm#v2.3.2:
@@ -68,7 +99,9 @@ steps:
     retry: *auto-retry
 
   - label: "pre build binary: aarch64 "
-    if: build.env("SKIP_TARGET_AARCH64") != "true"
+    if: |
+      build.env("AD_HOC") != "true" &&
+      build.env("SKIP_TARGET_AARCH64") != "true"
     command: "ci/scripts/release.sh"
     plugins:
       - seek-oss/aws-sm#v2.3.2:
@@ -87,7 +120,9 @@ steps:
     retry: *auto-retry
 
   - label: "docker scout"
-    if: build.env("ENABLE_DOCKER_SCOUT") == "true"
+    if: |
+      build.env("AD_HOC") != "true" &&
+      build.env("ENABLE_DOCKER_SCOUT") == "true"
     key: docker-scout
     command: "ci/scripts/docker-scout.sh"
     depends_on:
@@ -101,7 +136,9 @@ steps:
     retry: *auto-retry
 
   - label: "generate notification step"
-    if: build.env("ENABLE_DOCKER_SCOUT") == "true"
+    if: |
+      build.env("AD_HOC") != "true" &&
+      build.env("ENABLE_DOCKER_SCOUT") == "true"
     depends_on:
       - "docker-scout"
     command: ci/scripts/docker-scout-notify.sh

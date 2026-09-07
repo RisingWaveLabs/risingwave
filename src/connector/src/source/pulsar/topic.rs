@@ -151,7 +151,7 @@ pub fn parse_topic(topic: &str) -> Result<Topic> {
 
     if parts.len() != 3 {
         bail!(
-            "invalid topic name '{}', it should be in the format of <tenant>/<namespace>/<topic>",
+            "invalid topic name '{}'; it must be in the format <tenant>/<namespace>/<topic>",
             rest
         );
     }

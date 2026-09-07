@@ -24,7 +24,7 @@ sr_register sr_conn_test-value AVRO <<< '{"type":"record","name":"Root","fields"
 system ok
 echo '{"foo":"ABC", "bar":1}' | rpk topic produce --schema-id=topic sr_conn_test
 
-statement error Invalid Parameter Value: Glue related options/secrets are not allowed when using schema registry connection
+statement error Invalid parameter value: Glue related options/secrets are not allowed when using schema registry connection
 create table t
 WITH (
     ${RISEDEV_KAFKA_WITH_OPTIONS_COMMON},

@@ -326,7 +326,7 @@ fn task_main(
                 ServiceConfig::Postgres(c) => {
                     PostgresService::new(c.clone()).execute(&mut ctx)?;
                     let mut task = risedev::DbReadyCheckTask::new(
-                        PgConnectOptions::new()
+                        PgConnectOptions::new_without_pgpass()
                             .host(&c.address)
                             .port(c.port)
                             .database("template1")

@@ -501,6 +501,53 @@ impl Drop for AsyncTruncateTestWriter {
     }
 }
 
+pub struct DelayedAsyncTruncateTestWriter {
+    store: TestSinkStore,
+    parallelism_counter: Arc<AtomicUsize>,
+}
+
+impl AsyncTruncateSinkWriter for DelayedAsyncTruncateTestWriter {
+    type DeliveryFuture = impl TryFuture<Ok = (), Error = SinkError> + Unpin + Send + 'static;
+
+    async fn write_chunk<'a>(
+        &'a mut self,
+        chunk: StreamChunk,
+        mut add_future: DeliveryFutureManagerAddFuture<'a, Self::DeliveryFuture>,
+    ) -> risingwave_connector::sink::Result<()> {
+        for (op, row) in chunk.rows() {
+            assert_eq!(op, Op::Insert);
+            assert!(row.len() >= 2);
+            let id = row.datum_at(0).unwrap().into_int32();
+            let name = row.datum_at(1).unwrap().into_utf8().to_string();
+            let store = self.store.clone();
+            add_future
+                .add_future_may_await(
+                    async move {
+                        sleep(Duration::from_secs(2)).await;
+                        store.insert(id, name);
+                        Ok(())
+                    }
+                    .boxed(),
+                )
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn barrier(&mut self, is_checkpoint: bool) -> risingwave_connector::sink::Result<()> {
+        if is_checkpoint {
+            self.store.inc_checkpoint();
+        }
+        Ok(())
+    }
+}
+
+impl Drop for DelayedAsyncTruncateTestWriter {
+    fn drop(&mut self) {
+        self.parallelism_counter.fetch_sub(1, Relaxed);
+    }
+}
+
 pub fn simple_name_of_id(id: i32) -> String {
     format!("name-{}", id)
 }
@@ -519,6 +566,7 @@ pub enum TestSinkType {
     SinglePhaseCoordinatedSink,
     TwoPhaseCoordinatedSink,
     AsyncTruncate,
+    DelayedAsyncTruncate,
     RetainLog,
 }
 
@@ -707,6 +755,21 @@ impl SimulationTestSink {
                             store: store.clone(),
                             parallelism_counter: parallelism_counter.clone(),
                             err_rate: err_rate.clone(),
+                        }
+                        .into_log_sinker(10),
+                    );
+                    async move { Ok(log_sinker) }.boxed()
+                }
+            }),
+            TestSinkType::DelayedAsyncTruncate => register_build_sink({
+                let parallelism_counter = parallelism_counter.clone();
+                let store = store.clone();
+                move |_, _| {
+                    parallelism_counter.fetch_add(1, Relaxed);
+                    let log_sinker = risingwave_connector::sink::boxed::boxed_log_sinker(
+                        DelayedAsyncTruncateTestWriter {
+                            store: store.clone(),
+                            parallelism_counter: parallelism_counter.clone(),
                         }
                         .into_log_sinker(10),
                     );

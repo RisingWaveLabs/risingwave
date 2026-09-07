@@ -18,6 +18,7 @@ use itertools::Itertools;
 use pgwire::pg_response::{PgResponse, StatementType};
 use risingwave_common::catalog::ColumnCatalog;
 use risingwave_common::hash::VnodeCount;
+use risingwave_common::license::Feature;
 use risingwave_common::{bail, bail_not_implemented};
 use risingwave_pb::ddl_service::TableJobType;
 use risingwave_pb::stream_plan::StreamFragmentGraph;
@@ -122,6 +123,15 @@ pub async fn handle_alter_table_column(
     let session = handler_args.session;
     let (original_catalog, has_incoming_sinks) =
         fetch_table_catalog_for_alter(session.as_ref(), &table_name)?;
+
+    if original_catalog.is_iceberg_engine_table()
+        && matches!(
+            &operation,
+            AlterTableOperation::AddColumn { .. } | AlterTableOperation::DropColumn { .. }
+        )
+    {
+        Feature::SinkAutoSchemaChange.check_available()?;
+    }
 
     if original_catalog.webhook_info.is_some() {
         return Err(RwError::from(ErrorCode::BindError(

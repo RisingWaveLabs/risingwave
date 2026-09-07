@@ -1,3 +1,4 @@
 disallowed-methods = [
+    { path = "tokio_retry::strategy::ExponentialBackoff::from_millis", reason = "Please use `risingwave_common::util::retry::exponential_backoff` instead; `from_millis` sets the exponent base, not the initial delay." },
     { path = "tokio_postgres::Client::query", reason = "Please use `simple_query` instead, extended `query` uses binary format, which has some outstanding issues." },
 ]

@@ -27,7 +27,8 @@ service TelemetryInfoService {
 
 message HeartbeatRequest {
   uint32 node_id = 1;
-  common.WorkerNode.Resource resource = 2;
+  reserved 2;
+  reserved "resource";
 }
 
 message HeartbeatResponse {
@@ -902,9 +903,17 @@ message SetSystemParamResponse {
   optional SystemParams params = 1;
 }
 
+message ClearFileCacheRequest {
+  bool clear_meta_cache = 1;
+  bool clear_data_cache = 2;
+}
+
+message ClearFileCacheResponse {}
+
 service SystemParamsService {
   rpc GetSystemParams(GetSystemParamsRequest) returns (GetSystemParamsResponse);
   rpc SetSystemParam(SetSystemParamRequest) returns (SetSystemParamResponse);
+  rpc ClearFileCache(ClearFileCacheRequest) returns (ClearFileCacheResponse);
 }
 
 message GetSessionParamsRequest {}

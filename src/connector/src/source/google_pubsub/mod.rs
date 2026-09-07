@@ -16,7 +16,9 @@ use std::collections::HashMap;
 
 use anyhow::Context;
 use google_cloud_pubsub::client::{Client, ClientConfig};
+use google_cloud_pubsub::subscriber::SubscriberConfig;
 use google_cloud_pubsub::subscription::Subscription;
+use risingwave_common::bail;
 use serde::Deserialize;
 
 pub mod enumerator;
@@ -35,6 +37,12 @@ use crate::error::ConnectorResult;
 use crate::source::SourceProperties;
 
 pub const GOOGLE_PUBSUB_CONNECTOR: &str = "google_pubsub";
+
+const DEFAULT_ACK_DEADLINE_SECONDS: i32 = 60;
+// Pub/Sub messages are acknowledged only after a checkpoint. The upstream client default of 50
+// can therefore stall each reader between checkpoints and severely limit throughput.
+const DEFAULT_MAX_OUTSTANDING_MESSAGES: i64 = 1024;
+const DEFAULT_MAX_OUTSTANDING_BYTES: i64 = 1_000_000_000;
 
 /// # Implementation Notes
 /// Pub/Sub does not rely on persisted state (`SplitImpl`) to start from a position.
@@ -99,6 +107,22 @@ pub struct PubsubProperties {
     #[with_option(allow_alter_on_fly)]
     pub ack_deadline_seconds: Option<i32>,
 
+    /// The maximum number of unacknowledged messages delivered to each streaming pull reader.
+    /// Pub/Sub pauses delivery to a reader when this limit is reached. Must be greater than 0.
+    /// Defaults to 1024.
+    #[serde_as(as = "Option<DisplayFromStr>")]
+    #[serde(rename = "pubsub.max_outstanding_messages")]
+    #[with_option(allow_alter_on_fly)]
+    pub max_outstanding_messages: Option<i64>,
+
+    /// The maximum total size of unacknowledged messages delivered to each streaming pull reader.
+    /// Pub/Sub pauses delivery to a reader when this limit is reached. Must be greater than 0.
+    /// Defaults to 1 GB.
+    #[serde_as(as = "Option<DisplayFromStr>")]
+    #[serde(rename = "pubsub.max_outstanding_bytes")]
+    #[with_option(allow_alter_on_fly)]
+    pub max_outstanding_bytes: Option<i64>,
+
     #[serde(flatten)]
     pub unknown_fields: HashMap<String, String>,
 }
@@ -124,6 +148,36 @@ impl crate::source::UnknownFields for PubsubProperties {
 }
 
 impl PubsubProperties {
+    pub(crate) fn subscriber_config(&self) -> ConnectorResult<SubscriberConfig> {
+        let stream_ack_deadline_seconds = self
+            .ack_deadline_seconds
+            .unwrap_or(DEFAULT_ACK_DEADLINE_SECONDS);
+        if !(10..=600).contains(&stream_ack_deadline_seconds) {
+            bail!("pubsub.ack_deadline_seconds must be between 10 and 600");
+        }
+
+        let max_outstanding_messages = self
+            .max_outstanding_messages
+            .unwrap_or(DEFAULT_MAX_OUTSTANDING_MESSAGES);
+        if max_outstanding_messages <= 0 {
+            bail!("pubsub.max_outstanding_messages must be greater than 0");
+        }
+
+        let max_outstanding_bytes = self
+            .max_outstanding_bytes
+            .unwrap_or(DEFAULT_MAX_OUTSTANDING_BYTES);
+        if max_outstanding_bytes <= 0 {
+            bail!("pubsub.max_outstanding_bytes must be greater than 0");
+        }
+
+        Ok(SubscriberConfig {
+            stream_ack_deadline_seconds,
+            max_outstanding_messages,
+            max_outstanding_bytes,
+            ..Default::default()
+        })
+    }
+
     pub(crate) async fn subscription_client(&self) -> ConnectorResult<Subscription> {
         // initialize env
         {
@@ -145,5 +199,75 @@ impl PubsubProperties {
             .context("error initializing pubsub client")?;
 
         Ok(client.subscription(&self.subscription))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    fn parse_pubsub_properties(extra: serde_json::Value) -> PubsubProperties {
+        let mut value = json!({
+            "pubsub.subscription": "projects/test/subscriptions/test",
+            "pubsub.emulator_host": "localhost:8900",
+        });
+        value
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        serde_json::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn test_subscriber_config_defaults() {
+        let config = parse_pubsub_properties(json!({}))
+            .subscriber_config()
+            .unwrap();
+
+        assert_eq!(config.stream_ack_deadline_seconds, 60);
+        assert_eq!(config.max_outstanding_messages, 1024);
+        assert_eq!(config.max_outstanding_bytes, 1_000_000_000);
+    }
+
+    #[test]
+    fn test_subscriber_config_overrides() {
+        let config = parse_pubsub_properties(json!({
+            "pubsub.ack_deadline_seconds": "120",
+            "pubsub.max_outstanding_messages": "2048",
+            "pubsub.max_outstanding_bytes": "1048576",
+        }))
+        .subscriber_config()
+        .unwrap();
+
+        assert_eq!(config.stream_ack_deadline_seconds, 120);
+        assert_eq!(config.max_outstanding_messages, 2048);
+        assert_eq!(config.max_outstanding_bytes, 1_048_576);
+    }
+
+    #[test]
+    fn test_subscriber_config_validation() {
+        let invalid_values = [
+            (
+                json!({"pubsub.ack_deadline_seconds": "9"}),
+                "pubsub.ack_deadline_seconds must be between 10 and 600",
+            ),
+            (
+                json!({"pubsub.max_outstanding_messages": "0"}),
+                "pubsub.max_outstanding_messages must be greater than 0",
+            ),
+            (
+                json!({"pubsub.max_outstanding_bytes": "0"}),
+                "pubsub.max_outstanding_bytes must be greater than 0",
+            ),
+        ];
+
+        for (value, expected_error) in invalid_values {
+            let error = parse_pubsub_properties(value)
+                .subscriber_config()
+                .unwrap_err();
+            assert!(error.to_string().contains(expected_error));
+        }
     }
 }

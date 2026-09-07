@@ -41,6 +41,7 @@ pub const ICEBERG_COW_BRANCH: &str = "ingestion";
 
 pub const ICEBERG_WRITE_MODE_MERGE_ON_READ: &str = "merge-on-read";
 pub const ICEBERG_WRITE_MODE_COPY_ON_WRITE: &str = "copy-on-write";
+pub const ICEBERG_COMPACTION_TYPE_AUTO: &str = "auto";
 pub const ICEBERG_COMPACTION_TYPE_FULL: &str = "full";
 pub const ICEBERG_COMPACTION_TYPE_SMALL_FILES: &str = "small-files";
 pub const ICEBERG_COMPACTION_TYPE_FILES_WITH_DELETE: &str = "files-with-delete";
@@ -228,11 +229,12 @@ where
 }
 
 /// Compaction type for Iceberg sink
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum CompactionType {
+    /// Auto compaction - compacts the union of small and delete-heavy files
+    Auto,
     /// Full compaction - rewrites all data files
-    #[default]
     Full,
     /// Small files compaction - only compact small files
     SmallFiles,
@@ -243,6 +245,7 @@ pub enum CompactionType {
 impl CompactionType {
     pub fn as_str(&self) -> &'static str {
         match self {
+            CompactionType::Auto => ICEBERG_COMPACTION_TYPE_AUTO,
             CompactionType::Full => ICEBERG_COMPACTION_TYPE_FULL,
             CompactionType::SmallFiles => ICEBERG_COMPACTION_TYPE_SMALL_FILES,
             CompactionType::FilesWithDelete => ICEBERG_COMPACTION_TYPE_FILES_WITH_DELETE,
@@ -255,12 +258,14 @@ impl std::str::FromStr for CompactionType {
 
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
         match s {
+            ICEBERG_COMPACTION_TYPE_AUTO => Ok(CompactionType::Auto),
             ICEBERG_COMPACTION_TYPE_FULL => Ok(CompactionType::Full),
             ICEBERG_COMPACTION_TYPE_SMALL_FILES => Ok(CompactionType::SmallFiles),
             ICEBERG_COMPACTION_TYPE_FILES_WITH_DELETE => Ok(CompactionType::FilesWithDelete),
             _ => Err(SinkError::Config(anyhow!(format!(
-                "invalid compaction_type: {}, must be one of: {}, {}, {}",
+                "invalid compaction_type: {}, must be one of: {}, {}, {}, {}",
                 s,
+                ICEBERG_COMPACTION_TYPE_AUTO,
                 ICEBERG_COMPACTION_TYPE_FULL,
                 ICEBERG_COMPACTION_TYPE_SMALL_FILES,
                 ICEBERG_COMPACTION_TYPE_FILES_WITH_DELETE
@@ -477,8 +482,8 @@ pub struct IcebergConfig {
     #[with_option(allow_alter_on_fly, iceberg_engine)]
     pub target_file_size_mb: Option<u64>,
 
-    /// Compaction type: `full`, `small-files`, or `files-with-delete`
-    /// If not set, will default to `full`
+    /// Compaction type: `auto`, `full`, `small-files`, or `files-with-delete`
+    /// If not set, defaults to `auto` when Iceberg compaction is licensed, otherwise `full`
     #[serde(rename = "compaction.type", default)]
     #[with_option(allow_alter_on_fly, iceberg_engine)]
     pub compaction_type: Option<CompactionType>,
@@ -863,12 +868,6 @@ impl IcebergConfig {
 
     pub fn target_file_size_mb(&self) -> u64 {
         self.target_file_size_mb.unwrap_or(1024)
-    }
-
-    /// Get the compaction type as an enum
-    /// This method parses the string and returns the enum value
-    pub fn compaction_type(&self) -> CompactionType {
-        self.compaction_type.unwrap_or_default()
     }
 
     /// Get the parquet compression codec

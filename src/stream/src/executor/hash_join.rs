@@ -1027,6 +1027,7 @@ impl<K: HashKey, S: StateStore, const T: JoinTypePrimitive, E: JoinEncoding>
                         side_update,
                         &useful_state_clean_columns,
                         cond,
+                        &mut total_matches,
                         append_only_optimize,
                         entry_state_max_rows,
                     )
@@ -1039,7 +1040,6 @@ impl<K: HashKey, S: StateStore, const T: JoinTypePrimitive, E: JoinEncoding>
                     #[for_await]
                     for chunk in match_rows!(Insert) {
                         let chunk = chunk?;
-                        total_matches += chunk.cardinality();
                         yield chunk;
                     }
                 }
@@ -1048,7 +1048,6 @@ impl<K: HashKey, S: StateStore, const T: JoinTypePrimitive, E: JoinEncoding>
                     #[for_await]
                     for chunk in match_rows!(Delete) {
                         let chunk = chunk?;
-                        total_matches += chunk.cardinality();
                         yield chunk;
                     }
                 }
@@ -1098,6 +1097,7 @@ impl<K: HashKey, S: StateStore, const T: JoinTypePrimitive, E: JoinEncoding>
         side_update: &'a mut JoinSide<K, S, E>,
         useful_state_clean_columns: &'a [(usize, &'a Watermark)],
         cond: &'a mut Option<NonStrictExpression>,
+        total_matches: &'a mut usize,
         append_only_optimize: bool,
         entry_state_max_rows: usize,
     ) {
@@ -1130,6 +1130,7 @@ impl<K: HashKey, S: StateStore, const T: JoinTypePrimitive, E: JoinEncoding>
                     cond,
                     &mut degree,
                     useful_state_clean_columns,
+                    total_matches,
                     append_only_optimize,
                     &mut append_only_matched_row,
                     &mut matched_rows_to_clean,
@@ -1279,6 +1280,7 @@ impl<K: HashKey, S: StateStore, const T: JoinTypePrimitive, E: JoinEncoding>
         cond: &Option<NonStrictExpression>,
         update_row_degree: &mut u64,
         useful_state_clean_columns: &[(usize, &'a Watermark)],
+        total_matches: &mut usize,
         append_only_optimize: bool,
         append_only_matched_row: &mut Option<JoinRow<RO>>,
         matched_rows_to_clean: &mut Vec<JoinRow<RO>>,
@@ -1299,6 +1301,7 @@ impl<K: HashKey, S: StateStore, const T: JoinTypePrimitive, E: JoinEncoding>
         .await;
 
         if join_condition_satisfied {
+            *total_matches += 1;
             // update degree
             *update_row_degree += 1;
             // send matched row downstream

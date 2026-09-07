@@ -1,5 +1,8 @@
 name: Issue Documentation Checker
 
+permissions:
+  contents: read
+
 on:
   issues:
     types:

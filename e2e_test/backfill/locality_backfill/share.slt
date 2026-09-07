@@ -2,6 +2,9 @@ statement ok
 set enable_locality_backfill=true;
 
 statement ok
+set locality_backfill_mode=always;
+
+statement ok
 CREATE TABLE supplier (
         s_suppkey  INTEGER,
         s_name VARCHAR,

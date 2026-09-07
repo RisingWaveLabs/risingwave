@@ -18,9 +18,9 @@ use risingwave_expr::bail;
 
 use super::stream::StreamPlanNodeMetadata;
 use super::{
-    ColPrunable, ColumnPruningContext, ExprRewritable, ExprVisitable, Logical, LogicalFilter,
+    ColPrunable, ColumnPruningContext, ExprRewritable, ExprVisitable, Logical,
     LogicalPlanRef as PlanRef, LogicalProject, PlanBase, PlanTreeNodeUnary, PredicatePushdown,
-    PredicatePushdownContext, ToBatch, ToStream, ToStreamContext, generic,
+    PredicatePushdownContext, ToBatch, ToStream, ToStreamContext, gen_filter_and_pushdown, generic,
 };
 use crate::binder::BoundFillStrategy;
 use crate::error::Result;
@@ -164,9 +164,11 @@ impl PredicatePushdown for LogicalGapFill {
     fn predicate_pushdown(
         &self,
         predicate: Condition,
-        _ctx: &mut PredicatePushdownContext,
+        ctx: &mut PredicatePushdownContext,
     ) -> PlanRef {
-        LogicalFilter::create(self.clone().into(), predicate)
+        // No pushdown, but keep recursing with a `true` condition so that shares below
+        // still receive a contribution from this parent (see `PredicatePushdownContext`).
+        gen_filter_and_pushdown(self, predicate, Condition::true_cond(), ctx)
     }
 }
 

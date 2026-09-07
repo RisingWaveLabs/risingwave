@@ -177,6 +177,7 @@ async fn test_batch_refresh_periodic_update() -> Result<()> {
     session
         .run("CREATE MATERIALIZED VIEW mv_up AS SELECT * FROM t;")
         .await?;
+    wait_for_mv_count(&mut session, "mv_up", "2", "upstream materialized view").await?;
 
     // Short refresh interval so we don't need to wait long per cycle.
     session
@@ -185,9 +186,9 @@ async fn test_batch_refresh_periodic_update() -> Result<()> {
         )
         .await?;
 
-    // Initial snapshot content.
-    let mv_batch_count = session.run("SELECT COUNT(*) FROM mv_batch;").await?;
-    assert_eq!(mv_batch_count, "2");
+    // Initial snapshot content. The frontend may receive the catalog before the
+    // streaming vnode mapping, so poll the query until both are visible.
+    wait_for_batch_mv_count(&mut session, "2", "initial batch refresh").await?;
 
     // ── First cycle: upstream inserts must appear after a refresh interval. ──
     session
@@ -232,9 +233,19 @@ async fn wait_for_batch_mv_count(
     expected: &str,
     stage: &str,
 ) -> Result<()> {
+    wait_for_mv_count(session, "mv_batch", expected, stage).await
+}
+
+async fn wait_for_mv_count(
+    session: &mut risingwave_simulation::cluster::Session,
+    name: &str,
+    expected: &str,
+    stage: &str,
+) -> Result<()> {
     let mut last = String::new();
+    let query = format!("SELECT COUNT(*) FROM {name};");
     for _ in 0..30 {
-        match session.run("SELECT COUNT(*) FROM mv_batch;").await {
+        match session.run(query.clone()).await {
             Ok(c) => {
                 last = c.clone();
                 if c == expected {

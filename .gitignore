@@ -62,7 +62,7 @@ log/
 dhat-heap.json
 
 # RisingWave Local Runtime
-.risingwave/
+.risingwave
 .bin/
 
 # Generated Configuration Files

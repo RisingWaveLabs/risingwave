@@ -566,7 +566,7 @@ steps:
           <<: *docker-compose
           run: sink-test-env
       - ./ci/plugins/upload-failure-logs
-    timeout_in_minutes: 10
+    timeout_in_minutes: 20
     retry: *auto-retry
 
   - label: "end-to-end redis sink test"
@@ -880,7 +880,8 @@ steps:
       - ./ci/plugins/upload-failure-logs
     matrix:
       setup:
-        # Test the 4 latest versions against the latest main.
+        # Test the 4 latest versions against the latest main. Each matrix entry
+        # upgrades through the latest stable patch of every intermediate release line.
         # e.g.
         # 1: 2.0.0
         # 2: 1.1.1
@@ -893,7 +894,8 @@ steps:
           - "2"
           - "3"
           - "4"
-    timeout_in_minutes: 25
+    # Older releases are upgraded through every intermediate release line.
+    timeout_in_minutes: 60
 
   # Sqlsmith differential testing
   - label: "Sqlsmith Differential Testing"

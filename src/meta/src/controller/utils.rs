@@ -60,8 +60,8 @@ use risingwave_pb::user::{PbAction, PbGrantPrivilege, PbUserInfo};
 use risingwave_sqlparser::ast::Statement as SqlStatement;
 use risingwave_sqlparser::parser::Parser;
 use sea_orm::sea_query::{
-    Alias, CommonTableExpression, Expr, Query, QueryStatementBuilder, SelectStatement, UnionType,
-    WithClause,
+    Alias, CommonTableExpression, Expr, OnConflict, Query, QueryStatementBuilder, SelectStatement,
+    UnionType, WithClause,
 };
 use sea_orm::{
     ColumnTrait, ConnectionTrait, DatabaseTransaction, DerivePartialModel, EntityTrait,
@@ -399,6 +399,54 @@ pub struct PartialObject {
     pub database_id: Option<DatabaseId>,
 }
 
+impl From<object::Model> for PartialObject {
+    fn from(object: object::Model) -> Self {
+        Self {
+            oid: object.oid,
+            obj_type: object.obj_type,
+            schema_id: object.schema_id,
+            database_id: object.database_id,
+        }
+    }
+}
+
+pub async fn get_belong_objects<C>(db: &C, object_id: ObjectId) -> MetaResult<Vec<object::Model>>
+where
+    C: ConnectionTrait,
+{
+    get_belong_objects_by_ids(db, [object_id]).await
+}
+
+/// Returns all objects that transitively belong to `object_ids`, excluding `object_ids`.
+pub async fn get_belong_objects_by_ids<C>(
+    db: &C,
+    object_ids: impl IntoIterator<Item = ObjectId>,
+) -> MetaResult<Vec<object::Model>>
+where
+    C: ConnectionTrait,
+{
+    let mut parents = object_ids.into_iter().collect_vec();
+    let mut visited = parents.iter().copied().collect::<HashSet<_>>();
+    let mut objects = vec![];
+    loop {
+        let children = Object::find()
+            .filter(object::Column::BelongToOid.is_in(parents))
+            .all(db)
+            .await?
+            .into_iter()
+            .filter(|object| visited.insert(object.oid))
+            .collect_vec();
+        if children.is_empty() {
+            break;
+        }
+
+        parents = children.iter().map(|object| object.oid).collect();
+        objects.extend(children);
+    }
+
+    Ok(objects)
+}
+
 #[derive(Clone, DerivePartialModel, FromQueryResult)]
 #[sea_orm(entity = "Fragment")]
 pub struct PartialFragmentStateTables {
@@ -430,6 +478,7 @@ pub struct FragmentDesc {
 /// List all objects that are using the given one in a cascade way. It runs a recursive CTE to find all the dependencies.
 pub async fn get_referring_objects_cascade<C>(
     obj_id: ObjectId,
+    object_type: ObjectType,
     db: &C,
 ) -> MetaResult<Vec<PartialObject>>
 where
@@ -437,13 +486,28 @@ where
 {
     let query = construct_obj_dependency_query(obj_id);
     let (sql, values) = query.build_any(&*db.get_database_backend().get_query_builder());
-    let objects = PartialObject::find_by_statement(Statement::from_sql_and_values(
+    let mut objects = PartialObject::find_by_statement(Statement::from_sql_and_values(
         db.get_database_backend(),
         sql,
         values,
     ))
     .all(db)
     .await?;
+
+    let target_objects = std::iter::once((obj_id, object_type))
+        .chain(objects.iter().map(|object| (object.oid, object.obj_type)))
+        .collect_vec();
+    let mut existing_object_ids: HashSet<ObjectId> =
+        objects.iter().map(|object| object.oid).collect();
+    for (target_id, target_type) in target_objects {
+        let incoming_sink_objects =
+            get_incoming_sink_objects_for_target(target_id, target_type, db).await?;
+        for incoming_sink_object in incoming_sink_objects {
+            if existing_object_ids.insert(incoming_sink_object.oid) {
+                objects.push(incoming_sink_object);
+            }
+        }
+    }
     Ok(objects)
 }
 
@@ -762,42 +826,35 @@ where
     Ok(())
 }
 
-/// `check_object_refer_for_drop` checks whether the object is used by other objects except indexes.
-/// It returns an error that contains the details of the referring objects if it is used by others.
-pub async fn check_object_refer_for_drop<C>(
+/// Validates a RESTRICT drop and returns referring objects that should be dropped together.
+///
+/// Objects related through `belong_to_oid` are catalog-owned by the target. Indexes are also
+/// logically owned by their primary table for dropping, although they remain schema-owned catalog
+/// objects. These objects are dropped together with the target; all other referrers prevent the
+/// drop.
+pub async fn validate_restrict_drop_and_collect_owned_objects<C>(
     object_type: ObjectType,
     object_id: ObjectId,
     db: &C,
-) -> MetaResult<()>
+) -> MetaResult<Vec<PartialObject>>
 where
     C: ConnectionTrait,
 {
-    // Ignore indexes.
-    let count = if object_type == ObjectType::Table {
-        ObjectDependency::find()
-            .join(
-                JoinType::InnerJoin,
-                object_dependency::Relation::Object1.def(),
-            )
-            .filter(
-                object_dependency::Column::Oid
-                    .eq(object_id)
-                    .and(object::Column::ObjType.ne(ObjectType::Index)),
-            )
-            .count(db)
-            .await?
-    } else {
-        ObjectDependency::find()
-            .filter(object_dependency::Column::Oid.eq(object_id))
-            .count(db)
-            .await?
-    };
-    if count != 0 {
-        // find the name of all objects that are using the given one.
-        let referring_objects = get_referring_objects(object_id, db).await?;
-        let referring_objs_map = referring_objects
+    let referring_objects = get_referring_objects(object_id, object_type, db).await?;
+    let owned_object_ids = get_belong_objects(db, object_id)
+        .await?
+        .into_iter()
+        .map(|object| object.oid)
+        .collect::<HashSet<_>>();
+    let mut non_owned_objects = referring_objects.clone();
+    non_owned_objects.retain(|object| !owned_object_ids.contains(&object.oid));
+    if object_type == ObjectType::Table {
+        non_owned_objects.retain(|object| object.obj_type != ObjectType::Index);
+    }
+
+    if !non_owned_objects.is_empty() {
+        let referring_objs_map = non_owned_objects
             .into_iter()
-            .filter(|o| o.obj_type != ObjectType::Index)
             .into_group_map_by(|o| o.obj_type);
         let mut details = vec![];
         for (obj_type, objs) in referring_objs_map {
@@ -833,17 +890,6 @@ where
                         .into_tuple()
                         .all(db)
                         .await?;
-                    if object_type == ObjectType::Table {
-                        let engine = Table::find_by_id(object_id.as_table_id())
-                            .select_only()
-                            .column(table::Column::Engine)
-                            .into_tuple::<table::Engine>()
-                            .one(db)
-                            .await?;
-                        if engine == Some(table::Engine::Iceberg) && sinks.len() == 1 {
-                            continue;
-                        }
-                    }
                     details.extend(sinks.into_iter().map(|(schema_name, sink_name)| {
                         format!("sink {}.{} depends on it", schema_name, sink_name)
                     }));
@@ -922,7 +968,7 @@ where
             }
         }
         if details.is_empty() {
-            return Ok(());
+            return Ok(referring_objects);
         }
 
         return Err(MetaError::permission_denied(format!(
@@ -939,15 +985,47 @@ where
             }
         )));
     }
-    Ok(())
+    Ok(referring_objects)
 }
 
-/// List all objects that are using the given one.
-pub async fn get_referring_objects<C>(object_id: ObjectId, db: &C) -> MetaResult<Vec<PartialObject>>
+async fn get_incoming_sink_objects_for_target<C>(
+    target_id: ObjectId,
+    target_type: ObjectType,
+    db: &C,
+) -> MetaResult<Vec<PartialObject>>
 where
     C: ConnectionTrait,
 {
-    let objs = ObjectDependency::find()
+    match target_type {
+        ObjectType::Table => {
+            let incoming_sink_ids = Sink::find()
+                .select_only()
+                .column(sink::Column::SinkId)
+                .filter(sink::Column::TargetTable.eq(target_id.as_table_id()))
+                .into_tuple::<SinkId>()
+                .all(db)
+                .await?;
+            Object::find()
+                .filter(object::Column::Oid.is_in(incoming_sink_ids))
+                .into_partial_model()
+                .all(db)
+                .await
+                .map_err(Into::into)
+        }
+        _ => Ok(vec![]),
+    }
+}
+
+/// List all objects that are using the given one.
+pub async fn get_referring_objects<C>(
+    object_id: ObjectId,
+    object_type: ObjectType,
+    db: &C,
+) -> MetaResult<Vec<PartialObject>>
+where
+    C: ConnectionTrait,
+{
+    let mut objects: Vec<PartialObject> = ObjectDependency::find()
         .filter(object_dependency::Column::Oid.eq(object_id))
         .join(
             JoinType::InnerJoin,
@@ -957,7 +1035,17 @@ where
         .all(db)
         .await?;
 
-    Ok(objs)
+    let incoming_sink_objects =
+        get_incoming_sink_objects_for_target(object_id, object_type, db).await?;
+    let mut existing_object_ids: HashSet<ObjectId> =
+        objects.iter().map(|object| object.oid).collect();
+    objects.extend(
+        incoming_sink_objects
+            .into_iter()
+            .filter(|object| existing_object_ids.insert(object.oid)),
+    );
+
+    Ok(objects)
 }
 
 /// `ensure_schema_empty` ensures that the schema is empty, used by `DROP SCHEMA`.
@@ -1325,6 +1413,38 @@ where
         .collect())
 }
 
+/// Insert user privileges idempotently using the same key as `idx_user_privilege_item`.
+/// An existing privilege is preserved, except that its grant option is upgraded when requested.
+pub(crate) async fn upsert_user_privileges<C>(
+    db: &C,
+    privileges: impl IntoIterator<Item = user_privilege::ActiveModel>,
+) -> MetaResult<()>
+where
+    C: ConnectionTrait,
+{
+    for privilege in privileges {
+        let mut on_conflict = OnConflict::columns([
+            user_privilege::Column::UserId,
+            user_privilege::Column::Oid,
+            user_privilege::Column::Action,
+            user_privilege::Column::GrantedBy,
+        ]);
+        if *privilege.with_grant_option.as_ref() {
+            on_conflict.update_column(user_privilege::Column::WithGrantOption);
+        } else {
+            // Workaround to support MYSQL for `DO NOTHING`.
+            on_conflict.update_column(user_privilege::Column::UserId);
+        }
+
+        UserPrivilege::insert(privilege)
+            .on_conflict(on_conflict)
+            .do_nothing()
+            .exec(db)
+            .await?;
+    }
+    Ok(())
+}
+
 pub async fn get_table_columns(
     txn: &impl ConnectionTrait,
     id: TableId,
@@ -1402,54 +1522,46 @@ where
         .map(|(grantee, _, _, _)| *grantee)
         .collect::<HashSet<_>>();
 
+    let mut new_privileges = vec![];
     for (grantee, granted_by, action, with_grant_option) in default_privileges {
-        UserPrivilege::insert(user_privilege::ActiveModel {
+        new_privileges.push(user_privilege::ActiveModel {
             user_id: Set(grantee),
             oid: Set(object_id),
             granted_by: Set(granted_by),
             action: Set(action),
             with_grant_option: Set(with_grant_option),
             ..Default::default()
-        })
-        .exec(db)
-        .await?;
+        });
         if action == Action::Select {
             // Grant SELECT privilege for internal tables if the action is SELECT.
             let internal_table_ids = get_internal_tables_by_id(object_id.as_job_id(), db).await?;
-            if !internal_table_ids.is_empty() {
-                for internal_table_id in &internal_table_ids {
-                    UserPrivilege::insert(user_privilege::ActiveModel {
-                        user_id: Set(grantee),
-                        oid: Set(internal_table_id.as_object_id()),
-                        granted_by: Set(granted_by),
-                        action: Set(Action::Select),
-                        with_grant_option: Set(with_grant_option),
-                        ..Default::default()
-                    })
-                    .exec(db)
-                    .await?;
+            new_privileges.extend(internal_table_ids.into_iter().map(|internal_table_id| {
+                user_privilege::ActiveModel {
+                    user_id: Set(grantee),
+                    oid: Set(internal_table_id.as_object_id()),
+                    granted_by: Set(granted_by),
+                    action: Set(Action::Select),
+                    with_grant_option: Set(with_grant_option),
+                    ..Default::default()
                 }
-            }
+            }));
 
             // Additionally, grant SELECT privilege for iceberg related objects if the action is SELECT.
             let iceberg_privilege_object_ids =
                 get_iceberg_related_object_ids(object_id, db).await?;
-            if !iceberg_privilege_object_ids.is_empty() {
-                for iceberg_object_id in &iceberg_privilege_object_ids {
-                    UserPrivilege::insert(user_privilege::ActiveModel {
-                        user_id: Set(grantee),
-                        oid: Set(*iceberg_object_id),
-                        granted_by: Set(granted_by),
-                        action: Set(action),
-                        with_grant_option: Set(with_grant_option),
-                        ..Default::default()
-                    })
-                    .exec(db)
-                    .await?;
-                }
-            }
+            new_privileges.extend(iceberg_privilege_object_ids.into_iter().map(
+                |iceberg_object_id| user_privilege::ActiveModel {
+                    user_id: Set(grantee),
+                    oid: Set(iceberg_object_id),
+                    granted_by: Set(granted_by),
+                    action: Set(action),
+                    with_grant_option: Set(with_grant_option),
+                    ..Default::default()
+                },
+            ));
         }
     }
+    upsert_user_privileges(db, new_privileges).await?;
 
     let updated_user_infos = list_user_info_by_ids(updated_user_ids, db).await?;
     Ok(updated_user_infos)
@@ -2127,23 +2239,7 @@ pub async fn rename_relation_refer(
             });
         }};
     }
-    let mut objs = get_referring_objects(object_id, txn).await?;
-    if object_type == ObjectType::Table {
-        let incoming_sinks: Vec<SinkId> = Sink::find()
-            .select_only()
-            .column(sink::Column::SinkId)
-            .filter(sink::Column::TargetTable.eq(object_id))
-            .into_tuple()
-            .all(txn)
-            .await?;
-
-        objs.extend(incoming_sinks.into_iter().map(|id| PartialObject {
-            oid: id.as_object_id(),
-            obj_type: ObjectType::Sink,
-            schema_id: None,
-            database_id: None,
-        }));
-    }
+    let objs = get_referring_objects(object_id, object_type, txn).await?;
 
     for obj in objs {
         match obj.obj_type {
@@ -2333,47 +2429,6 @@ where
     Ok(migrated)
 }
 
-pub async fn try_get_iceberg_table_by_downstream_sink<C>(
-    txn: &C,
-    sink_id: SinkId,
-) -> MetaResult<Option<TableId>>
-where
-    C: ConnectionTrait,
-{
-    let sink = Sink::find_by_id(sink_id).one(txn).await?;
-    let Some(sink) = sink else {
-        return Ok(None);
-    };
-
-    if sink.name.starts_with(ICEBERG_SINK_PREFIX) {
-        let object_ids: Vec<ObjectId> = ObjectDependency::find()
-            .select_only()
-            .column(object_dependency::Column::Oid)
-            .filter(object_dependency::Column::UsedBy.eq(sink_id))
-            .into_tuple()
-            .all(txn)
-            .await?;
-        let mut iceberg_table_ids = vec![];
-        for object_id in object_ids {
-            let table_id = object_id.as_table_id();
-            if let Some(table_engine) = Table::find_by_id(table_id)
-                .select_only()
-                .column(table::Column::Engine)
-                .into_tuple::<table::Engine>()
-                .one(txn)
-                .await?
-                && table_engine == table::Engine::Iceberg
-            {
-                iceberg_table_ids.push(table_id);
-            }
-        }
-        if iceberg_table_ids.len() == 1 {
-            return Ok(Some(iceberg_table_ids[0]));
-        }
-    }
-    Ok(None)
-}
-
 pub async fn check_if_belongs_to_iceberg_table<C>(txn: &C, job_id: JobId) -> MetaResult<bool>
 where
     C: ConnectionTrait,
@@ -2388,13 +2443,18 @@ where
     {
         return Ok(true);
     }
-    if let Some(sink_name) = Sink::find_by_id(job_id.as_sink_id())
+    if let Some(parent_oid) = Object::find_by_id(job_id)
         .select_only()
-        .column(sink::Column::Name)
-        .into_tuple::<String>()
+        .column(object::Column::BelongToOid)
+        .into_tuple::<Option<ObjectId>>()
         .one(txn)
         .await?
-        && sink_name.starts_with(ICEBERG_SINK_PREFIX)
+        .flatten()
+        && Table::find_by_id(parent_oid.as_table_id())
+            .filter(table::Column::Engine.eq(table::Engine::Iceberg))
+            .one(txn)
+            .await?
+            .is_some()
     {
         return Ok(true);
     }

@@ -2,6 +2,7 @@ disallowed-methods = [
     { path = "std::iter::Iterator::zip", reason = "Please use `zip_eq_fast` if it's available. Otherwise use `zip_eq_debug`" },
     { path = "itertools::Itertools::zip_eq", reason = "Please use `zip_eq_fast` if it's available. Otherwise use `zip_eq_debug`" },
     { path = "futures::stream::select_all", reason = "Please use `risingwave_common::util::select_all` instead." },
+    { path = "tokio_retry::strategy::ExponentialBackoff::from_millis", reason = "Please use `risingwave_common::util::retry::exponential_backoff` instead; `from_millis` sets the exponent base, not the initial delay." },
     { path = "std::panic::catch_unwind", reason = "Please use `risingwave_common::util::panic::rw_catch_unwind` instead." },
     { path = "futures::FutureExt::catch_unwind", reason = "Please use `risingwave_common::util::panic::FutureCatchUnwindExt::rw_catch_unwind` instead." },
     { path = "num_traits::sign::Signed::is_positive", reason = "This returns true for 0.0 but false for 0." },

@@ -17,7 +17,7 @@ use std::collections::{HashMap, HashSet};
 use risingwave_common::catalog::TableId;
 use risingwave_pb::hummock::PbSstableInfo;
 use risingwave_pb::hummock::hummock_version::PbLevels;
-use risingwave_pb::hummock::hummock_version_delta::{PbChangeLogDelta, PbGroupDeltas};
+use risingwave_pb::hummock::hummock_version_delta::PbGroupDeltas;
 
 use crate::compaction_group::StateTableId;
 use crate::level::{Level, Levels, LevelsCommon};
@@ -86,8 +86,6 @@ impl From<(&HummockVersion, &HashSet<StateTableId>)> for IncompleteHummockVersio
                 .collect(),
             max_committed_epoch: version.max_committed_epoch,
             table_watermarks: version.table_watermarks.clone(),
-            // time travel metadata doesn't include table change log
-            table_change_log: HashMap::default(),
             state_table_info: version.state_table_info.clone(),
             vector_indexes: version.vector_indexes.clone(),
         }
@@ -121,9 +119,8 @@ fn rewrite_levels(
     PbLevels::from(levels).into()
 }
 
-/// [`IncompleteHummockVersionDelta`] is incomplete because `SSTableInfo` only has the `sst_id` set in the following fields:
-/// - `PbGroupDeltas`
-/// - `ChangeLogDelta`
+/// [`IncompleteHummockVersionDelta`] is incomplete because `SSTableInfo` only has the `sst_id` set
+/// in `PbGroupDeltas`.
 pub type IncompleteHummockVersionDelta = HummockVersionDeltaCommon<SstableIdInVersion>;
 
 /// `SStableInfo` will be stripped.
@@ -146,29 +143,6 @@ impl From<(&HummockVersionDelta, &HashSet<StateTableId>)> for IncompleteHummockV
             trivial_move: delta.trivial_move,
             new_table_watermarks: delta.new_table_watermarks.clone(),
             removed_table_ids: delta.removed_table_ids.clone(),
-            change_log_delta: delta
-                .change_log_delta
-                .iter()
-                .filter_map(|(table_id, log_delta)| {
-                    if !time_travel_table_ids.contains(table_id) {
-                        return None;
-                    }
-                    debug_assert!(
-                        log_delta
-                            .new_log
-                            .new_value
-                            .iter()
-                            .chain(log_delta.new_log.old_value.iter())
-                            .all(|s| {
-                                s.table_ids
-                                    .iter()
-                                    .any(|tid| time_travel_table_ids.contains(tid))
-                            })
-                    );
-
-                    Some((*table_id, PbChangeLogDelta::from(log_delta).into()))
-                })
-                .collect(),
             state_table_info_delta: delta.state_table_info_delta.clone(),
             vector_index_delta: delta.vector_index_delta.clone(),
         }

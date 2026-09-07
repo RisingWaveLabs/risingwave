@@ -238,7 +238,7 @@ async fn next_unique_id<const C: usize>(
 ) -> Result<TypedId<C, u64>> {
     let num: u32 = num
         .try_into()
-        .unwrap_or_else(|_| panic!("fail to convert {num} into u32"));
+        .unwrap_or_else(|_| panic!("failed to convert {num} into u32"));
     env.hummock_seq
         .next_interval(SSTABLE_OBJECT_ID, num)
         .await

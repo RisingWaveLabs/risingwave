@@ -73,6 +73,7 @@ impl WithOptions for i64 {}
 impl WithOptions for f64 {}
 impl WithOptions for std::time::Duration {}
 impl WithOptions for crate::connector_common::MqttQualityOfService {}
+impl WithOptions for crate::connector_common::SslMode {}
 impl WithOptions for crate::sink::file_sink::opendal_sink::PathPartitionPrefix {}
 impl WithOptions for crate::sink::kafka::CompressionCodec {}
 impl WithOptions for crate::sink::pulsar::PulsarRoutingMode {}

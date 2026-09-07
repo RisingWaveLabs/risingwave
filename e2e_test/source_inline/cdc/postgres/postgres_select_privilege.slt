@@ -1,0 +1,61 @@
+control substitution on
+
+statement ok
+drop source if exists pg_cdc_select_privilege_source;
+
+system ok
+PGDATABASE=${PGDATABASE:-postgres} psql -v ON_ERROR_STOP=1 -c "
+    SELECT pg_terminate_backend(active_pid)
+    FROM pg_replication_slots
+    WHERE slot_name = 'pg_cdc_select_privilege_slot' AND active_pid IS NOT NULL;
+    SELECT pg_sleep(1);
+    SELECT pg_drop_replication_slot(slot_name)
+    FROM pg_replication_slots
+    WHERE slot_name = 'pg_cdc_select_privilege_slot';
+    DROP PUBLICATION IF EXISTS pg_cdc_select_privilege_pub;
+    DROP TABLE IF EXISTS public.pg_cdc_select_privilege_test CASCADE;
+    DROP ROLE IF EXISTS rw_cdc_slt_limited;
+    CREATE ROLE rw_cdc_slt_limited LOGIN REPLICATION PASSWORD 'rw_cdc_slt_limited';
+    CREATE TABLE public.pg_cdc_select_privilege_test (
+        id int PRIMARY KEY,
+        value text
+    );
+    REVOKE ALL ON TABLE public.pg_cdc_select_privilege_test FROM PUBLIC;
+    CREATE PUBLICATION pg_cdc_select_privilege_pub
+        FOR TABLE public.pg_cdc_select_privilege_test;
+    "
+
+statement ok
+create source pg_cdc_select_privilege_source with (
+    connector = 'postgres-cdc',
+    hostname = '${PGHOST:localhost}',
+    port = '${PGPORT:5432}',
+    username = 'rw_cdc_slt_limited',
+    password = 'rw_cdc_slt_limited',
+    database.name = '${PGDATABASE:postgres}',
+    schema.name = 'public',
+    publication.name = 'pg_cdc_select_privilege_pub',
+    slot.name = 'pg_cdc_select_privilege_slot',
+    auto.schema.change = 'true'
+);
+
+statement error PostgreSQL table "public"."pg_cdc_select_privilege_test" exists, but the connection user `rw_cdc_slt_limited` does not have SELECT privilege on it.*GRANT USAGE ON SCHEMA "public" TO "rw_cdc_slt_limited";.*GRANT SELECT ON TABLE "public"."pg_cdc_select_privilege_test" TO "rw_cdc_slt_limited";
+create table pg_cdc_select_privilege_table (*)
+from pg_cdc_select_privilege_source table 'public.pg_cdc_select_privilege_test';
+
+statement ok
+drop source pg_cdc_select_privilege_source;
+
+system ok
+PGDATABASE=${PGDATABASE:-postgres} psql -v ON_ERROR_STOP=1 -c "
+    SELECT pg_terminate_backend(active_pid)
+    FROM pg_replication_slots
+    WHERE slot_name = 'pg_cdc_select_privilege_slot' AND active_pid IS NOT NULL;
+    SELECT pg_sleep(1);
+    SELECT pg_drop_replication_slot(slot_name)
+    FROM pg_replication_slots
+    WHERE slot_name = 'pg_cdc_select_privilege_slot';
+    DROP PUBLICATION IF EXISTS pg_cdc_select_privilege_pub;
+    DROP TABLE IF EXISTS public.pg_cdc_select_privilege_test CASCADE;
+    DROP ROLE IF EXISTS rw_cdc_slt_limited;
+    "

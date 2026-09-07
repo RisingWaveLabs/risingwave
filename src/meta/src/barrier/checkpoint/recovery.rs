@@ -393,7 +393,7 @@ impl DatabaseStatusAction<'_, EnterInitializing> {
             mut state_table_committed_epochs,
             mut state_table_log_epochs,
             mut mv_depended_subscriptions,
-            mut background_jobs,
+            mut creating_jobs,
             mut cdc_table_snapshot_splits,
         } = runtime_info;
         let fragment_relations = &recovery_context.fragment_relations;
@@ -414,7 +414,7 @@ impl DatabaseStatusAction<'_, EnterInitializing> {
                 fragment_relations,
                 &stream_actors,
                 &mut source_splits,
-                &mut background_jobs,
+                &mut creating_jobs,
                 &mut mv_depended_subscriptions,
                 false,
                 &self.control.hummock_version_stats,
