@@ -256,6 +256,8 @@ pub static SINK_ALLOW_ALTER_ON_FLY_FIELDS: LazyLock<HashMap<String, HashSet<Stri
             "enable_manifest_rewrite".to_owned(),
             "manifest_rewrite_target_size_bytes".to_owned(),
             "manifest_rewrite_min_count_to_merge".to_owned(),
+            "enable_orphan_file_cleanup".to_owned(),
+            "orphan_file_cleanup_min_age_millis".to_owned(),
             "compaction.max_snapshots_num".to_owned(),
             "compaction.small_files_threshold_mb".to_owned(),
             "compaction.delete_files_count_threshold".to_owned(),

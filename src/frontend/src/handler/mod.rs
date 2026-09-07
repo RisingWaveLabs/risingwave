@@ -1680,8 +1680,8 @@ pub async fn handle(
         Statement::Deallocate { name, prepare } => {
             prepared_statement::handle_deallocate(name, prepare)
         }
-        Statement::Vacuum { object_name, full } => {
-            vacuum::handle_vacuum(handler_args, object_name, full).await
+        Statement::Vacuum { object_name, mode } => {
+            vacuum::handle_vacuum(handler_args, object_name, mode).await
         }
         Statement::Refresh { table_name } => {
             refresh::handle_refresh(handler_args, table_name).await

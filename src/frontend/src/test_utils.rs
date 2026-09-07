@@ -50,8 +50,9 @@ use risingwave_pb::common::{PbObjectType, WorkerNode};
 use risingwave_pb::ddl_service::alter_owner_request::Object;
 use risingwave_pb::ddl_service::create_iceberg_table_request::{PbSinkJobInfo, PbTableJobInfo};
 use risingwave_pb::ddl_service::{
-    DdlProgress, PbTableJobType, TableJobType, alter_name_request, alter_set_schema_request,
-    alter_swap_rename_request, create_connection_request, streaming_job_resource_type,
+    DdlProgress, PbTableJobType, RemoveIcebergTableOrphanFilesResponse, TableJobType,
+    alter_name_request, alter_set_schema_request, alter_swap_rename_request,
+    create_connection_request, streaming_job_resource_type,
 };
 use risingwave_pb::hummock::rise_ctl_update_compaction_config_request::mutable_config::MutableConfig as PbMutableConfig;
 use risingwave_pb::hummock::write_limits::WriteLimit;
@@ -1491,6 +1492,16 @@ impl FrontendMetaClient for MockFrontendMetaClient {
 
     async fn expire_iceberg_table_snapshots(&self, _sink_id: SinkId) -> RpcResult<()> {
         Ok(())
+    }
+
+    async fn remove_iceberg_table_orphan_files(
+        &self,
+        _sink_id: SinkId,
+    ) -> RpcResult<RemoveIcebergTableOrphanFilesResponse> {
+        Ok(RemoveIcebergTableOrphanFilesResponse {
+            status: None,
+            orphan_file_count: 0,
+        })
     }
 
     async fn refresh(&self, _request: RefreshRequest) -> RpcResult<RefreshResponse> {

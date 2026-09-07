@@ -407,6 +407,9 @@ pub fn start(
                     .time_travel_vacuum_max_version_count,
                 vacuum_spin_interval_ms: config.meta.vacuum_spin_interval_ms,
                 iceberg_gc_interval_sec: config.meta.iceberg_gc_interval_sec,
+                iceberg_orphan_file_cleanup_interval_sec: config
+                    .meta
+                    .iceberg_orphan_file_cleanup_interval_sec,
                 iceberg_compaction_report_timeout_sec: config
                     .meta
                     .iceberg_compaction_report_timeout_sec,

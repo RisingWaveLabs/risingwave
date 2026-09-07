@@ -22,7 +22,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::anyhow;
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use risingwave_common::id::WorkerId;
 use risingwave_connector::sink::SinkParam;
 use risingwave_connector::sink::catalog::{SinkCatalog, SinkId};
@@ -62,6 +62,8 @@ pub struct IcebergCompactionManager {
 
     compactor_streams_change_tx: CompactorChangeTx,
 
+    orphan_file_cleanup_locks: Mutex<HashMap<SinkId, Arc<tokio::sync::Mutex<()>>>>,
+
     pub metrics: Arc<MetaMetrics>,
 }
 
@@ -69,6 +71,7 @@ struct IcebergCompactionManagerInner {
     sink_schedules: HashMap<SinkId, CompactionTrack>,
     snapshot_expiration_sink_ids: HashSet<SinkId>,
     manifest_rewrite_sink_ids: HashSet<SinkId>,
+    orphan_file_cleanup_sink_ids: HashSet<SinkId>,
     manual_compaction_waiters: HashMap<SinkId, ManualCompactionWaiter>,
 }
 
@@ -96,11 +99,13 @@ impl IcebergCompactionManager {
                     sink_schedules: HashMap::default(),
                     snapshot_expiration_sink_ids: HashSet::default(),
                     manifest_rewrite_sink_ids: HashSet::default(),
+                    orphan_file_cleanup_sink_ids: HashSet::default(),
                     manual_compaction_waiters: HashMap::default(),
                 })),
                 metadata_manager,
                 iceberg_compactor_manager,
                 compactor_streams_change_tx,
+                orphan_file_cleanup_locks: Mutex::new(HashMap::default()),
                 metrics,
             }),
             compactor_streams_change_rx,
@@ -123,6 +128,14 @@ impl IcebergCompactionManager {
         let sink_param = self.get_sink_param(sink_id).await?;
         let iceberg_config = IcebergConfig::from_btreemap(sink_param.properties)?;
         Ok(iceberg_config)
+    }
+
+    fn orphan_file_cleanup_lock(&self, sink_id: SinkId) -> Arc<tokio::sync::Mutex<()>> {
+        self.orphan_file_cleanup_locks
+            .lock()
+            .entry(sink_id)
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
     }
 
     /// Clear the iceberg maintenance state of the sink aborted by

@@ -25,7 +25,7 @@ use risingwave_hummock_sdk::{CompactionGroupId, HummockVersionId};
 use risingwave_pb::backup_service::{BackupJobStatus, MetaSnapshotMetadata};
 use risingwave_pb::catalog::Table;
 use risingwave_pb::common::WorkerNode;
-use risingwave_pb::ddl_service::DdlProgress;
+use risingwave_pb::ddl_service::{DdlProgress, RemoveIcebergTableOrphanFilesResponse};
 use risingwave_pb::hummock::rise_ctl_update_compaction_config_request::mutable_config::MutableConfig as PbMutableConfig;
 use risingwave_pb::hummock::write_limits::WriteLimit;
 use risingwave_pb::hummock::{
@@ -234,6 +234,11 @@ pub trait FrontendMetaClient: Send + Sync {
     async fn rewrite_iceberg_table_manifests(&self, sink_id: SinkId) -> Result<()>;
 
     async fn expire_iceberg_table_snapshots(&self, sink_id: SinkId) -> Result<()>;
+
+    async fn remove_iceberg_table_orphan_files(
+        &self,
+        sink_id: SinkId,
+    ) -> Result<RemoveIcebergTableOrphanFilesResponse>;
 
     async fn refresh(&self, request: RefreshRequest) -> Result<RefreshResponse>;
 
@@ -596,6 +601,13 @@ impl FrontendMetaClient for FrontendMetaClientImpl {
 
     async fn expire_iceberg_table_snapshots(&self, sink_id: SinkId) -> Result<()> {
         self.0.expire_iceberg_table_snapshots(sink_id).await
+    }
+
+    async fn remove_iceberg_table_orphan_files(
+        &self,
+        sink_id: SinkId,
+    ) -> Result<RemoveIcebergTableOrphanFilesResponse> {
+        self.0.remove_iceberg_table_orphan_files(sink_id).await
     }
 
     async fn refresh(&self, request: RefreshRequest) -> Result<RefreshResponse> {

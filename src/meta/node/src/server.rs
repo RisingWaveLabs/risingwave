@@ -497,6 +497,10 @@ pub async fn start_service_as_election_leader(
         iceberg_compaction_mgr.clone(),
         env.opts.iceberg_gc_interval_sec,
     ));
+    sub_tasks.push(IcebergCompactionManager::orphan_file_cleanup_loop(
+        iceberg_compaction_mgr.clone(),
+        env.opts.iceberg_orphan_file_cleanup_interval_sec,
+    ));
 
     let refresh_scheduler_interval = Duration::from_secs(env.opts.refresh_scheduler_interval_sec);
     let (refresh_manager, refresh_handle, refresh_shutdown) = GlobalRefreshManager::start(

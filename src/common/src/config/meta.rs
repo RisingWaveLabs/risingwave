@@ -171,6 +171,10 @@ pub struct MetaConfig {
     #[serde(default = "default::meta::iceberg_gc_interval_sec")]
     pub iceberg_gc_interval_sec: u64,
 
+    /// Interval of scanning Iceberg table locations for orphan files.
+    #[serde(default = "default::meta::iceberg_orphan_file_cleanup_interval_sec")]
+    pub iceberg_orphan_file_cleanup_interval_sec: u64,
+
     /// Maximum time to wait for an iceberg compaction task report before the lease expires.
     #[serde(default = "default::meta::iceberg_compaction_report_timeout_sec")]
     pub iceberg_compaction_report_timeout_sec: u64,
@@ -730,6 +734,10 @@ pub mod default {
 
         pub fn iceberg_gc_interval_sec() -> u64 {
             3600
+        }
+
+        pub fn iceberg_orphan_file_cleanup_interval_sec() -> u64 {
+            7 * 24 * 60 * 60
         }
 
         pub fn iceberg_compaction_report_timeout_sec() -> u64 {

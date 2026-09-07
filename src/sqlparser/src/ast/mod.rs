@@ -1729,13 +1729,20 @@ pub enum Statement {
     Use {
         db_name: ObjectName,
     },
-    /// `VACUUM [FULL] [database_name][schema_name][object_name]`
+    /// `VACUUM [FULL | ORPHAN] [database_name][schema_name][object_name]`
     ///
-    /// Note: this is a RisingWave specific statement for iceberg table/sink compaction.
+    /// Note: this is a RisingWave specific statement for Iceberg table/sink maintenance.
     Vacuum {
         object_name: ObjectName,
-        full: bool,
+        mode: VacuumMode,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum VacuumMode {
+    Default,
+    Full,
+    OrphanFiles,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -2535,14 +2542,11 @@ impl Statement {
                 write!(f, "USE {}", db_name)?;
                 Ok(())
             }
-            Statement::Vacuum { object_name, full } => {
-                if *full {
-                    write!(f, "VACUUM FULL {}", object_name)?;
-                } else {
-                    write!(f, "VACUUM {}", object_name)?;
-                }
-                Ok(())
-            }
+            Statement::Vacuum { object_name, mode } => match mode {
+                VacuumMode::Default => write!(f, "VACUUM {}", object_name),
+                VacuumMode::Full => write!(f, "VACUUM FULL {}", object_name),
+                VacuumMode::OrphanFiles => write!(f, "VACUUM ORPHAN {}", object_name),
+            },
             Statement::AlterFragment {
                 fragment_ids,
                 operation,

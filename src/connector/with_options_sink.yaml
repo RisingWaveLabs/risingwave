@@ -791,6 +791,24 @@ IcebergConfig:
     default: Default::default
     allow_alter_on_fly: true
     iceberg_engine: true
+  - name: enable_orphan_file_cleanup
+    field_type: bool
+    comments: |-
+      Whether to periodically remove files that are unreachable from Iceberg metadata.
+      Cleanup runs on the global Iceberg orphan-file cleanup interval.
+    required: false
+    default: Default::default
+    allow_alter_on_fly: true
+    iceberg_engine: true
+  - name: orphan_file_cleanup_min_age_millis
+    field_type: u64
+    comments: |-
+      Minimum file age in milliseconds before an unreachable file may be removed.
+      Defaults to 7 days and must be at least 24 hours.
+    required: false
+    default: Default::default
+    allow_alter_on_fly: true
+    iceberg_engine: true
   - name: compaction.max_snapshots_num
     field_type: usize
     comments: |-

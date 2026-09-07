@@ -380,10 +380,16 @@ impl Parser<'_> {
     }
 
     pub fn parse_vacuum(&mut self) -> ModalResult<Statement> {
-        let full = self.parse_keyword(Keyword::FULL);
+        let mode = if self.parse_keyword(Keyword::FULL) {
+            VacuumMode::Full
+        } else if self.parse_keyword(Keyword::ORPHAN) {
+            VacuumMode::OrphanFiles
+        } else {
+            VacuumMode::Default
+        };
         let object_name = self.parse_object_name()?;
 
-        Ok(Statement::Vacuum { object_name, full })
+        Ok(Statement::Vacuum { object_name, mode })
     }
 
     /// Tries to parse a wildcard expression. If it is not a wildcard, parses an expression.

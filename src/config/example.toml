@@ -23,6 +23,7 @@ periodic_compaction_interval_sec = 300
 vacuum_interval_sec = 30
 vacuum_spin_interval_ms = 100
 iceberg_gc_interval_sec = 3600
+iceberg_orphan_file_cleanup_interval_sec = 604800
 iceberg_compaction_report_timeout_sec = 1800
 iceberg_compaction_config_refresh_interval_sec = 60
 hummock_version_checkpoint_interval_sec = 30

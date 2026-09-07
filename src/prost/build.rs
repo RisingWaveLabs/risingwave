@@ -333,6 +333,9 @@ for_all_wrapped_id_fields! (
         GetTablesResponse {
             tables: TableId,
         }
+        RemoveIcebergTableOrphanFilesRequest {
+            sink_id: SinkId,
+        }
         ReplaceJobPlan.ReplaceSink {
             old_sink_id: SinkId,
             dependencies: ObjectId,

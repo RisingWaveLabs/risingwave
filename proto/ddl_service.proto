@@ -725,6 +725,15 @@ message ExpireIcebergTableSnapshotsResponse {
   common.Status status = 1;
 }
 
+message RemoveIcebergTableOrphanFilesRequest {
+  uint32 sink_id = 1;
+}
+
+message RemoveIcebergTableOrphanFilesResponse {
+  common.Status status = 1;
+  uint64 orphan_file_count = 2;
+}
+
 message AlterStreamingJobConfigRequest {
   uint32 job_id = 1;
   map<string, string> entries_to_add = 2;
@@ -797,6 +806,7 @@ service DdlService {
   rpc CompactIcebergTable(CompactIcebergTableRequest) returns (CompactIcebergTableResponse);
   rpc RewriteIcebergTableManifests(RewriteIcebergTableManifestsRequest) returns (RewriteIcebergTableManifestsResponse);
   rpc ExpireIcebergTableSnapshots(ExpireIcebergTableSnapshotsRequest) returns (ExpireIcebergTableSnapshotsResponse);
+  rpc RemoveIcebergTableOrphanFiles(RemoveIcebergTableOrphanFilesRequest) returns (RemoveIcebergTableOrphanFilesResponse);
   rpc AlterCdcTableBackfillParallelism(AlterCdcTableBackfillParallelismRequest) returns (AlterCdcTableBackfillParallelismResponse);
   rpc AlterStreamingJobConfig(AlterStreamingJobConfigRequest) returns (AlterStreamingJobConfigResponse);
   rpc WaitIcebergPkIndexSinkEpoch(WaitIcebergPkIndexSinkEpochRequest) returns (WaitIcebergPkIndexSinkEpochResponse);

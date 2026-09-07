@@ -363,6 +363,7 @@ define_keywords!(
     OR,
     ORDER,
     ORDINALITY,
+    ORPHAN,
     OTHERS,
     OUT,
     OUTER,

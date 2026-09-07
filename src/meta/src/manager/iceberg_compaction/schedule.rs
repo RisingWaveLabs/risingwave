@@ -761,6 +761,11 @@ impl IcebergCompactionManager {
             } else {
                 guard.manifest_rewrite_sink_ids.remove(&sink_id);
             }
+            if config.enable_orphan_file_cleanup {
+                guard.orphan_file_cleanup_sink_ids.insert(sink_id);
+            } else {
+                guard.orphan_file_cleanup_sink_ids.remove(&sink_id);
+            }
 
             if !config.enable_compaction && !kind.allows_disabled_compaction() {
                 let keep_until_task_finishes =
@@ -1061,9 +1066,11 @@ impl IcebergCompactionManager {
             let task_to_cancel = Self::remove_sink_schedule(&mut guard, sink_id);
             guard.snapshot_expiration_sink_ids.remove(&sink_id);
             guard.manifest_rewrite_sink_ids.remove(&sink_id);
+            guard.orphan_file_cleanup_sink_ids.remove(&sink_id);
             let waiter = guard.manual_compaction_waiters.remove(&sink_id);
             (task_to_cancel, waiter)
         };
+        self.orphan_file_cleanup_locks.lock().remove(&sink_id);
         self.cancel_scheduled_task_if_any(sink_id, task_to_cancel);
 
         if let Some(waiter) = waiter {
