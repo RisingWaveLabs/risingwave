@@ -8,7 +8,7 @@ sync_point = []
 
 [dependencies]
 futures-util = "0.3"
-spin = "0.10"
+spin = "0.12"
 thiserror = { workspace = true }
 tokio = { workspace = true }
 

@@ -63,7 +63,7 @@ scopeguard = "1"
 serde = { workspace = true }
 serde_bytes = "0.11"
 sled = "0.34.7"
-spin = "0.10"
+spin = "0.12"
 sync-point = { path = "../utils/sync-point" }
 tempfile = "3"
 thiserror = { workspace = true }

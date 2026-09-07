@@ -14047,7 +14047,7 @@ dependencies = [
  "prometheus",
  "reqwest 0.13.4",
  "risingwave_common",
- "spin 0.10.0",
+ "spin 0.12.0",
  "thiserror 2.0.17",
  "thiserror-ext",
  "tokio-retry",
@@ -14367,7 +14367,7 @@ dependencies = [
  "serde",
  "serde_bytes",
  "sled",
- "spin 0.10.0",
+ "spin 0.12.0",
  "sync-point",
  "tempfile",
  "thiserror 2.0.17",
@@ -15967,6 +15967,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "spin"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1527984ca054dfca79333baec451042863f485fbee01b7bf6d911de915cac865"
+dependencies = [
+ "lock_api",
+]
+
+[[package]]
 name = "spinning_top"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -16526,7 +16535,7 @@ version = "0.1.0"
 dependencies = [
  "futures-util",
  "madsim-tokio",
- "spin 0.10.0",
+ "spin 0.12.0",
  "thiserror 2.0.17",
 ]
 
