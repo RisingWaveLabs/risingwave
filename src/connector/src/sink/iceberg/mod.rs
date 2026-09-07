@@ -233,6 +233,27 @@ impl Sink for IcebergSink {
         validate_explicit_compaction_type(&self.config)?;
         validate_compaction_option_compatibility(&self.config)?;
 
+        // VARIANT is not comparable, so it can never be an equality-delete key.
+        if self.config.r#type == SINK_TYPE_UPSERT
+            && !self.config.force_append_only
+            && let Some(pk_indices) = self
+                .param
+                .downstream_pk
+                .as_ref()
+                .filter(|pk| !pk.is_empty())
+        {
+            for &idx in pk_indices {
+                if let Some(column) = self.param.columns.get(idx)
+                    && column.data_type.contains_variant()
+                {
+                    bail!(
+                        "VARIANT column `{}` cannot be used as the primary key of an upsert iceberg sink",
+                        column.name
+                    );
+                }
+            }
+        }
+
         let table = self.create_and_validate_table().await?;
         self.config
             .validate_manifest_rewrite_format(table.metadata().format_version())?;

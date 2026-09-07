@@ -29,7 +29,9 @@ impl IcebergCompactionManager {
             .unwrap_or(IcebergReportTaskStatus::Unspecified);
         let result = match status {
             IcebergReportTaskStatus::Success => Ok(report.task_id),
-            IcebergReportTaskStatus::Failed | IcebergReportTaskStatus::Unspecified => {
+            IcebergReportTaskStatus::Drained
+            | IcebergReportTaskStatus::Failed
+            | IcebergReportTaskStatus::Unspecified => {
                 let message = report
                     .error_message
                     .clone()

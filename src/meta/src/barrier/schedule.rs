@@ -857,7 +857,6 @@ mod tests {
         async fn new_control_stream(
             &self,
             _node: &risingwave_pb::common::WorkerNode,
-            _init_request: &risingwave_pb::stream_service::streaming_control_stream_request::PbInitRequest,
         ) -> MetaResult<risingwave_rpc_client::StreamingControlHandle> {
             unimplemented!()
         }

@@ -107,6 +107,7 @@ impl CreatingStreamingJobControl {
         snapshot_epoch: u64,
         since_timestamp_upstream_log_epochs: Option<(&TableLogEpochs, PartialGraphId, u64)>,
         version_stat: &HummockVersionStats,
+        term_id: &str,
         partial_graph_manager: &mut PartialGraphManager,
         edges: &mut FragmentEdgeBuildResult,
         split_assignment: &SplitAssignment,
@@ -248,6 +249,7 @@ impl CreatingStreamingJobControl {
 
         let mut graph_adder = partial_graph_manager.add_partial_graph(
             partial_graph_id,
+            term_id,
             CreatingStreamingJobBarrierStats::new(job_id, snapshot_epoch),
         );
 
@@ -638,6 +640,7 @@ impl CreatingStreamingJobControl {
         version_stat: &HummockVersionStats,
         new_actors: StreamJobActorsToCreate,
         initial_mutation: Mutation,
+        term_id: &str,
         partial_graph_recoverer: &mut PartialGraphRecoverer<'_>,
     ) -> MetaResult<Self> {
         info!(
@@ -728,6 +731,7 @@ impl CreatingStreamingJobControl {
 
         partial_graph_recoverer.recover_graph(
             partial_graph_id,
+            term_id,
             initial_mutation,
             &first_barrier_info,
             &node_actors,

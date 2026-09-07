@@ -36,6 +36,7 @@ use risingwave_pb::stream_plan::stream_node::NodeBody;
 use risingwave_pb::stream_service::BarrierCompleteResponse;
 use risingwave_pb::stream_service::streaming_control_stream_response::ResetPartialGraphResponse;
 use tracing::{debug, warn};
+use uuid::Uuid;
 
 use crate::barrier::cdc_progress::CdcProgress;
 use crate::barrier::checkpoint::independent_job::{
@@ -305,6 +306,7 @@ impl CheckpointControl {
                         );
                         let adder = partial_graph_manager.add_partial_graph(
                             to_partial_graph_id(database_id, None),
+                            new_database.term_id(),
                             DatabaseCheckpointControlMetrics::new(database_id),
                         );
                         adder.added();
@@ -742,6 +744,8 @@ impl PartialGraphStat for DatabaseCheckpointControlMetrics {
 /// Controls the concurrent execution of commands.
 pub(in crate::barrier) struct DatabaseCheckpointControl {
     pub(super) database_id: DatabaseId,
+    /// Identifies the current recovery incarnation of this database.
+    pub(super) term_id: String,
     partial_graph_id: PartialGraphId,
     pub(super) state: BarrierWorkerState,
 
@@ -764,6 +768,7 @@ impl DatabaseCheckpointControl {
     fn new(database_id: DatabaseId, shared_actor_infos: SharedActorInfos) -> Self {
         Self {
             database_id,
+            term_id: Uuid::new_v4().to_string(),
             partial_graph_id: to_partial_graph_id(database_id, None),
             state: BarrierWorkerState::new(),
             finishing_jobs_collector: BarrierItemCollector::new(false),
@@ -777,6 +782,7 @@ impl DatabaseCheckpointControl {
 
     pub(crate) fn recovery(
         database_id: DatabaseId,
+        term_id: String,
         state: BarrierWorkerState,
         committed_epoch: u64,
         database_info: InflightDatabaseInfo,
@@ -784,6 +790,7 @@ impl DatabaseCheckpointControl {
     ) -> Self {
         Self {
             database_id,
+            term_id,
             partial_graph_id: to_partial_graph_id(database_id, None),
             state,
             finishing_jobs_collector: BarrierItemCollector::new(false),
@@ -793,6 +800,10 @@ impl DatabaseCheckpointControl {
             database_info,
             independent_checkpoint_job_controls,
         }
+    }
+
+    pub(super) fn term_id(&self) -> &str {
+        &self.term_id
     }
 
     pub(crate) fn is_valid_after_worker_err(&self, worker_id: WorkerId) -> bool {
@@ -1359,6 +1370,7 @@ impl DatabaseCheckpointControl {
         actor_id_counter: &AtomicU32,
         partial_graph_manager: &mut PartialGraphManager,
     ) -> MetaResult<bool> {
+        let term_id = self.term_id.as_str();
         let job = self
             .independent_checkpoint_job_controls
             .get_mut(&job_id)
@@ -1368,6 +1380,7 @@ impl DatabaseCheckpointControl {
                 context,
                 worker_nodes,
                 actor_id_counter,
+                term_id,
                 partial_graph_manager,
             ),
             _ => panic!("job {} should be a batch refresh job", job_id),

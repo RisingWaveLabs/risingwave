@@ -583,6 +583,7 @@ impl DatabaseCheckpointControl {
                         panic!("duplicated creating snapshot backfill job {job_id}");
                     };
 
+                    let term_id = self.term_id.as_str();
                     let job = CreatingStreamingJobControl::new(
                         entry,
                         CreateSnapshotBackfillJobCommandInfo {
@@ -597,6 +598,7 @@ impl DatabaseCheckpointControl {
                         snapshot_epoch,
                         since_timestamp_upstream_log_epochs,
                         hummock_version_stats,
+                        term_id,
                         partial_graph_manager,
                         &mut edges,
                         &resolved_split_assignment,
@@ -770,6 +772,7 @@ impl DatabaseCheckpointControl {
                         snapshot_backfill_upstream_tables,
                         snapshot_epoch,
                         hummock_version_stats,
+                        self.term_id(),
                         partial_graph_manager,
                         &logical,
                         worker_nodes,

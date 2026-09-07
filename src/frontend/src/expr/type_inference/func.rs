@@ -610,6 +610,24 @@ fn infer_type_for_special(
                 _ => Ok(None),
             }
         }
+        ExprType::ArraySort => {
+            ensure_arity!("array_sort", 1 <= | inputs | <= 3);
+            inputs[0].ensure_array_type()?;
+
+            for (index, param) in &[(1, "descending"), (2, "nulls_first")] {
+                if let Some(input) = inputs.get_mut(*index) {
+                    input.cast_implicit_mut(&DataType::Boolean).map_err(|_| {
+                        ErrorCode::BindError(format!(
+                            "Cannot cast {} to boolean for parameter {}",
+                            input.return_type(),
+                            param
+                        ))
+                    })?;
+                }
+            }
+
+            Ok(Some(inputs[0].return_type()))
+        }
         ExprType::MapAccess => {
             ensure_arity!("map_access", | inputs | == 2);
             let map_type = inputs[0].try_into_map_type()?;

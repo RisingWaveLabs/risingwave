@@ -1,0 +1,277 @@
+control substitution on
+
+# PostgreSQL point CDC test.
+# PostgreSQL point coordinates are float8 and map to
+# struct<x double precision, y double precision> in RisingWave.
+
+# Shared setup
+statement ok
+drop source if exists point_source cascade;
+
+system ok
+psql -v ON_ERROR_STOP=1 -c "
+    SELECT pg_terminate_backend(active_pid)
+    FROM pg_replication_slots
+    WHERE slot_name = 'point_issue_25517_slot' AND active_pid IS NOT NULL;
+    SELECT pg_sleep(1);
+    SELECT pg_drop_replication_slot(slot_name)
+    FROM pg_replication_slots
+    WHERE slot_name = 'point_issue_25517_slot';
+    DROP TABLE IF EXISTS public.test_point CASCADE;
+    CREATE TABLE public.test_point (
+        id int PRIMARY KEY,
+        name varchar,
+        location point
+    );
+    INSERT INTO public.test_point VALUES
+        (1, 'backfill-precise', point(16777217, 0.123456789012345)),
+        (2, 'backfill-null', NULL);
+"
+
+statement ok
+create source point_source with (
+  connector = 'postgres-cdc',
+  hostname = '${PGHOST:localhost}',
+  port = '${PGPORT:5432}',
+  username = '${PGUSER:$USER}',
+  password = '${PGPASSWORD:}',
+  database.name = '${PGDATABASE:postgres}',
+  schema.name = 'public',
+  slot.name = 'point_issue_25517_slot',
+  auto.schema.change = 'true'
+);
+
+# Test: explicit schema and snapshot backfill
+statement ok
+drop table if exists test_point_explicit;
+
+statement ok
+create table test_point_explicit (
+    id int primary key,
+    name varchar,
+    location struct<x double precision, y double precision>
+) from point_source table 'public.test_point';
+
+# The outer point representation is a struct, with float8 x/y fields.
+query T
+select c.data_type
+from rw_catalog.rw_columns c
+join rw_catalog.rw_tables t on c.relation_id = t.id
+where t.name = 'test_point_explicit' and c.name = 'location';
+----
+struct<x double precision, y double precision>
+
+# Test: reject a non-struct mapping
+statement error Incompatible data type of column location
+create table test_point_invalid_scalar (
+    id int primary key,
+    name varchar,
+    location varchar
+) from point_source table 'public.test_point';
+
+# Test: nested explicit-schema validation limitation
+# TODO: Enable this assertion when PostgreSQL CDC validates nested struct field types.
+# A point column should only accept struct<x double precision, y double precision>.
+#
+# statement error Incompatible data type of column location
+# create table test_point_invalid_coordinate_types (
+#     id int primary key,
+#     name varchar,
+#     location struct<x real, y real>
+# ) from point_source table 'public.test_point';
+
+# Test: incremental INSERT
+system ok
+psql -v ON_ERROR_STOP=1 -c "
+    INSERT INTO public.test_point VALUES
+        (3, 'inserted', point(-16777217, -0.987654321098765));
+"
+
+query ITRRTRRTT retry 10 backoff 1s
+select
+    ours.id,
+    ours.name,
+    (ours.location).x,
+    upstream.upstream_x,
+    (ours.location).x = upstream.upstream_x,
+    (ours.location).y,
+    upstream.upstream_y,
+    (ours.location).y = upstream.upstream_y,
+    ours.location is not null
+from test_point_explicit as ours
+join (
+    select * from postgres_query(
+        '${PGHOST:localhost}',
+        '${PGPORT:5432}',
+        '${PGUSER:$USER}',
+        '${PGPASSWORD:}',
+        '${PGDATABASE:postgres}',
+        'select id, location[0]::float8, location[1]::float8 from public.test_point where id = 3'
+    )
+) as upstream(id, upstream_x, upstream_y) on ours.id = upstream.id;
+----
+3 inserted -16777217 -16777217 t -0.987654321098765 -0.987654321098765 t t
+
+# Test: incremental UPDATE
+system ok
+psql -v ON_ERROR_STOP=1 -c "
+    UPDATE public.test_point
+    SET name = 'updated',
+        location = point(9007199254740991, 0.0000000000000002220446049250313)
+    WHERE id = 1;
+"
+
+query ITRRTRRTT retry 10 backoff 1s
+select
+    ours.id,
+    ours.name,
+    (ours.location).x,
+    upstream.upstream_x,
+    (ours.location).x = upstream.upstream_x,
+    (ours.location).y,
+    upstream.upstream_y,
+    (ours.location).y = upstream.upstream_y,
+    ours.location is not null
+from test_point_explicit as ours
+join (
+    select * from postgres_query(
+        '${PGHOST:localhost}',
+        '${PGPORT:5432}',
+        '${PGUSER:$USER}',
+        '${PGPASSWORD:}',
+        '${PGDATABASE:postgres}',
+        'select id, location[0]::float8, location[1]::float8 from public.test_point where id = 1'
+    )
+) as upstream(id, upstream_x, upstream_y) on ours.id = upstream.id;
+----
+1 updated 9007199254740991 9007199254740991 t 2.220446049250313e-16 2.220446049250313e-16 t t
+
+# Test: incremental DELETE
+system ok
+psql -v ON_ERROR_STOP=1 -c "DELETE FROM public.test_point WHERE id = 2;"
+
+query I retry 10 backoff 1s
+select count(*) from test_point_explicit where id = 2;
+----
+0
+
+# Test: automatic schema discovery
+statement ok
+drop table if exists test_point_auto_discovery_rw;
+
+statement ok
+create table test_point_auto_discovery_rw (*)
+from point_source table 'public.test_point';
+
+query T
+select c.data_type
+from rw_catalog.rw_columns c
+join rw_catalog.rw_tables t on c.relation_id = t.id
+where t.name = 'test_point_auto_discovery_rw' and c.name = 'location';
+----
+struct<x double precision, y double precision>
+
+query IRRTRRT retry 10 backoff 1s
+select
+    ours.id,
+    (ours.location).x,
+    upstream.upstream_x,
+    (ours.location).x = upstream.upstream_x,
+    (ours.location).y,
+    upstream.upstream_y,
+    (ours.location).y = upstream.upstream_y
+from test_point_auto_discovery_rw as ours
+join (
+    select * from postgres_query(
+        '${PGHOST:localhost}',
+        '${PGPORT:5432}',
+        '${PGUSER:$USER}',
+        '${PGPASSWORD:}',
+        '${PGDATABASE:postgres}',
+        'select id, location[0]::float8, location[1]::float8 from public.test_point where id = 1'
+    )
+) as upstream(id, upstream_x, upstream_y) on ours.id = upstream.id;
+----
+1 9007199254740991 9007199254740991 t 2.220446049250313e-16 2.220446049250313e-16 t
+
+# Test: automatic schema change
+system ok
+psql -v ON_ERROR_STOP=1 -c "
+    DROP TABLE IF EXISTS public.test_point_schema_change CASCADE;
+    CREATE TABLE public.test_point_schema_change (
+        id int PRIMARY KEY,
+        name varchar
+    );
+    INSERT INTO public.test_point_schema_change VALUES (1, 'before');
+"
+
+statement ok
+drop table if exists test_point_schema_change_rw;
+
+statement ok
+create table test_point_schema_change_rw (*)
+from point_source table 'public.test_point_schema_change';
+
+system ok
+psql -v ON_ERROR_STOP=1 -c "
+    ALTER TABLE public.test_point_schema_change ADD COLUMN location point;
+    INSERT INTO public.test_point_schema_change VALUES
+        (2, 'after', point(16777217.25, -16777217.75));
+"
+
+query T retry 20 backoff 1s
+select c.data_type
+from rw_catalog.rw_columns c
+join rw_catalog.rw_tables t on c.relation_id = t.id
+where t.name = 'test_point_schema_change_rw' and c.name = 'location';
+----
+struct<x double precision, y double precision>
+
+query IRRTRRT retry 20 backoff 1s
+select
+    ours.id,
+    (ours.location).x,
+    upstream.upstream_x,
+    (ours.location).x = upstream.upstream_x,
+    (ours.location).y,
+    upstream.upstream_y,
+    (ours.location).y = upstream.upstream_y
+from test_point_schema_change_rw as ours
+join (
+    select * from postgres_query(
+        '${PGHOST:localhost}',
+        '${PGPORT:5432}',
+        '${PGUSER:$USER}',
+        '${PGPASSWORD:}',
+        '${PGDATABASE:postgres}',
+        'select id, location[0]::float8, location[1]::float8 from public.test_point_schema_change where id = 2'
+    )
+) as upstream(id, upstream_x, upstream_y) on ours.id = upstream.id;
+----
+2 16777217.25 16777217.25 t -16777217.75 -16777217.75 t
+
+# Teardown
+statement ok
+drop table if exists test_point_explicit;
+
+statement ok
+drop table if exists test_point_auto_discovery_rw;
+
+statement ok
+drop table if exists test_point_schema_change_rw;
+
+statement ok
+drop source if exists point_source;
+
+system ok
+psql -v ON_ERROR_STOP=1 -c "
+    SELECT pg_terminate_backend(active_pid)
+    FROM pg_replication_slots
+    WHERE slot_name = 'point_issue_25517_slot' AND active_pid IS NOT NULL;
+    SELECT pg_sleep(1);
+    SELECT pg_drop_replication_slot(slot_name)
+    FROM pg_replication_slots
+    WHERE slot_name = 'point_issue_25517_slot';
+    DROP TABLE IF EXISTS public.test_point CASCADE;
+    DROP TABLE IF EXISTS public.test_point_schema_change CASCADE;
+"

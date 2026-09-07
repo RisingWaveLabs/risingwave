@@ -111,7 +111,7 @@ adbc_core = { version = "0.23" }
 adbc_snowflake = { version = "0.23", default-features = false }
 apache-avro = { git = "https://github.com/risingwavelabs/avro-rs", rev = "1f2723802d4fb77b97fa084f7bb81e3b60b9e03f" }
 arc-swap = "1"
-arrow-udf-runtime = "0.9.0"
+arrow-udf-runtime = "0.10.0"
 async-openai = { version = "0.41.0", features = ["embedding"] }
 auto_enums = { version = "0.8", features = ["futures03", "tokio1"] }
 await-tree = { version = "0.3.2-alpha.2", features = ["serde", "attributes"] }
@@ -176,10 +176,10 @@ hashbrown0_16 = { package = "hashbrown", version = "0.16.1", features = [
 ] }
 hytra = "0.1"
 # branch dev_rebase_main_20260807
-iceberg = { git = "https://github.com/risingwavelabs/iceberg-rust.git", rev = "2768ccf8b1847a14162337d7ef7a76935881fbc8" }
-iceberg-catalog-glue = { git = "https://github.com/risingwavelabs/iceberg-rust.git", rev = "2768ccf8b1847a14162337d7ef7a76935881fbc8" }
-iceberg-catalog-rest = { git = "https://github.com/risingwavelabs/iceberg-rust.git", rev = "2768ccf8b1847a14162337d7ef7a76935881fbc8" }
-iceberg-storage-opendal = { git = "https://github.com/risingwavelabs/iceberg-rust.git", rev = "2768ccf8b1847a14162337d7ef7a76935881fbc8", features = [
+iceberg = { git = "https://github.com/risingwavelabs/iceberg-rust.git", rev = "cd6e1e6acbfb2e41c9af5b6faedaca5eb83f361c" }
+iceberg-catalog-glue = { git = "https://github.com/risingwavelabs/iceberg-rust.git", rev = "cd6e1e6acbfb2e41c9af5b6faedaca5eb83f361c" }
+iceberg-catalog-rest = { git = "https://github.com/risingwavelabs/iceberg-rust.git", rev = "cd6e1e6acbfb2e41c9af5b6faedaca5eb83f361c" }
+iceberg-storage-opendal = { git = "https://github.com/risingwavelabs/iceberg-rust.git", rev = "cd6e1e6acbfb2e41c9af5b6faedaca5eb83f361c", features = [
     "opendal-azblob",
     "opendal-azdls",
     "opendal-fs",

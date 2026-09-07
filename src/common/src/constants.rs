@@ -45,6 +45,18 @@ pub mod log_store {
     pub const SEQ_ID_COLUMN_TYPE: DataType = DataType::Int32;
     pub const ROW_OP_COLUMN_TYPE: DataType = DataType::Int16;
     pub const VNODE_COLUMN_TYPE: DataType = DataType::Int16;
+    pub const INSERT_OP_CODE: i16 = 1;
+
+    /// Encode an unsigned RisingWave epoch so that its signed integer ordering is preserved in
+    /// the log-store primary key.
+    pub const fn encode_epoch(epoch: u64) -> i64 {
+        epoch as i64 ^ (1i64 << 63)
+    }
+
+    /// Decode an epoch stored by [`encode_epoch`].
+    pub const fn decode_epoch(encoded_epoch: i64) -> u64 {
+        encoded_epoch as u64 ^ (1u64 << 63)
+    }
 
     pub mod v1 {
         use std::sync::LazyLock;

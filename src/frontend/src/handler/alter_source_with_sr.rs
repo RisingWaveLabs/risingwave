@@ -198,9 +198,25 @@ fn get_format_encode_from_source(source: &SourceCatalog) -> Result<FormatEncodeO
         stmt: CreateSourceStatement { format_encode, .. },
     } = stmt
     else {
-        unreachable!()
+        return Err(ErrorCode::InternalError(format!(
+            "source \"{}\" has a non-CREATE SOURCE definition",
+            source.name
+        ))
+        .into());
     };
     Ok(format_encode.into_v2_with_warning())
+}
+
+fn reject_associated_table(source: &SourceCatalog) -> Result<()> {
+    if source.associated_table_id.is_some() {
+        return Err(ErrorCode::NotSupported(
+            "alter table with connector using ALTER SOURCE statement".to_owned(),
+            "try to use ALTER TABLE instead".to_owned(),
+        )
+        .into());
+    }
+
+    Ok(())
 }
 
 pub async fn handler_refresh_schema(
@@ -208,6 +224,7 @@ pub async fn handler_refresh_schema(
     name: ObjectName,
 ) -> Result<RwPgResponse> {
     let source = fetch_source_catalog_with_db_schema_id(&handler_args.session, &name)?;
+    reject_associated_table(&source)?;
     let format_encode = get_format_encode_from_source(&source)?;
     handle_alter_source_with_sr(handler_args, name, format_encode).await
 }
@@ -221,13 +238,7 @@ pub async fn handle_alter_source_with_sr(
     let source = fetch_source_catalog_with_db_schema_id(&session, &name)?;
     let mut source = source.as_ref().clone();
 
-    if source.associated_table_id.is_some() {
-        return Err(ErrorCode::NotSupported(
-            "alter table with connector using ALTER SOURCE statement".to_owned(),
-            "try to use ALTER TABLE instead".to_owned(),
-        )
-        .into());
-    };
+    reject_associated_table(&source)?;
 
     check_format_encode(&source, &format_encode)?;
 
@@ -323,6 +334,32 @@ pub mod tests {
 
     use crate::catalog::root_catalog::SchemaPath;
     use crate::test_utils::{LocalFrontend, PROTO_FILE_DATA, create_proto_file};
+
+    #[tokio::test]
+    async fn test_refresh_schema_rejects_associated_table() {
+        let proto_file = create_proto_file(PROTO_FILE_DATA);
+        let sql = format!(
+            r#"CREATE TABLE t
+            WITH (
+                connector = 'kafka',
+                topic = 'test-topic',
+                properties.bootstrap.server = 'localhost:29092'
+            )
+            FORMAT PLAIN ENCODE PROTOBUF (
+                message = '.test.TestRecord',
+                schema.location = 'file://{}'
+            )"#,
+            proto_file.path().to_str().unwrap()
+        );
+        let frontend = LocalFrontend::new(Default::default()).await;
+        frontend.run_sql(sql).await.unwrap();
+
+        let error = frontend
+            .run_sql("ALTER SOURCE t REFRESH SCHEMA")
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("try to use ALTER TABLE instead"));
+    }
 
     #[tokio::test]
     async fn test_alter_source_with_sr_handler() {

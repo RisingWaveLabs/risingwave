@@ -14,10 +14,31 @@
 
 use itertools::Itertools;
 use risingwave_common::array::*;
-use risingwave_common::types::DefaultOrdered;
+use risingwave_common::util::sort_util::{OrderType, cmp_datum};
 use risingwave_expr::function;
 
 #[function("array_sort(anyarray) -> anyarray")]
 pub fn array_sort(array: ListRef<'_>, writer: &mut impl risingwave_common::array::ListWrite) {
-    writer.write_iter(array.iter().map(DefaultOrdered).sorted().map(|v| v.0));
+    array_sort_with_desc_and_nulls(array, false, false, writer);
+}
+
+#[function("array_sort(anyarray, boolean) -> anyarray")]
+pub fn array_sort_with_desc(
+    array: ListRef<'_>,
+    descending: bool,
+    writer: &mut impl risingwave_common::array::ListWrite,
+) {
+    array_sort_with_desc_and_nulls(array, descending, false, writer)
+}
+
+#[function("array_sort(anyarray, boolean, boolean) -> anyarray")]
+pub fn array_sort_with_desc_and_nulls(
+    array: ListRef<'_>,
+    descending: bool,
+    nulls_first: bool,
+    writer: &mut impl risingwave_common::array::ListWrite,
+) {
+    let order = OrderType::from_bools(Some(!descending), Some(nulls_first));
+
+    writer.write_iter(array.iter().sorted_by(|a, b| cmp_datum(*a, *b, order)));
 }

@@ -145,6 +145,11 @@ pub const CDC_TABLE_NAME_COLUMN_NAME: &str = "_rw_table_name";
 pub const ICEBERG_SOURCE_PREFIX: &str = "__iceberg_source_";
 pub const ICEBERG_SINK_PREFIX: &str = "__iceberg_sink_";
 
+/// Iceberg snapshot summary property containing the highest RisingWave epoch committed by the
+/// sink. Append-only Iceberg engine batch reads use it to exclude committed rows from the sink
+/// log store.
+pub const RISINGWAVE_ICEBERG_COMMIT_EPOCH: &str = "risingwave.commit.epoch";
+
 /// The local system catalog reader in the frontend node.
 pub trait SysCatalogReader: Sync + Send + 'static {
     /// Reads the data of the system catalog table.

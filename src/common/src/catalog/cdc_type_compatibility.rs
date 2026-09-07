@@ -150,6 +150,9 @@ fn postgres_source_column_type_compatible(
     // DATA_TYPE, such as ARRAY or USER-DEFINED, and is lowercased by the public entry point. For
     // auto schema change, meta only has the already-mapped RW type, so callers pass synthetic
     // candidates below that intentionally reuse these normalized validation tokens.
+    // Keep these compatibility rules aligned with `pg_type_to_rw_type` in
+    // `src/connector/src/source/cdc/external/postgres.rs`, which chooses the canonical RW type
+    // during schema discovery and schema changes.
     match postgres_type {
         "boolean" => rw_type == PbTypeName::Boolean,
         "bit" => char_max_length.is_none_or(|length| length == 1) && rw_type == PbTypeName::Boolean,

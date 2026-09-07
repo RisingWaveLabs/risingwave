@@ -83,6 +83,7 @@ pub async fn cpu_profile(
                 Ok(ProfilingResponse { result }) => {
                     let mut file = File::create(dir_path_ref.join(svg_file_name)).await?;
                     file.write_all(&result).await?;
+                    file.flush().await?;
                 }
                 Err(err) => {
                     tracing::error!(

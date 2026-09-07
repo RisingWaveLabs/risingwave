@@ -216,28 +216,28 @@ impl IcebergCompactionManager {
             return Ok(());
         }
 
-        let processing_gc_watermark_snapshot = {
+        let active_attempt_gc_watermark_snapshot = {
             let guard = self.inner.read();
             guard
                 .sink_schedules
                 .get(&sink_id)
-                .and_then(|track| track.processing_gc_watermark_snapshot())
+                .and_then(|track| track.active_attempt_gc_watermark_snapshot())
                 .map(|snapshot| snapshot.cloned())
         };
 
         let mut snapshot_expiration_timestamp_ms =
             snapshot_expiration_cutoff_ms(&iceberg_config, now);
 
-        // Outer `None` means no active compaction task. Inner `None` means an
-        // active task exists without a safe snapshot watermark, so GC skips.
-        match processing_gc_watermark_snapshot {
+        // Outer `None` means there is no active compaction attempt. Inner `None`
+        // means an active attempt has no safe snapshot watermark, so GC skips.
+        match active_attempt_gc_watermark_snapshot {
             None => {}
             Some(None) => {
                 tracing::info!(
                     catalog_name = iceberg_config.catalog_name(),
                     table_name = iceberg_config.full_table_name()?.to_string(),
                     %sink_id,
-                    "Skip snapshots expiration because an iceberg compaction task has no observed GC watermark",
+                    "Skip snapshot expiration because an active iceberg compaction attempt has no observed GC watermark",
                 );
                 return Ok(());
             }
