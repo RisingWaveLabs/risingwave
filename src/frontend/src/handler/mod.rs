@@ -71,6 +71,7 @@ mod alter_utils;
 mod alter_watermark;
 mod backup;
 pub mod cancel_job;
+pub(crate) mod cdc;
 pub mod close_cursor;
 mod comment;
 pub mod create_aggregate;

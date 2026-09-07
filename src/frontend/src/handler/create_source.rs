@@ -93,12 +93,14 @@ use crate::error::ErrorCode::{self, Deprecated, InvalidInputSyntax, NotSupported
 use crate::error::{Result, RwError};
 use crate::expr::{Expr, ExprRewriter, SessionTimezone};
 use crate::handler::HandlerArgs;
+use crate::handler::cdc::{
+    bind_cdc_table_schema, bind_cdc_table_schema_externally, derive_with_options_for_cdc_table,
+    not_null_check_for_cdc_table, reject_pk_filtered_by_debezium_column_filter,
+    sanity_check_for_table_on_cdc_source,
+};
 use crate::handler::create_table::{
-    ColumnIdGenerator, bind_cdc_table_schema, bind_cdc_table_schema_externally,
-    bind_pk_and_row_id_on_relation, bind_sql_column_constraints, bind_sql_columns,
-    bind_sql_pk_names, bind_table_constraints, check_cdc_source_select_privilege,
-    derive_with_options_for_cdc_table, not_null_check_for_cdc_table,
-    reject_pk_filtered_by_debezium_column_filter, sanity_check_for_table_on_cdc_source,
+    ColumnIdGenerator, bind_pk_and_row_id_on_relation, bind_sql_column_constraints,
+    bind_sql_columns, bind_sql_pk_names, bind_table_constraints, check_cdc_source_select_privilege,
 };
 use crate::handler::util::{
     SourceSchemaCompatExt, check_connector_match_connection_type, ensure_connection_type_allowed,
