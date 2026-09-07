@@ -127,7 +127,7 @@ prost = { workspace = true, features = ["no-recursion-limit"] }
 prost-013 = { package = "prost", version = "0.13.4" }
 prost-reflect = { workspace = true }
 prost-types = { workspace = true }
-pulsar = { version = "6.7", default-features = false, features = [
+pulsar = { version = "6.8", default-features = false, features = [
     "tokio-runtime",
     "auth-oauth2",
     "lz4",
