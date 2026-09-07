@@ -1205,8 +1205,10 @@ impl MetaClient {
             .ok_or_else(|| anyhow!("wait version not set"))?)
     }
 
-    pub async fn recover(&self) -> Result<()> {
-        let request = RecoverRequest {};
+    pub async fn recover(&self, database_id: Option<DatabaseId>) -> Result<()> {
+        let request = RecoverRequest {
+            database_id: database_id.map(|id| id.as_raw_id()),
+        };
         self.inner.recover(request).await?;
         Ok(())
     }

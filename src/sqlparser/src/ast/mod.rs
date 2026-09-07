@@ -1721,8 +1721,10 @@ pub enum Statement {
     Wait(WaitTarget),
     /// Trigger meta backup.
     Backup,
-    /// Trigger stream job recover
-    Recover,
+    /// Trigger streaming job recovery globally or for a database.
+    Recover {
+        database_name: Option<ObjectName>,
+    },
     /// `USE <db_name>`
     ///
     /// Note: this is a RisingWave specific statement and used to switch the current database.
@@ -2527,8 +2529,11 @@ impl Statement {
                 write!(f, "KILL '{}'", worker_process_id)?;
                 Ok(())
             }
-            Statement::Recover => {
+            Statement::Recover { database_name } => {
                 write!(f, "RECOVER")?;
+                if let Some(database_name) = database_name {
+                    write!(f, " {}", database_name)?;
+                }
                 Ok(())
             }
             Statement::Use { db_name } => {

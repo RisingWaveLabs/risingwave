@@ -67,7 +67,7 @@ pub trait FrontendMetaClient: Send + Sync {
     async fn get_backup_job_status(&self, job_id: u64) -> Result<(BackupJobStatus, String)>;
     async fn delete_meta_snapshot(&self, snapshot_ids: &[u64]) -> Result<()>;
 
-    async fn recover(&self) -> Result<()>;
+    async fn recover(&self, database_id: Option<DatabaseId>) -> Result<()>;
 
     async fn cancel_creating_jobs(&self, jobs: PbJobs) -> Result<Vec<u32>>;
 
@@ -272,8 +272,8 @@ impl FrontendMetaClient for FrontendMetaClientImpl {
         self.0.delete_meta_snapshot(snapshot_ids).await
     }
 
-    async fn recover(&self) -> Result<()> {
-        self.0.recover().await
+    async fn recover(&self, database_id: Option<DatabaseId>) -> Result<()> {
+        self.0.recover(database_id).await
     }
 
     async fn cancel_creating_jobs(&self, infos: PbJobs) -> Result<Vec<u32>> {

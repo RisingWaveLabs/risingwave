@@ -225,6 +225,10 @@ impl CheckpointControl {
         })
     }
 
+    pub(crate) fn contains_database(&self, database_id: DatabaseId) -> bool {
+        self.databases.contains_key(&database_id)
+    }
+
     pub(crate) fn database_info(&self, database_id: DatabaseId) -> Option<&InflightDatabaseInfo> {
         self.databases
             .get(&database_id)

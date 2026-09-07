@@ -380,7 +380,9 @@ message ApplyThrottleResponse {
   common.Status status = 1;
 }
 
-message RecoverRequest {}
+message RecoverRequest {
+  optional uint32 database_id = 1;
+}
 
 message RecoverResponse {}
 

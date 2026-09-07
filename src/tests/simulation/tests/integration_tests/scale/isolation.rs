@@ -40,6 +40,44 @@ async fn assert_no_expected_global_recovery(session: &mut Session) -> Result<()>
 const MAX_HEARTBEAT_INTERVAL_SEC: u64 = 10;
 
 #[tokio::test]
+async fn test_adhoc_database_recovery() -> Result<()> {
+    let (_cluster, mut session) = prepare_isolation_env().await?;
+
+    session.run("use group1").await?;
+    session.run("create table t1 (v int)").await?;
+    session.run("use group2").await?;
+    session.run("create table t2 (v int)").await?;
+
+    let database_mapping = database_id_mapping(&mut session).await?;
+    let group1_database_id = database_mapping["group1"];
+    let group2_database_id = database_mapping["group2"];
+    let global_events_before = global_recovery_events(&mut session).await?;
+
+    session.run("recover group1").await?;
+
+    let mut database_events = database_recovery_events(&mut session).await?;
+    assert_eq!(
+        database_events.remove(&group1_database_id),
+        Some(vec![
+            DATABASE_RECOVERY_START.to_owned(),
+            DATABASE_RECOVERY_SUCCESS.to_owned(),
+        ])
+    );
+    assert!(!database_events.contains_key(&group2_database_id));
+    assert_eq!(
+        global_recovery_events(&mut session).await?,
+        global_events_before
+    );
+
+    session.run("use group1").await?;
+    session.run("insert into t1 values (1)").await?;
+    session.run("use group2").await?;
+    session.run("insert into t2 values (2)").await?;
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn test_isolation_simple_two_databases() -> Result<()> {
     let (cluster, mut session) = prepare_isolation_env().await?;
 

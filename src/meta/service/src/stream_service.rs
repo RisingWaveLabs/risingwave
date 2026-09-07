@@ -16,6 +16,7 @@ use std::collections::{HashMap, HashSet};
 
 use chrono::DateTime;
 use itertools::Itertools;
+use risingwave_common::catalog::DatabaseId;
 use risingwave_common::id::JobId;
 use risingwave_common::secret::LocalSecretManager;
 use risingwave_common::util::stream_graph_visitor::visit_stream_node_mut;
@@ -590,9 +591,10 @@ impl StreamManagerService for StreamServiceImpl {
 
     async fn recover(
         &self,
-        _request: Request<RecoverRequest>,
+        request: Request<RecoverRequest>,
     ) -> Result<Response<RecoverResponse>, Status> {
-        self.barrier_manager.adhoc_recovery().await?;
+        let database_id = request.into_inner().database_id.map(DatabaseId::new);
+        self.barrier_manager.adhoc_recovery(database_id).await?;
         Ok(Response::new(RecoverResponse {}))
     }
 

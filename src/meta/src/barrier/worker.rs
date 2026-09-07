@@ -97,6 +97,9 @@ pub(super) struct GlobalBarrierWorker<C> {
 
     checkpoint_control: CheckpointControl,
 
+    /// Callers waiting for an explicitly requested database recovery to finish.
+    database_recovery_waiters: HashMap<DatabaseId, Vec<Sender<()>>>,
+
     /// Command that has been collected but is still completing.
     /// The join handle of the completing future is stored.
     completing_task: CompletingTask,
@@ -171,6 +174,7 @@ impl<C: GlobalBarrierWorkerContext> GlobalBarrierWorker<C> {
             context,
             env,
             checkpoint_control,
+            database_recovery_waiters: HashMap::new(),
             completing_task: CompletingTask::None,
             request_rx,
             active_streaming_nodes,
@@ -536,10 +540,47 @@ impl<C: GlobalBarrierWorkerContext> GlobalBarrierWorker<C> {
                                 }
                             }
                             // Handle adhoc recovery triggered by user.
-                            BarrierManagerRequest::AdhocRecovery(sender) => {
-                                self.adhoc_recovery().await;
-                                if sender.send(()).is_err() {
-                                    warn!("failed to notify finish of adhoc recovery");
+                            BarrierManagerRequest::AdhocRecovery {
+                                database_id,
+                                sender,
+                            } => {
+                                if let Some(database_id) = database_id {
+                                    if self.checkpoint_control.contains_database(database_id) {
+                                        self.database_recovery_waiters
+                                            .entry(database_id)
+                                            .or_default()
+                                            .push(sender);
+                                        if let Err(err) = self.adhoc_database_recovery(database_id).await {
+                                            self.failure_recovery(err).await;
+                                        }
+                                    } else {
+                                        // A database without streaming jobs has no checkpoint
+                                        // control to recover. Still abort any concurrent creation
+                                        // before marking its scheduler ready again.
+                                        self.context.abort_and_mark_blocked(
+                                            Some(database_id),
+                                            RecoveryReason::Adhoc,
+                                        );
+                                        self.context
+                                            .notify_creating_job_failed(
+                                                Some(database_id),
+                                                format!(
+                                                    "adhoc recovery triggered for database {}",
+                                                    database_id
+                                                ),
+                                            )
+                                            .await;
+                                        self.context
+                                            .mark_ready(MarkReadyOptions::Database(database_id));
+                                        if sender.send(()).is_err() {
+                                            warn!(%database_id, "failed to notify finish of adhoc database recovery");
+                                        }
+                                    }
+                                } else {
+                                    self.adhoc_recovery().await;
+                                    if sender.send(()).is_err() {
+                                        warn!("failed to notify finish of adhoc recovery");
+                                    }
                                 }
                             }
                             BarrierManagerRequest::UpdateDatabaseBarrier( UpdateDatabaseBarrierRequest {
@@ -675,6 +716,7 @@ impl<C: GlobalBarrierWorkerContext> GlobalBarrierWorker<C> {
                                             .await?;
                                         // Mark ready only after the refill runtime state is refreshed.
                                         self.context.mark_ready(MarkReadyOptions::Database(database_id));
+                                        self.notify_database_recovery_waiters(database_id);
                                     }
                                     Err(e) => {
                                         entering_initializing.fail_reload_runtime_info(e);
@@ -689,6 +731,7 @@ impl<C: GlobalBarrierWorkerContext> GlobalBarrierWorker<C> {
                                     .await?;
                                 self.context
                                     .mark_ready(MarkReadyOptions::Database(database_id));
+                                self.notify_database_recovery_waiters(database_id);
                             }
                             CheckpointControlEvent::BatchRefreshTrigger { database_id, job_id } => {
                                 self.handle_batch_refresh_trigger(database_id, job_id).await?;
@@ -989,6 +1032,56 @@ impl<C: GlobalBarrierWorkerContext> GlobalBarrierWorker<C> {
             .instrument(span)
             .await;
     }
+
+    async fn adhoc_database_recovery(&mut self, database_id: DatabaseId) -> MetaResult<()> {
+        let Some(entering_recovery) = self.checkpoint_control.on_adhoc_recovery(database_id) else {
+            // A recovery is already in progress. The caller has been registered
+            // above and will be notified when that recovery finishes.
+            return Ok(());
+        };
+
+        self.context
+            .abort_and_mark_blocked(Some(database_id), RecoveryReason::Adhoc);
+        self.context
+            .notify_creating_job_failed(
+                Some(database_id),
+                format!("adhoc recovery triggered for database {}", database_id),
+            )
+            .await;
+        let output = self.completing_task.wait_completing_task().await?;
+        entering_recovery.enter(output, &mut self.partial_graph_manager);
+        Ok(())
+    }
+
+    fn notify_database_recovery_waiters(&mut self, database_id: DatabaseId) {
+        for sender in self
+            .database_recovery_waiters
+            .remove(&database_id)
+            .unwrap_or_default()
+        {
+            if sender.send(()).is_err() {
+                warn!(%database_id, "failed to notify finish of adhoc database recovery");
+            }
+        }
+    }
+
+    fn notify_finished_database_recovery_waiters(&mut self) {
+        let recovering_databases = self
+            .checkpoint_control
+            .recovering_databases()
+            .collect::<HashSet<_>>();
+        for (database_id, senders) in std::mem::take(&mut self.database_recovery_waiters) {
+            if recovering_databases.contains(&database_id) {
+                self.database_recovery_waiters.insert(database_id, senders);
+            } else {
+                for sender in senders {
+                    if sender.send(()).is_err() {
+                        warn!(%database_id, "failed to notify finish of adhoc database recovery");
+                    }
+                }
+            }
+        }
+    }
 }
 
 impl<C> GlobalBarrierWorker<C> {
@@ -1092,6 +1185,7 @@ impl<C: GlobalBarrierWorkerContext> GlobalBarrierWorker<C> {
         self.context.mark_ready(MarkReadyOptions::Global {
             blocked_databases: self.checkpoint_control.recovering_databases().collect(),
         });
+        self.notify_finished_database_recovery_waiters();
     }
 
     #[await_tree::instrument("recovery({recovery_reason})")]
@@ -1374,8 +1468,11 @@ impl<C: GlobalBarrierWorkerContext> GlobalBarrierWorker<C> {
                         BarrierManagerRequest::GetCdcProgress(tx) => {
                             let _ = tx.send(Err(anyhow!("cluster under recovery[{}]", recovery_reason).into()));
                         }
-                        BarrierManagerRequest::AdhocRecovery(tx) => {
-                            recover_txs.push(tx);
+                        BarrierManagerRequest::AdhocRecovery {
+                            database_id,
+                            sender,
+                        } => {
+                            recover_txs.push((database_id, sender));
                         }
                         BarrierManagerRequest::UpdateDatabaseBarrier(request) => {
                             update_barrier_requests.push(request);
@@ -1411,8 +1508,15 @@ impl<C: GlobalBarrierWorkerContext> GlobalBarrierWorker<C> {
             let _ = sender.send(());
         }
 
-        for tx in recover_txs {
-            let _ = tx.send(());
+        for (database_id, sender) in recover_txs {
+            if let Some(database_id) = database_id {
+                self.database_recovery_waiters
+                    .entry(database_id)
+                    .or_default()
+                    .push(sender);
+            } else {
+                let _ = sender.send(());
+            }
         }
 
         let recovering_databases = self

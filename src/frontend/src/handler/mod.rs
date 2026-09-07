@@ -696,7 +696,9 @@ pub async fn handle(
         Statement::DeleteMetaSnapshots { snapshot_ids } => {
             delete_meta_snapshot::handle_delete_meta_snapshots(handler_args, snapshot_ids).await
         }
-        Statement::Recover => recover::handle_recover(handler_args).await,
+        Statement::Recover { database_name } => {
+            recover::handle_recover(handler_args, database_name).await
+        }
         Statement::SetVariable {
             local: _,
             variable,

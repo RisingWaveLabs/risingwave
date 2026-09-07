@@ -124,10 +124,13 @@ impl GlobalBarrierManager {
         rx.await.context("failed to receive get ddl progress")?
     }
 
-    pub async fn adhoc_recovery(&self) -> MetaResult<()> {
+    pub async fn adhoc_recovery(&self, database_id: Option<DatabaseId>) -> MetaResult<()> {
         let (tx, rx) = oneshot::channel();
         self.request_tx
-            .send(BarrierManagerRequest::AdhocRecovery(tx))
+            .send(BarrierManagerRequest::AdhocRecovery {
+                database_id,
+                sender: tx,
+            })
             .context("failed to send adhoc recovery request")?;
         rx.await.context("failed to wait adhoc recovery")?;
         Ok(())

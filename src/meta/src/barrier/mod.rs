@@ -133,7 +133,10 @@ pub(crate) enum BarrierManagerRequest {
     GetBackfillProgress(Sender<MetaResult<HashMap<JobId, BackfillProgress>>>),
     GetFragmentBackfillProgress(Sender<MetaResult<Vec<FragmentBackfillProgress>>>),
     GetCdcProgress(Sender<MetaResult<HashMap<JobId, CdcProgress>>>),
-    AdhocRecovery(Sender<()>),
+    AdhocRecovery {
+        database_id: Option<DatabaseId>,
+        sender: Sender<()>,
+    },
     UpdateDatabaseBarrier(UpdateDatabaseBarrierRequest),
 }
 

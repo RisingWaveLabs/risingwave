@@ -1349,7 +1349,7 @@ impl FrontendMetaClient for MockFrontendMetaClient {
         unimplemented!()
     }
 
-    async fn recover(&self) -> RpcResult<()> {
+    async fn recover(&self, _database_id: Option<DatabaseId>) -> RpcResult<()> {
         unimplemented!()
     }
 

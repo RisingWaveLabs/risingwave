@@ -327,6 +327,21 @@ impl DatabaseStatusAction<'_, EnterReset> {
 }
 
 impl CheckpointControl {
+    pub(crate) fn on_adhoc_recovery(
+        &mut self,
+        database_id: DatabaseId,
+    ) -> Option<DatabaseStatusAction<'_, EnterReset>> {
+        // The barrier worker calls this only after `contains_database` succeeds. This lookup runs
+        // before the recovery path can suspend, so no barrier event can remove it in between.
+        match self.databases.get(&database_id).expect("should exist") {
+            DatabaseCheckpointControlStatus::Running(_) => {
+                Some(self.new_database_status_action(database_id, EnterReset))
+            }
+            // An overlapping request should wait for the ongoing recovery instead of restarting it.
+            DatabaseCheckpointControlStatus::Recovering(_) => None,
+        }
+    }
+
     pub(crate) fn on_report_failure(
         &mut self,
         database_id: DatabaseId,

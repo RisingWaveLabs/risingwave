@@ -348,7 +348,11 @@ impl Parser<'_> {
                 Keyword::FLUSH => Ok(Statement::Flush),
                 Keyword::WAIT => Ok(self.parse_wait()?),
                 Keyword::BACKUP => Ok(Statement::Backup),
-                Keyword::RECOVER => Ok(Statement::Recover),
+                Keyword::RECOVER => Ok(Statement::Recover {
+                    database_name: matches!(self.peek_token().token, Token::Word(_))
+                        .then(|| self.parse_object_name())
+                        .transpose()?,
+                }),
                 Keyword::USE => Ok(self.parse_use()?),
                 Keyword::VACUUM => Ok(self.parse_vacuum()?),
                 _ => self.expected_at(checkpoint, "statement"),

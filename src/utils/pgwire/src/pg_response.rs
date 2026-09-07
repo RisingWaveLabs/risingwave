@@ -339,7 +339,7 @@ impl StatementType {
             Statement::Wait(_) => Ok(StatementType::WAIT),
             Statement::Backup => Ok(StatementType::BACKUP),
             Statement::DeleteMetaSnapshots { .. } => Ok(StatementType::DELETE_META_SNAPSHOTS),
-            Statement::Recover => Ok(StatementType::RECOVER),
+            Statement::Recover { .. } => Ok(StatementType::RECOVER),
             Statement::Use { .. } => Ok(StatementType::USE),
             Statement::Vacuum { .. } => Ok(StatementType::VACUUM),
             _ => Err("unsupported statement type".to_owned()),

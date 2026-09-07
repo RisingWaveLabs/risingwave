@@ -27,6 +27,28 @@ use risingwave_sqlparser::parser::ParserError;
 use risingwave_sqlparser::test_utils::*;
 
 #[test]
+fn parse_recover() {
+    assert_matches!(
+        verified_stmt("RECOVER"),
+        Statement::Recover {
+            database_name: None
+        }
+    );
+    assert_matches!(
+        verified_stmt("RECOVER my_database"),
+        Statement::Recover {
+            database_name: Some(name)
+        } if name.to_string() == "my_database"
+    );
+    assert_matches!(
+        verified_stmt("RECOVER \"Database.Name\""),
+        Statement::Recover {
+            database_name: Some(name)
+        } if name.to_string() == "\"Database.Name\""
+    );
+}
+
+#[test]
 fn parse_insert_values() {
     let row = vec![
         Expr::Value(number("1")),
