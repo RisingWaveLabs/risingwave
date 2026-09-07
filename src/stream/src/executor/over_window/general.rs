@@ -296,7 +296,7 @@ impl<S: StateStore> OverWindowExecutor<S> {
                     Some(StateCleaning {
                         watermark_col_idx: args.order_key_indices[0],
                         stale_rows_at_front: args.order_key_order_types[0].is_ascending(),
-                        n_retain: n_preceding + n_following,
+                        n_retain: n_preceding.saturating_add(n_following),
                     })
                 }
                 _ => {
@@ -868,5 +868,116 @@ impl<'a> RowConverter<'a> {
                 .into_owned_row()
                 .into(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ops::Bound;
+
+    use futures::TryStreamExt;
+    use risingwave_common::catalog::{ColumnDesc, ColumnId, TableId};
+    use risingwave_common::util::epoch::{EpochPair, test_epoch};
+    use risingwave_storage::memory::MemoryStateStore;
+    use risingwave_storage::store::PrefetchOptions;
+
+    use super::*;
+    use crate::common::table::test_utils::gen_pbtable;
+
+    #[tokio::test]
+    async fn test_state_cleaning_large_retention() {
+        for order_type in [OrderType::ascending(), OrderType::descending()] {
+            for cached in [true, false] {
+                // Both are valid sums of two Int64 ROWS offsets on 64-bit targets.
+                // The first makes the old collection limit wrap to 1, so even three
+                // rows catch the erroneous deletion with overflow checks disabled.
+                for n_retain in [usize::MAX - 65_534, usize::MAX - 1] {
+                    let mut table = StateTable::from_table_catalog(
+                        &gen_pbtable(
+                            TableId::new(1),
+                            vec![ColumnDesc::unnamed(ColumnId::new(0), DataType::Int64)],
+                            vec![order_type],
+                            vec![0],
+                            0,
+                        ),
+                        MemoryStateStore::new(),
+                        None,
+                    )
+                    .await;
+                    table
+                        .init_epoch(EpochPair::new_test_epoch(test_epoch(1)))
+                        .await
+                        .unwrap();
+                    let rows = [10i64, 20, 30].map(|value| OwnedRow::new(vec![Some(value.into())]));
+                    let row_conv = RowConverter {
+                        state_key_to_table_sub_pk_proj: &[0],
+                        order_key_indices: &[0],
+                        order_key_data_types: &[DataType::Int64],
+                        order_key_order_types: &[order_type],
+                        input_stream_key_indices: &[0],
+                    };
+                    let mut cache = if cached {
+                        PartitionCache::new_without_sentinels()
+                    } else {
+                        PartitionCache::new()
+                    };
+                    for row in &rows {
+                        table.insert(row.clone());
+                        if cached {
+                            cache.insert(
+                                CacheKey::from(row_conv.row_to_state_key(row).unwrap()),
+                                row.clone(),
+                            );
+                        }
+                    }
+                    table
+                        .commit_for_test(EpochPair::new_test_epoch(test_epoch(2)))
+                        .await
+                        .unwrap();
+
+                    let partition_key = OwnedRow::empty();
+                    let calls = Calls::new(vec![]);
+                    let mut partition = OverPartition::new(
+                        &partition_key,
+                        &mut cache,
+                        CachePolicy::Full,
+                        &calls,
+                        row_conv,
+                    );
+                    let cleaning = StateCleaning {
+                        watermark_col_idx: 0,
+                        stale_rows_at_front: order_type.is_ascending(),
+                        n_retain,
+                    };
+                    assert_eq!(
+                        partition
+                            .clean_stale_rows(&mut table, &cleaning, &100i64.into())
+                            .await
+                            .unwrap(),
+                        (0, false),
+                        "order={order_type:?}, cached={cached}, n_retain={n_retain}",
+                    );
+                    table
+                        .commit_for_test(EpochPair::new_test_epoch(test_epoch(3)))
+                        .await
+                        .unwrap();
+                    let range: (Bound<OwnedRow>, Bound<OwnedRow>) =
+                        (Bound::Unbounded, Bound::Unbounded);
+                    let remaining: Vec<OwnedRow> = table
+                        .iter_with_prefix(&partition_key, &range, PrefetchOptions::default())
+                        .await
+                        .unwrap()
+                        .try_collect()
+                        .await
+                        .unwrap();
+                    let mut expected = rows.to_vec();
+                    if !order_type.is_ascending() {
+                        expected.reverse();
+                    }
+                    assert_eq!(remaining, expected);
+                    assert_eq!(cache.normal_len(), if cached { rows.len() } else { 0 });
+                }
+            }
+        }
     }
 }

@@ -376,7 +376,7 @@ impl<'a, S: StateStore> OverPartition<'a, S> {
         // the watermark boundary. If the limit is reached, there're at least `n_retain` collected
         // stale rows closer to the boundary than the first `MAX_STALE_ROWS_TO_DELETE_PER_ROUND`
         // ones, so it's safe to delete the latter.
-        let max_to_collect = MAX_STALE_ROWS_TO_DELETE_PER_ROUND + cleaning.n_retain;
+        let max_to_collect = MAX_STALE_ROWS_TO_DELETE_PER_ROUND.saturating_add(cleaning.n_retain);
 
         let cache_covers_stale_end = if cleaning.stale_rows_at_front {
             !self.range_cache.left_is_sentinel()
