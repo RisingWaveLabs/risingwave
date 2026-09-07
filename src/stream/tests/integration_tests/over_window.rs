@@ -12,14 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::ops::Bound;
 use std::sync::atomic::Ordering;
 
+use futures::TryStreamExt;
 use risingwave_common::config::streaming::OverWindowCachePolicy;
-use risingwave_common::util::epoch::test_epoch;
+use risingwave_common::row::{OwnedRow, Row};
+use risingwave_common::util::epoch::{EpochPair, test_epoch};
 use risingwave_expr::aggregate::{AggArgs, PbAggKind};
 use risingwave_expr::window_function::{
     Frame, FrameBound, FrameExclusion, WindowFuncCall, WindowFuncKind,
 };
+use risingwave_pb::catalog::PbTable;
+use risingwave_storage::store::PrefetchOptions;
 use risingwave_stream::common::table::test_utils::gen_pbtable;
 use risingwave_stream::executor::monitor::StreamingMetrics;
 use risingwave_stream::executor::{OverWindowExecutor, OverWindowExecutorArgs};
@@ -45,24 +50,27 @@ async fn create_executor_with_watermark<S: StateStore>(
     watermark_epoch: Arc<AtomicU64>,
     metrics: Arc<StreamingMetrics>,
 ) -> (MessageSender, BoxedMessageStream) {
-    let input_schema = Schema::new(vec![
-        Field::unnamed(DataType::Int64),   // order key
-        Field::unnamed(DataType::Varchar), // partition key
-        Field::unnamed(DataType::Int64),   // pk
-        Field::unnamed(DataType::Int32),   // x
-    ]);
-    let input_stream_key = vec![2];
-    let partition_key_indices = vec![1];
-    let order_key_indices = vec![0];
-    let order_key_order_types = vec![OrderType::ascending()];
+    create_executor_inner(
+        calls,
+        store,
+        watermark_epoch,
+        metrics,
+        OverWindowCachePolicy::Recent,
+        false,
+    )
+    .await
+}
 
+/// State table schema = input schema (order key, partition key, pk, x) + window function outputs,
+/// state table pk = `partition key | order key | pk`.
+fn state_table_catalog(calls: &[WindowFuncCall]) -> PbTable {
     let mut table_columns = vec![
         ColumnDesc::unnamed(ColumnId::new(0), DataType::Int64), // order key
         ColumnDesc::unnamed(ColumnId::new(1), DataType::Varchar), // partition key
         ColumnDesc::unnamed(ColumnId::new(2), DataType::Int64), // pk
         ColumnDesc::unnamed(ColumnId::new(3), DataType::Int32), // x
     ];
-    for call in &calls {
+    for call in calls {
         table_columns.push(ColumnDesc::unnamed(
             ColumnId::new(table_columns.len() as i32),
             call.return_type.clone(),
@@ -74,6 +82,33 @@ async fn create_executor_with_watermark<S: StateStore>(
         OrderType::ascending(),
         OrderType::ascending(),
     ];
+    gen_pbtable(
+        TableId::new(1),
+        table_columns,
+        table_order_types,
+        table_pk_indices,
+        0,
+    )
+}
+
+async fn create_executor_inner<S: StateStore>(
+    calls: Vec<WindowFuncCall>,
+    store: S,
+    watermark_epoch: Arc<AtomicU64>,
+    metrics: Arc<StreamingMetrics>,
+    cache_policy: OverWindowCachePolicy,
+    enable_state_cleaning: bool,
+) -> (MessageSender, BoxedMessageStream) {
+    let input_schema = Schema::new(vec![
+        Field::unnamed(DataType::Int64),   // order key
+        Field::unnamed(DataType::Varchar), // partition key
+        Field::unnamed(DataType::Int64),   // pk
+        Field::unnamed(DataType::Int32),   // x
+    ]);
+    let input_stream_key = vec![2];
+    let partition_key_indices = vec![1];
+    let order_key_indices = vec![0];
+    let order_key_order_types = vec![OrderType::ascending()];
 
     let output_schema = {
         let mut fields = input_schema.fields.clone();
@@ -83,18 +118,8 @@ async fn create_executor_with_watermark<S: StateStore>(
         Schema { fields }
     };
 
-    let state_table = StateTable::from_table_catalog(
-        &gen_pbtable(
-            TableId::new(1),
-            table_columns,
-            table_order_types,
-            table_pk_indices,
-            0,
-        ),
-        store,
-        None,
-    )
-    .await;
+    let state_table =
+        StateTable::from_table_catalog(&state_table_catalog(&calls), store, None).await;
 
     let (tx, source) = MockSource::channel();
     let source = source.into_executor(input_schema, input_stream_key.clone());
@@ -112,9 +137,31 @@ async fn create_executor_with_watermark<S: StateStore>(
         watermark_epoch,
         metrics,
         chunk_size: 1024,
-        cache_policy: OverWindowCachePolicy::Recent,
+        cache_policy,
+        enable_state_cleaning,
     });
     (tx, executor.boxed().execute())
+}
+
+/// Read the order keys of all rows of partition `p1` from the state table.
+async fn state_order_keys(store: MemoryStateStore, calls: &[WindowFuncCall]) -> Vec<i64> {
+    let mut table = StateTable::from_table_catalog(&state_table_catalog(calls), store, None).await;
+    table
+        .init_epoch(EpochPair::new_test_epoch(test_epoch(100)))
+        .await
+        .unwrap();
+    let partition_key = OwnedRow::new(vec![Some("p1".into())]);
+    let sub_range: (Bound<OwnedRow>, Bound<OwnedRow>) = (Bound::Unbounded, Bound::Unbounded);
+    let rows: Vec<OwnedRow> = table
+        .iter_with_prefix(&partition_key, &sub_range, PrefetchOptions::default())
+        .await
+        .unwrap()
+        .try_collect()
+        .await
+        .unwrap();
+    rows.iter()
+        .map(|row| row.datum_at(0).unwrap().into_int64())
+        .collect()
 }
 
 fn snapshot_options() -> SnapshotOptions {
@@ -753,4 +800,217 @@ async fn test_over_window_sum() {
         snapshot_options(),
     )
     .await;
+}
+
+/// Watermark-driven state cleaning: rows below the watermark that can never be accessed again are
+/// deleted from the state table at barriers, without affecting the outputs.
+#[tokio::test]
+async fn test_over_window_state_cleaning() {
+    for cache_policy in [OverWindowCachePolicy::Full, OverWindowCachePolicy::Recent] {
+        test_over_window_state_cleaning_inner(cache_policy).await;
+    }
+}
+
+async fn test_over_window_state_cleaning_inner(cache_policy: OverWindowCachePolicy) {
+    let store = MemoryStateStore::new();
+    let lru_watermark = Arc::new(AtomicU64::new(0));
+    let metrics = Arc::new(StreamingMetrics::unused());
+    let calls = vec![
+        // lag(x, 1)
+        WindowFuncCall {
+            kind: WindowFuncKind::Aggregate(PbAggKind::FirstValue.into()),
+            return_type: DataType::Int32,
+            args: AggArgs::from_iter([(DataType::Int32, 3)]),
+            ignore_nulls: false,
+            frame: Frame::rows(FrameBound::Preceding(1), FrameBound::Preceding(1)),
+        },
+        // lead(x, 1)
+        WindowFuncCall {
+            kind: WindowFuncKind::Aggregate(PbAggKind::FirstValue.into()),
+            return_type: DataType::Int32,
+            args: AggArgs::from_iter([(DataType::Int32, 3)]),
+            ignore_nulls: false,
+            frame: Frame::rows(FrameBound::Following(1), FrameBound::Following(1)),
+        },
+    ];
+    // 1 preceding row + 1 following row of the union frame, so 2 rows below the watermark are
+    // retained in each partition.
+    let create_executor = || {
+        create_executor_inner(
+            calls.clone(),
+            store.clone(),
+            lru_watermark.clone(),
+            metrics.clone(),
+            cache_policy,
+            true,
+        )
+    };
+
+    let (mut tx, mut stream) = create_executor().await;
+    tx.push_barrier(test_epoch(1), false);
+    stream.expect_barrier().await;
+
+    tx.push_chunk(StreamChunk::from_pretty(
+        " I  T  I   i
+        + 10 p1 100 10
+        + 20 p1 101 11
+        + 30 p1 102 12
+        + 40 p1 103 13",
+    ));
+    assert_eq!(
+        stream.expect_chunk().await,
+        StreamChunk::from_pretty(
+            " I  T  I   i  i  i
+            + 10 p1 100 10 .  11
+            + 20 p1 101 11 10 12
+            + 30 p1 102 12 11 13
+            + 40 p1 103 13 12 .",
+        )
+    );
+
+    // Rows 10, 20, 30 are below the watermark, the 2 closest ones (20, 30) are retained.
+    tx.push_watermark(0, DataType::Int64, 35i64.into());
+    tx.push_barrier(test_epoch(2), false);
+    stream.expect_barrier().await;
+    assert_eq!(
+        state_order_keys(store.clone(), &calls).await,
+        vec![20, 30, 40]
+    );
+
+    // New rows at the end of the partition only need the retained rows.
+    tx.push_chunk(StreamChunk::from_pretty(
+        " I  T  I   i
+        + 50 p1 104 14",
+    ));
+    assert_eq!(
+        stream.expect_chunk().await,
+        StreamChunk::from_pretty(
+            " I  T  I   i  i  i
+            U- 40 p1 103 13 12 .
+            U+ 40 p1 103 13 12 14
+            +  50 p1 104 14 13 .",
+        )
+    );
+
+    // Rows 20, 30, 40 are below the watermark, 30 and 40 are retained.
+    tx.push_watermark(0, DataType::Int64, 45i64.into());
+    tx.push_barrier(test_epoch(3), false);
+    stream.expect_barrier().await;
+    assert_eq!(
+        state_order_keys(store.clone(), &calls).await,
+        vec![30, 40, 50]
+    );
+
+    // Recovery. The range cache is rebuilt from the cleaned state table.
+    let (mut tx, mut stream) = create_executor().await;
+    tx.push_barrier(test_epoch(3), false);
+    stream.expect_barrier().await;
+
+    tx.push_chunk(StreamChunk::from_pretty(
+        " I  T  I   i
+        + 60 p1 105 15",
+    ));
+    assert_eq!(
+        stream.expect_chunk().await,
+        StreamChunk::from_pretty(
+            " I  T  I   i  i  i
+            U- 50 p1 104 14 13 .
+            U+ 50 p1 104 14 13 15
+            +  60 p1 105 15 14 .",
+        )
+    );
+
+    // Demand LRU eviction of all cached partitions at the next chunk boundary, so that the
+    // partition is not in the cache when being cleaned and the state table has to be scanned.
+    lru_watermark.store(u64::MAX, Ordering::Relaxed);
+
+    // An out-of-order row that is not below the watermark, inserted in the middle of the partition.
+    tx.push_chunk(StreamChunk::from_pretty(
+        " I  T  I   i
+        + 55 p1 106 20",
+    ));
+    assert_eq!(
+        stream.expect_chunk().await,
+        StreamChunk::from_pretty(
+            " I  T  I   i  i  i
+            U- 50 p1 104 14 13 15
+            U+ 50 p1 104 14 13 20
+            +  55 p1 106 20 14 15
+            U- 60 p1 105 15 14 .
+            U+ 60 p1 105 15 20 .",
+        )
+    );
+
+    // Rows 30, 40, 50, 55 are below the watermark, 50 and 55 are retained.
+    tx.push_watermark(0, DataType::Int64, 58i64.into());
+    tx.push_barrier(test_epoch(4), false);
+    stream.expect_barrier().await;
+    assert_eq!(
+        state_order_keys(store.clone(), &calls).await,
+        vec![50, 55, 60]
+    );
+
+    // The partition is reloaded from the cleaned state table.
+    tx.push_chunk(StreamChunk::from_pretty(
+        " I  T  I   i
+        + 70 p1 107 16",
+    ));
+    assert_eq!(
+        stream.expect_chunk().await,
+        StreamChunk::from_pretty(
+            " I  T  I   i  i  i
+            U- 60 p1 105 15 20 .
+            U+ 60 p1 105 15 20 16
+            +  70 p1 107 16 15 .",
+        )
+    );
+
+    // Nothing to clean: rows 50, 55 are below the watermark and both are retained.
+    tx.push_barrier(test_epoch(5), false);
+    stream.expect_barrier().await;
+    assert_eq!(
+        state_order_keys(store.clone(), &calls).await,
+        vec![50, 55, 60, 70]
+    );
+
+    // The watermark advances but the partition still has rows not below it, and it's not touched
+    // in this epoch, so nothing is cleaned.
+    tx.push_watermark(0, DataType::Int64, 65i64.into());
+    tx.push_barrier(test_epoch(6), false);
+    stream.expect_barrier().await;
+    assert_eq!(
+        state_order_keys(store.clone(), &calls).await,
+        vec![50, 55, 60, 70]
+    );
+
+    // Advancing the watermark alone does not schedule inactive partitions for cleaning.
+    tx.push_watermark(0, DataType::Int64, 75i64.into());
+    tx.push_barrier(test_epoch(7), false);
+    stream.expect_barrier().await;
+    assert_eq!(
+        state_order_keys(store.clone(), &calls).await,
+        vec![50, 55, 60, 70]
+    );
+
+    // Once the partition is touched again, outputs are computed correctly and stale rows are
+    // cleaned at the following barrier.
+    tx.push_chunk(StreamChunk::from_pretty(
+        " I  T  I   i
+        + 80 p1 108 17",
+    ));
+    assert_eq!(
+        stream.expect_chunk().await,
+        StreamChunk::from_pretty(
+            " I  T  I   i  i  i
+            U- 70 p1 107 16 15 .
+            U+ 70 p1 107 16 15 17
+            +  80 p1 108 17 16 .",
+        )
+    );
+    tx.push_barrier(test_epoch(8), false);
+    stream.expect_barrier().await;
+    assert_eq!(
+        state_order_keys(store.clone(), &calls).await,
+        vec![60, 70, 80]
+    );
 }

@@ -21,19 +21,20 @@ use std::ops::{Bound, RangeInclusive};
 
 use delta_btree_map::{Change, DeltaBTreeMap};
 use educe::Educe;
+use futures::StreamExt;
 use futures_async_stream::for_await;
 use risingwave_common::array::stream_record::Record;
 use risingwave_common::config::streaming::OverWindowCachePolicy as CachePolicy;
 use risingwave_common::row::{OwnedRow, Row, RowExt};
-use risingwave_common::types::{Datum, Sentinelled};
+use risingwave_common::types::{Datum, DefaultOrd, ScalarImpl, Sentinelled};
 use risingwave_common::util::iter_util::ZipEqFast;
 use risingwave_expr::window_function::{StateKey, WindowStates, create_window_state};
 use risingwave_storage::StateStore;
 use risingwave_storage::store::PrefetchOptions;
 
-use super::general::{Calls, RowConverter};
+use super::general::{Calls, RowConverter, StateCleaning};
 use super::range_cache::{CacheKey, PartitionCache};
-use crate::common::table::state_table::StateTable;
+use crate::common::table::state_table::{BoxedRowStream, StateTable};
 use crate::consistency::{consistency_error, enable_strict_consistency};
 use crate::executor::StreamExecutorResult;
 use crate::executor::over_window::frame_finder::*;
@@ -105,6 +106,10 @@ pub(super) struct OverPartition<'a, S: StateStore> {
 }
 
 const MAGIC_BATCH_SIZE: usize = 512;
+
+/// Maximum number of stale rows to delete from one partition in one round of state cleaning, to
+/// bound the number of writes buffered in one epoch when there's a large backlog of stale rows.
+const MAX_STALE_ROWS_TO_DELETE_PER_ROUND: usize = 1 << 16;
 
 impl<'a, S: StateStore> OverPartition<'a, S> {
     pub fn new(
@@ -348,6 +353,120 @@ impl<'a, S: StateStore> OverPartition<'a, S> {
                 }
             }
         }
+    }
+
+    /// Clean up stale rows of the partition, i.e., rows whose watermark column value is below the
+    /// given `watermark`, except the `n_retain` ones that are closest to the watermark boundary.
+    /// See [`StateCleaning`] for why this is safe.
+    ///
+    /// Returns the number of deleted rows, and whether there may be more stale rows to delete
+    /// because of the per-round limit.
+    pub async fn clean_stale_rows(
+        &mut self,
+        table: &mut StateTable<S>,
+        cleaning: &StateCleaning,
+        watermark: &ScalarImpl,
+    ) -> StreamExecutorResult<(usize, bool)> {
+        let watermark_ref = watermark.as_scalar_ref_impl();
+        let is_stale = |row: &OwnedRow| match row.datum_at(cleaning.watermark_col_idx) {
+            Some(value) => value.default_cmp(&watermark_ref).is_lt(),
+            None => false, // NULLs are ordered as the largest values, never stale
+        };
+        // We collect at most this many stale rows, ordered from the farthest to the closest to
+        // the watermark boundary. If the limit is reached, there're at least `n_retain` collected
+        // stale rows closer to the boundary than the first `MAX_STALE_ROWS_TO_DELETE_PER_ROUND`
+        // ones, so it's safe to delete the latter.
+        let max_to_collect = MAX_STALE_ROWS_TO_DELETE_PER_ROUND.saturating_add(cleaning.n_retain);
+
+        let cache_covers_stale_end = if cleaning.stale_rows_at_front {
+            !self.range_cache.left_is_sentinel()
+        } else {
+            !self.range_cache.right_is_sentinel()
+        };
+
+        let mut stale_rows: Vec<(CacheKey, OwnedRow)> = Vec::new();
+        if cache_covers_stale_end {
+            // All stale rows are in the cache, no need to scan the table.
+            let entries: Box<dyn Iterator<Item = (&CacheKey, &OwnedRow)> + '_> =
+                if cleaning.stale_rows_at_front {
+                    Box::new(self.range_cache.inner().iter())
+                } else {
+                    Box::new(self.range_cache.inner().iter().rev())
+                };
+            stale_rows.extend(
+                entries
+                    .take_while(|(key, row)| key.is_normal() && is_stale(row))
+                    .take(max_to_collect)
+                    .map(|(key, row)| (key.clone(), row.clone())),
+            );
+        } else {
+            // The cache doesn't cover the stale end of the partition, scan the table instead.
+            let watermark_row = OwnedRow::new(vec![Some(watermark.clone())]);
+            let sub_range: (Bound<OwnedRow>, Bound<OwnedRow>) = if cleaning.stale_rows_at_front {
+                (Bound::Unbounded, Bound::Excluded(watermark_row))
+            } else {
+                (Bound::Excluded(watermark_row), Bound::Unbounded)
+            };
+            let stream: BoxedRowStream<'_> = if cleaning.stale_rows_at_front {
+                table
+                    .iter_with_prefix(
+                        self.deduped_part_key,
+                        &sub_range,
+                        PrefetchOptions::default(),
+                    )
+                    .await?
+                    .boxed()
+            } else {
+                table
+                    .rev_iter_with_prefix(
+                        self.deduped_part_key,
+                        &sub_range,
+                        PrefetchOptions::default(),
+                    )
+                    .await?
+                    .boxed()
+            };
+
+            #[for_await]
+            for row in stream {
+                let row: OwnedRow = row?.into_owned_row();
+                if !is_stale(&row) {
+                    break;
+                }
+                let key = self.row_conv.row_to_state_key(&row)?;
+                stale_rows.push((CacheKey::from(key), row));
+                if stale_rows.len() >= max_to_collect {
+                    break;
+                }
+            }
+        }
+
+        let has_more = stale_rows.len() >= max_to_collect;
+        let n_to_delete = if has_more {
+            MAX_STALE_ROWS_TO_DELETE_PER_ROUND
+        } else {
+            stale_rows.len().saturating_sub(cleaning.n_retain)
+        };
+        for (key, row) in stale_rows.into_iter().take(n_to_delete) {
+            table.delete(row);
+            self.range_cache.remove(&key);
+        }
+        if n_to_delete > 0 && self.range_cache.normal_len() == 0 && self.range_cache.len() == 1 {
+            // only one sentinel remains, should insert the other
+            self.range_cache
+                .insert(CacheKey::Smallest, OwnedRow::empty());
+            self.range_cache
+                .insert(CacheKey::Largest, OwnedRow::empty());
+        }
+
+        tracing::trace!(
+            partition=?self.deduped_part_key,
+            n_deleted=n_to_delete,
+            has_more,
+            "cleaned stale rows in the partition"
+        );
+
+        Ok((n_to_delete, has_more))
     }
 
     /// Find all ranges in the partition that are affected by the given delta.

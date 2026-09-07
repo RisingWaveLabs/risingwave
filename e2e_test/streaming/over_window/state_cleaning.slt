@@ -1,0 +1,25 @@
+# Watermark-driven state cleaning of the `OverWindow` executor, which is enabled when the input is
+# append-only, all window frames are bounded `ROWS` frames, and the first `ORDER BY` column is a
+# watermark column. Run with different cache policies.
+
+# Exact retained-row counts require the watermark to arrive while the partition is still active.
+# With parallel upstream actors, idle actors can delay the merged watermark until after cleanup.
+# A later watermark alone does not schedule an inactive partition for cleaning.
+statement ok
+set streaming_parallelism = 1;
+
+statement ok
+set rw_streaming_over_window_cache_policy = full;
+
+include ./state_cleaning.slt.part
+
+statement ok
+set rw_streaming_over_window_cache_policy = recent;
+
+include ./state_cleaning.slt.part
+
+statement ok
+set rw_streaming_over_window_cache_policy = default;
+
+statement ok
+set streaming_parallelism = default;

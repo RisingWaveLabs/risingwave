@@ -90,6 +90,7 @@ impl ExecutorBuilder for OverWindowExecutorBuilder {
 
             chunk_size: params.config.developer.chunk_size,
             cache_policy,
+            enable_state_cleaning: node.enable_state_cleaning,
         });
         Ok((params.info, exec).into())
     }

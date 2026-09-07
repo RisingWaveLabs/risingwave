@@ -158,6 +158,7 @@ pub struct StreamingMetrics {
     over_window_accessed_entry_count: LabelGuardedIntCounterVec,
     over_window_compute_count: LabelGuardedIntCounterVec,
     over_window_same_output_count: LabelGuardedIntCounterVec,
+    over_window_state_cleaned_row_count: LabelGuardedIntCounterVec,
 
     /// The duration from receipt of barrier to all actors collection.
     /// The max of all nodes' `barrier_inflight_latency` for a partial graph is the latency for a
@@ -926,6 +927,14 @@ impl StreamingMetrics {
         )
         .unwrap();
 
+        let over_window_state_cleaned_row_count = register_guarded_int_counter_vec_with_registry!(
+            "stream_over_window_state_cleaned_row_count",
+            "Over window number of stale state rows deleted by watermark-driven state cleaning",
+            &["table_id", "actor_id", "fragment_id"],
+            registry
+        )
+        .unwrap();
+
         let barrier_inflight_latency = register_guarded_histogram_vec_with_registry!(
             "stream_barrier_inflight_duration_seconds",
             "barrier_inflight_latency",
@@ -1400,6 +1409,7 @@ impl StreamingMetrics {
             over_window_accessed_entry_count,
             over_window_compute_count,
             over_window_same_output_count,
+            over_window_state_cleaned_row_count,
             barrier_inflight_latency,
             barrier_sync_latency,
             barrier_batch_size,
@@ -1772,6 +1782,9 @@ impl StreamingMetrics {
             over_window_same_output_count: self
                 .over_window_same_output_count
                 .with_guarded_label_values(label_list),
+            over_window_state_cleaned_row_count: self
+                .over_window_state_cleaned_row_count
+                .with_guarded_label_values(label_list),
         }
     }
 
@@ -1938,6 +1951,7 @@ pub struct OverWindowMetrics {
     pub over_window_accessed_entry_count: LabelGuardedIntCounter,
     pub over_window_compute_count: LabelGuardedIntCounter,
     pub over_window_same_output_count: LabelGuardedIntCounter,
+    pub over_window_state_cleaned_row_count: LabelGuardedIntCounter,
 }
 
 #[derive(Clone)]

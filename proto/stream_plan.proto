@@ -1084,6 +1084,11 @@ message OverWindowNode {
   catalog.Table state_table = 4;
   // Deprecated. Use the one from `StreamingDeveloperConfig` instead.
   OverWindowCachePolicy cache_policy = 5 [deprecated = true];
+  // Whether the executor is allowed to clean up state rows in recently touched partitions that
+  // can never be accessed again, driven by the watermark on the first `order_by` column. The
+  // optimizer only enables this when the input is append-only, all window frames are bounded
+  // `ROWS` frames, and the first `order_by` column is a watermark column.
+  bool enable_state_cleaning = 6;
 }
 
 message LocalApproxPercentileNode {

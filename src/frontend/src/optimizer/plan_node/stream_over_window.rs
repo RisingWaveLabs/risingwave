@@ -15,6 +15,7 @@
 use std::collections::HashSet;
 
 use risingwave_common::util::sort_util::{ColumnOrder, OrderType};
+use risingwave_expr::window_function::FrameBounds;
 use risingwave_pb::stream_plan::stream_node::PbNodeBody;
 
 use super::generic::{GenericPlanNode, PlanWindowFunction};
@@ -83,6 +84,36 @@ impl StreamOverWindow {
         let in_dist_key = self.core.input.distribution().dist_column_indices();
         tbl_builder.build(in_dist_key.to_vec(), read_prefix_len_hint)
     }
+
+    /// Whether the executor is allowed to clean up state rows below the watermark of the first
+    /// `ORDER BY` column. See `OverWindowExecutor` for the cleaning strategy.
+    ///
+    /// The cleaning is only correct when:
+    /// - the input is append-only, so no existing row will ever be updated or deleted;
+    /// - all window frames are bounded `ROWS` frames, so a row can only affect (and be affected
+    ///   by) a bounded number of neighboring rows;
+    /// - the first `ORDER BY` column is a watermark column with NULLs ordered as the largest
+    ///   values, so that once a watermark is received, rows below it can never get new neighbors
+    ///   on the "smaller" side, and all new rows (including NULLs) land on the "larger" side.
+    fn state_cleaning_enabled(&self) -> bool {
+        let input = &self.core.input;
+        let Some(first_order_key) = self.core.order_key().first() else {
+            return false;
+        };
+        input.append_only()
+            && self.core.window_functions().iter().all(|func| {
+                matches!(&func.frame.bounds, FrameBounds::Rows(bounds)
+                    if !bounds.start.is_unbounded_preceding() && !bounds.end.is_unbounded_following())
+            })
+            && first_order_key.order_type.nulls_are_largest()
+            && input.watermark_columns().contains(first_order_key.column_index)
+            // the first order key column must be part of the state table sub-PK following the
+            // partition key, so that the executor can scan stale rows with it
+            && !self
+                .core
+                .partition_key_indices()
+                .contains(&first_order_key.column_index)
+    }
 }
 
 impl_distill_by_unit!(StreamOverWindow, core, "StreamOverWindow");
@@ -137,6 +168,8 @@ impl StreamNode for StreamOverWindow {
             // Cache policy should now be read from per-job config override.
             #[expect(deprecated)]
             cache_policy: PbOverWindowCachePolicy::Unspecified as _,
+
+            enable_state_cleaning: self.state_cleaning_enabled(),
         }))
     }
 }
