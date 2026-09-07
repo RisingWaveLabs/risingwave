@@ -102,7 +102,7 @@ select (Row('foo', 'bar')).f2;
 ----
 bar
 
-query error column "f3" not found in struct type
+query error field "f3" not found in struct type
 select (Row('foo', 'bar')).f3;
 
 query T

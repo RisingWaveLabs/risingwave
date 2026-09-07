@@ -1,6 +1,9 @@
 statement ok
 SET RW_IMPLICIT_FLUSH TO true;
 
+statement error struct field "a" specified more than once
+create function duplicate_returns_table_sql() returns table (a int, A varchar) language sql as $$select 1, 'x'$$;
+
 #############################################################
 # Basic tests for sql udf with [unnamed / named] parameters #
 #############################################################

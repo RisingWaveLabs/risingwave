@@ -5,6 +5,13 @@ export function to_string(a, b, c, d, e, f, g, h, i, j) {
 }
 $$;
 
+statement error struct field "a" specified more than once
+create function duplicate_returns_table_js() returns table (a int, A varchar) language javascript as $$
+export function* duplicate_returns_table_js() {
+    yield {a: 1};
+}
+$$;
+
 query T
 select to_string(false, 1::smallint, 2, 3, 4.5, 6.7, 8.9, 'abc', '\x010203', '{"key": 1}');
 ----

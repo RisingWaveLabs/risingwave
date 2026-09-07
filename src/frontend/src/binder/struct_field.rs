@@ -127,20 +127,60 @@ impl Binder {
 
 fn find_field(input: DataType, field_name: String) -> Result<(DataType, usize)> {
     if let DataType::Struct(t) = input {
-        if let Some((pos, (_, ty))) = t.iter().find_position(|(name, _)| name == &field_name) {
-            Ok((ty.clone(), pos))
-        } else {
-            Err(ErrorCode::BindError(format!(
-                "column \"{}\" not found in struct type",
-                field_name
+        let mut matches = t
+            .iter()
+            .enumerate()
+            .filter(|(_, (name, _))| name == &field_name);
+        let Some((pos, (_, ty))) = matches.next() else {
+            return Err(ErrorCode::BindError(format!(
+                "field \"{field_name}\" not found in struct type"
             ))
-            .into())
+            .into());
+        };
+        if matches.next().is_some() {
+            return Err(ErrorCode::BindError(format!(
+                "struct field \"{field_name}\" is ambiguous"
+            ))
+            .into());
         }
+        Ok((ty.clone(), pos))
     } else {
         Err(ErrorCode::BindError(format!(
             "column notation .{} applied to type {}, which is not a composite type",
             field_name, input
         ))
         .into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use risingwave_common::types::StructType;
+
+    use super::*;
+
+    #[test]
+    fn find_field_rejects_ambiguous_struct_field() {
+        let data_type = DataType::Struct(StructType::new([
+            ("a", DataType::Int32),
+            ("a", DataType::Varchar),
+            ("b", DataType::Boolean),
+        ]));
+
+        assert!(find_field(data_type.clone(), "a".to_owned()).is_err());
+
+        // A unique field remains accessible even if a different field name is malformed. This
+        // helps users inspect and migrate schemas persisted by older versions.
+        assert_eq!(
+            find_field(data_type, "b".to_owned()).unwrap(),
+            (DataType::Boolean, 2)
+        );
+    }
+
+    #[test]
+    fn find_field_distinguishes_missing_and_non_struct_inputs() {
+        let data_type = DataType::Struct(StructType::new([("a", DataType::Int32)]));
+        assert!(find_field(data_type, "b".to_owned()).is_err());
+        assert!(find_field(DataType::Int32, "a".to_owned()).is_err());
     }
 }

@@ -267,10 +267,17 @@ impl ToJsonb for MapRef<'_> {
 
 impl ToJsonb for StructRef<'_> {
     fn add_to(self, data_type: &DataType, builder: &mut Builder) -> Result<()> {
+        let struct_type = data_type.as_struct();
+        if let Some(field_name) = struct_type.find_duplicate_field_name() {
+            return Err(ExprError::InvalidParam {
+                name: "to_jsonb",
+                reason: format!("struct type has duplicate field name `{field_name}`").into(),
+            });
+        }
+
         builder.begin_object();
-        for (value, (field_name, field_type)) in self
-            .iter_fields_ref()
-            .zip_eq_debug(data_type.as_struct().iter())
+        for (value, (field_name, field_type)) in
+            self.iter_fields_ref().zip_eq_debug(struct_type.iter())
         {
             builder.add_string(field_name);
             value.add_to(field_type, builder)?;
@@ -286,5 +293,77 @@ pub struct ToTextDisplay<T>(pub T);
 impl<T: ToText> std::fmt::Display for ToTextDisplay<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.0.write(f)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use risingwave_common::types::{ScalarImpl, StructType, StructValue};
+
+    use super::*;
+
+    fn assert_duplicate_error(value: &StructValue, data_type: &DataType, field_name: &str) {
+        let mut builder = Builder::<Vec<u8>>::new();
+        let error = value
+            .as_scalar_ref()
+            .add_to(data_type, &mut builder)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains(&format!(
+                "struct type has duplicate field name `{field_name}`"
+            )),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn struct_to_jsonb_rejects_duplicate_field_names() {
+        let data_type = DataType::Struct(StructType::new([
+            ("a", DataType::Int32),
+            ("a", DataType::Varchar),
+        ]));
+        let value = StructValue::new(vec![
+            Some(ScalarImpl::Int32(1)),
+            Some(ScalarImpl::Utf8("hello".into())),
+        ]);
+
+        assert_duplicate_error(&value, &data_type, "a");
+    }
+
+    #[test]
+    fn struct_to_jsonb_rejects_nested_duplicate_field_names() {
+        let nested_type = DataType::Struct(StructType::new([
+            ("a", DataType::Int32),
+            ("a", DataType::Varchar),
+        ]));
+        let data_type = DataType::Struct(StructType::new([("nested", nested_type)]));
+        let nested_value = StructValue::new(vec![
+            Some(ScalarImpl::Int32(1)),
+            Some(ScalarImpl::Utf8("hello".into())),
+        ]);
+        let value = StructValue::new(vec![Some(ScalarImpl::Struct(nested_value))]);
+
+        assert_duplicate_error(&value, &data_type, "a");
+    }
+
+    #[test]
+    fn struct_to_jsonb_preserves_all_unique_fields() {
+        let data_type = DataType::Struct(StructType::new([
+            ("a", DataType::Int32),
+            ("A", DataType::Varchar),
+        ]));
+        let value = StructValue::new(vec![
+            Some(ScalarImpl::Int32(1)),
+            Some(ScalarImpl::Utf8("hello".into())),
+        ]);
+        let mut builder = Builder::<Vec<u8>>::new();
+
+        value
+            .as_scalar_ref()
+            .add_to(&data_type, &mut builder)
+            .unwrap();
+
+        assert_eq!(builder.finish().to_string(), r#"{"A":"hello","a":1}"#);
     }
 }

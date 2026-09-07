@@ -1084,12 +1084,12 @@ pub fn bind_data_type(data_type: &AstDataType) -> Result<DataType> {
         AstDataType::Char(..) => {
             bail_not_implemented!("CHAR is not supported, please use VARCHAR instead")
         }
-        AstDataType::Struct(types) => StructType::new(
+        AstDataType::Struct(types) => bind_struct_type(
             types
                 .iter()
                 .map(|f| Ok((f.name.real_value(), bind_data_type(&f.data_type)?)))
                 .collect::<Result<Vec<_>>>()?,
-        )
+        )?
         .into(),
         AstDataType::Map(kv) => {
             let key = bind_data_type(&kv.0)?;
@@ -1152,4 +1152,106 @@ pub fn bind_data_type(data_type: &AstDataType) -> Result<DataType> {
         | AstDataType::Time(true) => return Err(new_err().into()),
     };
     Ok(data_type)
+}
+
+pub(crate) fn bind_struct_type(
+    fields: impl IntoIterator<Item = (impl Into<String>, DataType)>,
+) -> Result<StructType> {
+    let struct_type = StructType::new(fields);
+    if let Some(name) = struct_type.find_duplicate_field_name() {
+        return Err(ErrorCode::InvalidInputSyntax(format!(
+            "struct field \"{name}\" specified more than once"
+        ))
+        .into());
+    }
+    Ok(struct_type)
+}
+
+#[cfg(test)]
+mod tests {
+    use risingwave_sqlparser::ast::{Ident, StructField};
+
+    use super::*;
+
+    fn field(name: Ident, data_type: AstDataType) -> StructField {
+        StructField { name, data_type }
+    }
+
+    fn unquoted(name: &str, data_type: AstDataType) -> StructField {
+        field(Ident::new_unchecked(name), data_type)
+    }
+
+    fn quoted(name: &str, data_type: AstDataType) -> StructField {
+        field(Ident::with_quote_unchecked('"', name), data_type)
+    }
+
+    fn assert_duplicate_field_rejected(data_type: AstDataType) {
+        assert!(bind_data_type(&data_type).is_err());
+    }
+
+    #[test]
+    fn bind_struct_rejects_duplicate_field_names() {
+        assert_duplicate_field_rejected(AstDataType::Struct(vec![
+            unquoted("a", AstDataType::Int),
+            unquoted("a", AstDataType::Varchar),
+        ]));
+
+        // Unquoted identifiers are folded to lowercase before comparison.
+        assert_duplicate_field_rejected(AstDataType::Struct(vec![
+            unquoted("Value", AstDataType::Int),
+            unquoted("VALUE", AstDataType::BigInt),
+        ]));
+
+        // Quoted identifiers preserve case, but exact quoted duplicates are still invalid.
+        assert_duplicate_field_rejected(AstDataType::Struct(vec![
+            quoted("Value", AstDataType::Int),
+            quoted("Value", AstDataType::BigInt),
+        ]));
+    }
+
+    #[test]
+    fn bind_struct_rejects_duplicates_in_nested_types() {
+        let duplicate_struct = || {
+            AstDataType::Struct(vec![
+                unquoted("a", AstDataType::Int),
+                unquoted("a", AstDataType::Varchar),
+            ])
+        };
+
+        assert_duplicate_field_rejected(AstDataType::Struct(vec![unquoted(
+            "nested",
+            duplicate_struct(),
+        )]));
+        assert_duplicate_field_rejected(AstDataType::Array(Box::new(duplicate_struct())));
+        assert_duplicate_field_rejected(AstDataType::Map(Box::new((
+            AstDataType::Varchar,
+            duplicate_struct(),
+        ))));
+    }
+
+    #[test]
+    fn bind_struct_accepts_distinct_quoted_field_names() {
+        let data_type = bind_data_type(&AstDataType::Struct(vec![
+            unquoted("Value", AstDataType::Int),
+            quoted("Value", AstDataType::Varchar),
+            quoted("VALUE", AstDataType::Boolean),
+        ]))
+        .unwrap();
+
+        let struct_type = data_type.as_struct();
+        assert_eq!(
+            struct_type.names().collect_vec(),
+            ["value", "Value", "VALUE"]
+        );
+        assert_eq!(
+            struct_type.types().cloned().collect_vec(),
+            [DataType::Int32, DataType::Varchar, DataType::Boolean]
+        );
+    }
+
+    #[test]
+    fn bind_generated_struct_rejects_duplicate_field_names() {
+        assert!(bind_struct_type([("a", DataType::Int32), ("a", DataType::Varchar)]).is_err());
+        assert!(bind_struct_type([("a", DataType::Int32), ("A", DataType::Varchar)]).is_ok());
+    }
 }

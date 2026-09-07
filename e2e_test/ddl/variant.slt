@@ -168,7 +168,7 @@ from v;
 ----
 array int64 double boolean null string object array int64
 
-query BBB
+query ???
 with v as (
     select '{"a":[1]}'::variant as value
 )
@@ -220,7 +220,7 @@ double "NaN" t "Infinity" "-Infinity" string
 
 # Variant V1 has no primitive for these, so they are stored as text, exactly as to_jsonb does.
 
-query TBTBTB
+query T?T?T?
 select
     variant_typeof(to_variant(interval '1 day')),
     to_variant(interval '1 day')::varchar = to_jsonb(interval '1 day')::varchar,
@@ -241,12 +241,12 @@ select
 ----
 string string string
 
-# Variant objects require unique field names while RisingWave struct types do not.
+# Duplicate struct field names are rejected by the shared SQL type binder before conversion.
 
-statement error duplicate field name
+statement error struct field "a" specified more than once
 select to_variant(row(1, 'x')::struct<a int, a varchar>);
 
-statement error duplicate field name
+statement error struct field "a" specified more than once
 select to_variant(row(row(1, 'x')::struct<a int, a varchar>)::struct<s struct<a int, a varchar>>);
 
 statement ok

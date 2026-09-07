@@ -201,6 +201,14 @@ impl StructType {
         self.0.fields.iter().map(|(name, ty)| (name.as_str(), ty))
     }
 
+    /// Returns a duplicated field name, if any.
+    ///
+    /// This only checks the fields directly contained in this struct. Nested struct types should
+    /// be checked separately while traversing the data type.
+    pub fn find_duplicate_field_name(&self) -> Option<&str> {
+        self.names().duplicates().next()
+    }
+
     /// Gets an iterator over the field ids.
     ///
     /// Returns `None` if they are not present. See documentation on the field `field_ids`

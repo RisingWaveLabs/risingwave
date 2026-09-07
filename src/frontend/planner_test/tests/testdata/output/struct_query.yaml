@@ -324,7 +324,7 @@
     Failed to bind expression: (country).city
 
     Caused by:
-      Bind error: column "city" not found in struct type
+      Bind error: field "city" not found in struct type
   create_source:
     format: plain
     encode: protobuf

@@ -15,12 +15,12 @@
 use anyhow::Context;
 use either::Either;
 use risingwave_common::catalog::FunctionId;
-use risingwave_common::types::StructType;
 use risingwave_expr::sig::{CreateOptions, UdfKind};
 use risingwave_pb::catalog::PbFunction;
 use risingwave_pb::catalog::function::{Kind, ScalarFunction, TableFunction};
 
 use super::*;
+use crate::binder::bind_struct_type;
 use crate::{Binder, bind_data_type};
 
 /// Non-SQL UDFs exchange data via Arrow, which does not support VARIANT yet.
@@ -115,7 +115,7 @@ pub async fn handle_create_function(
                     .into_iter()
                     .map(|c| bind_data_type(&c.data_type).map(|ty| (c.name.real_value(), ty)));
                 let fields = it.try_collect::<_, Vec<_>, _>()?;
-                return_type = StructType::new(fields).into();
+                return_type = bind_struct_type(fields)?.into();
             }
             Kind::Table(TableFunction {})
         }

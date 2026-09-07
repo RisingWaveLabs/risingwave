@@ -14,11 +14,11 @@
 
 use either::Either;
 use risingwave_common::catalog::FunctionId;
-use risingwave_common::types::StructType;
 use risingwave_pb::catalog::PbFunction;
 use risingwave_pb::catalog::function::{Kind, ScalarFunction, TableFunction};
 
 use super::*;
+use crate::binder::bind_struct_type;
 use crate::expr::{Expr, Literal};
 use crate::{Binder, bind_data_type};
 
@@ -97,7 +97,7 @@ pub async fn handle_create_sql_function(
                     .iter()
                     .map(|c| Ok((c.name.real_value(), bind_data_type(&c.data_type)?)))
                     .collect::<Result<Vec<_>>>()?;
-                return_type = StructType::new(fields).into();
+                return_type = bind_struct_type(fields)?.into();
             }
             Kind::Table(TableFunction {})
         }

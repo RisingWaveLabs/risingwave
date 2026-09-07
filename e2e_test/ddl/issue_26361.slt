@@ -1,0 +1,64 @@
+# Struct fields must be uniquely addressable by name. Reject duplicates at type binding time so
+# field access and object conversions cannot silently choose different values.
+
+statement error struct field "a" specified more than once
+create table issue_26361_direct (s struct<a int, a varchar>);
+
+# Identifier comparison follows PostgreSQL rules: unquoted names are folded to lowercase, while
+# quoted names preserve case.
+statement error struct field "value" specified more than once
+create table issue_26361_unquoted_case (s struct<Value int, VALUE varchar>);
+
+statement error struct field "Value" specified more than once
+create table issue_26361_quoted_duplicate (s struct<"Value" int, "Value" varchar>);
+
+# Validation is recursive through structs, lists, and map values.
+statement error struct field "a" specified more than once
+create table issue_26361_nested_struct (s struct<nested struct<a int, a varchar>>);
+
+statement error struct field "a" specified more than once
+create table issue_26361_struct_array (s struct<a int, a varchar>[]);
+
+statement error struct field "a" specified more than once
+create table issue_26361_map_value (s map(varchar, struct<a int, a varchar>));
+
+# Cast target types use the same binder and must not provide an alternate way to construct an
+# ambiguous struct value.
+statement error struct field "a" specified more than once
+select row(1, 'hello')::struct<a int, a varchar>;
+
+# ALTER TABLE type changes are also covered by the shared type binder.
+statement ok
+create table issue_26361_alter (s struct<a int, b varchar>);
+
+statement error struct field "a" specified more than once
+alter table issue_26361_alter alter column s type struct<a int, a varchar>;
+
+statement ok
+drop table issue_26361_alter;
+
+# Case-distinct quoted identifiers remain legal and every field is independently addressable.
+statement ok
+create table issue_26361_valid (
+    id int,
+    s struct<value int, "Value" varchar, "VALUE" boolean>
+);
+
+statement ok
+insert into issue_26361_valid values (1, row(7, 'hello', true));
+
+statement ok
+flush;
+
+query IITT
+select id, (s).value, (s)."Value", (s)."VALUE" from issue_26361_valid;
+----
+1 7 hello t
+
+query T
+select to_jsonb(s)::varchar from issue_26361_valid;
+----
+{"VALUE": true, "Value": "hello", "value": 7}
+
+statement ok
+drop table issue_26361_valid;
