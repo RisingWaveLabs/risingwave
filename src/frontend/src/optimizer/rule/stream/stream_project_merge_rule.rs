@@ -15,6 +15,7 @@
 use super::prelude::*;
 use crate::expr::{ExprImpl, ExprVisitor};
 use crate::optimizer::plan_expr_visitor::InputRefCounter;
+use crate::optimizer::plan_node::generic::GenericPlanRef;
 use crate::optimizer::plan_node::{PlanTreeNodeUnary, StreamProject};
 use crate::utils::Substitute;
 
@@ -45,12 +46,21 @@ impl Rule<Stream> for StreamProjectMergeRule {
 
         // If either of the projects has the hint, we should keep it.
         let noop_update_hint = outer_project.noop_update_hint() || inner_project.noop_update_hint();
+        let stream_key = if outer_project.explicit_stream_key().is_some()
+            || inner_project.explicit_stream_key().is_some()
+        {
+            outer_project.base.stream_key().map(ToOwned::to_owned)
+        } else {
+            None
+        };
 
-        Some(
+        let project = if let Some(stream_key) = stream_key {
+            StreamProject::new_with_stream_key(core, stream_key)
+        } else {
             StreamProject::new(core)
-                .with_noop_update_hint(noop_update_hint)
-                .into(),
-        )
+        };
+
+        Some(project.with_noop_update_hint(noop_update_hint).into())
     }
 }
 

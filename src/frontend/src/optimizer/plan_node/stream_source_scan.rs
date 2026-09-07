@@ -80,6 +80,33 @@ impl StreamSourceScan {
             .expect("source scan should have source cataglog")
     }
 
+    fn has_deferred_generated_stream_key(&self) -> bool {
+        let source_catalog = self.source_catalog();
+        let mut missing_pk_column = false;
+
+        for pk_column_id in &source_catalog.pk_col_ids {
+            if self
+                .core
+                .column_catalog
+                .iter()
+                .any(|column| column.column_id() == *pk_column_id)
+            {
+                continue;
+            }
+
+            missing_pk_column = true;
+            if !source_catalog
+                .columns
+                .iter()
+                .any(|column| column.column_id() == *pk_column_id && column.is_generated())
+            {
+                return false;
+            }
+        }
+
+        missing_pk_column
+    }
+
     /// The state is different from but similar to `StreamSource`.
     /// Refer to [`generic::Source::infer_internal_table_catalog`] for more details.
     pub fn infer_internal_table_catalog() -> TableCatalog {
@@ -107,17 +134,22 @@ impl StreamSourceScan {
     ) -> SchedulerResult<PbStreamNode> {
         use risingwave_pb::stream_plan::*;
 
-        let stream_key = self
-            .stream_key()
-            .unwrap_or_else(|| {
-                panic!(
-                    "should always have a stream key in the stream plan but not, sub plan: {}",
-                    PlanRef::from(self.clone()).explain_to_string()
-                )
-            })
-            .iter()
-            .map(|x| *x as u32)
-            .collect_vec();
+        let stream_key = match self.stream_key() {
+            Some(stream_key) => stream_key.iter().map(|x| *x as u32).collect_vec(),
+            None => {
+                if !self.has_deferred_generated_stream_key() {
+                    return Err(anyhow::anyhow!(
+                        "source backfill may omit its stream key only when a primary-key column \
+                         is generated and absent from the raw source output, sub plan: {}",
+                        PlanRef::from(self.clone()).explain_to_string()
+                    )
+                    .into());
+                }
+                // Generated columns are evaluated by the project immediately above the source
+                // backfill node, which restores the catalog-declared stream key.
+                vec![]
+            }
+        };
 
         let source_catalog = self.source_catalog();
         let (with_properties, secret_refs) = source_catalog.with_properties.clone().into_parts();

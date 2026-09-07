@@ -472,7 +472,12 @@ impl ToStream for LogicalSource {
 
                 if let Some(exprs) = &self.output_exprs {
                     let logical_project = generic::Project::new(exprs.clone(), plan);
-                    plan = StreamProject::new(logical_project).into();
+                    plan = if let Some(stream_key) = self.base.stream_key() {
+                        StreamProject::new_with_stream_key(logical_project, stream_key.to_vec())
+                            .into()
+                    } else {
+                        StreamProject::new(logical_project).into()
+                    };
                 }
 
                 if let Some(row_id_index) = self.output_row_id_index {

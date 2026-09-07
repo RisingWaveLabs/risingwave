@@ -37,6 +37,10 @@ use crate::utils::ColIndexMappingRewriteExt;
 pub struct StreamProject {
     pub base: PlanBase<Stream>,
     core: generic::Project<PlanRef>,
+    /// A stream key known from semantics outside of a regular projection, for example a generated
+    /// column declared as the primary key of a source. A regular [`generic::Project`] can only
+    /// propagate keys through `InputRef` expressions.
+    explicit_stream_key: Option<Vec<usize>>,
     /// All the watermark derivations, (`input_column_index`, `output_column_index`). And the
     /// derivation expression is the project's expression itself.
     watermark_derivations: Vec<(usize, usize)>,
@@ -68,7 +72,18 @@ impl Distill for StreamProject {
 impl StreamProject {
     pub fn new(core: generic::Project<PlanRef>) -> Self {
         let noop_update_hint = core.likely_produces_noop_updates();
-        Self::new_inner(core, noop_update_hint)
+        Self::new_inner(core, noop_update_hint, None)
+    }
+
+    /// Creates a project with an output stream key guaranteed by semantics outside of the
+    /// projection expressions.
+    ///
+    /// This must not be used to infer uniqueness from an arbitrary expression. It is intended for
+    /// planner-generated projections whose output key is declared explicitly in a catalog.
+    pub fn new_with_stream_key(core: generic::Project<PlanRef>, stream_key: Vec<usize>) -> Self {
+        assert!(stream_key.iter().all(|&idx| idx < core.schema().len()));
+        let noop_update_hint = core.likely_produces_noop_updates();
+        Self::new_inner(core, noop_update_hint, Some(stream_key))
     }
 
     /// Set the `noop_update_hint` flag to the given value.
@@ -79,7 +94,11 @@ impl StreamProject {
         }
     }
 
-    fn new_inner(core: generic::Project<PlanRef>, noop_update_hint: bool) -> Self {
+    fn new_inner(
+        core: generic::Project<PlanRef>,
+        noop_update_hint: bool,
+        explicit_stream_key: Option<Vec<usize>>,
+    ) -> Self {
         let ctx = core.ctx();
         let input = core.input.clone();
         let distribution = core
@@ -118,18 +137,35 @@ impl StreamProject {
         }
         // Project executor won't change the append-only behavior of the stream, so it depends on
         // input's `append_only`.
-        let base = PlanBase::new_stream_with_core(
-            &core,
-            distribution,
-            input.stream_kind(),
-            input.emit_on_window_close(),
-            out_watermark_columns,
-            out_monotonicity_map,
-        );
+        let base = if let Some(stream_key) = &explicit_stream_key {
+            let mut functional_dependency = core.functional_dependency();
+            functional_dependency.add_key(stream_key);
+            PlanBase::new_stream(
+                ctx,
+                core.schema(),
+                Some(stream_key.clone()),
+                functional_dependency,
+                distribution,
+                input.stream_kind(),
+                input.emit_on_window_close(),
+                out_watermark_columns,
+                out_monotonicity_map,
+            )
+        } else {
+            PlanBase::new_stream_with_core(
+                &core,
+                distribution,
+                input.stream_kind(),
+                input.emit_on_window_close(),
+                out_watermark_columns,
+                out_monotonicity_map,
+            )
+        };
 
         StreamProject {
             base,
             core,
+            explicit_stream_key,
             watermark_derivations,
             nondecreasing_exprs,
             noop_update_hint,
@@ -147,6 +183,10 @@ impl StreamProject {
     pub fn noop_update_hint(&self) -> bool {
         self.noop_update_hint
     }
+
+    pub fn explicit_stream_key(&self) -> Option<&[usize]> {
+        self.explicit_stream_key.as_deref()
+    }
 }
 
 impl PlanTreeNodeUnary<Stream> for StreamProject {
@@ -157,7 +197,11 @@ impl PlanTreeNodeUnary<Stream> for StreamProject {
     fn clone_with_input(&self, input: PlanRef) -> Self {
         let mut core = self.core.clone();
         core.input = input;
-        Self::new_inner(core, self.noop_update_hint)
+        Self::new_inner(
+            core,
+            self.noop_update_hint,
+            self.explicit_stream_key.clone(),
+        )
     }
 }
 impl_plan_tree_node_for_unary! { Stream, StreamProject}
@@ -202,7 +246,7 @@ impl ExprRewritable<Stream> for StreamProject {
         let mut core = self.core.clone();
         core.rewrite_exprs(r);
         let noop_update_hint = self.noop_update_hint || core.likely_produces_noop_updates();
-        Self::new_inner(core, noop_update_hint).into()
+        Self::new_inner(core, noop_update_hint, self.explicit_stream_key.clone()).into()
     }
 }
 

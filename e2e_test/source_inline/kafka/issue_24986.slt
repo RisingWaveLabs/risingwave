@@ -1,0 +1,62 @@
+control substitution on
+
+system ok
+rpk topic delete issue-24986-generated-pk || true
+
+system ok
+rpk topic create issue-24986-generated-pk -p 1
+
+statement ok
+CREATE SOURCE src_issue_24986 (
+    after JSONB,
+    id BIGINT AS (after ->> 'id')::BIGINT,
+    category VARCHAR AS after ->> 'category',
+    amount BIGINT AS (after ->> 'amount')::BIGINT,
+    insert_date_tz TIMESTAMPTZ
+        AS to_timestamp((after ->> 'insert_date')::DOUBLE PRECISION),
+    PRIMARY KEY (id)
+)
+WITH (
+    ${RISEDEV_KAFKA_WITH_OPTIONS_COMMON},
+    topic = 'issue-24986-generated-pk',
+    group.id.prefix = 'rw-issue-24986',
+    scan.startup.mode = 'earliest'
+)
+FORMAT PLAIN ENCODE JSON;
+
+statement ok
+CREATE TABLE table_issue_24986 (
+    id BIGINT PRIMARY KEY,
+    category VARCHAR,
+    amount BIGINT,
+    insert_date_tz TIMESTAMPTZ
+)
+ON CONFLICT OVERWRITE;
+
+statement ok
+CREATE SINK sink_issue_24986
+INTO table_issue_24986
+AS
+SELECT id, category, amount, insert_date_tz
+FROM src_issue_24986;
+
+system ok
+echo '{"after":{"id":24986,"category":"generated-pk","amount":42,"insert_date":1772745299}}' | rpk topic produce issue-24986-generated-pk
+
+query ITI retry 10 backoff 1s
+SELECT id, category, amount
+FROM table_issue_24986;
+----
+24986 generated-pk 42
+
+statement ok
+DROP SINK sink_issue_24986;
+
+statement ok
+DROP TABLE table_issue_24986;
+
+statement ok
+DROP SOURCE src_issue_24986;
+
+system ok
+rpk topic delete issue-24986-generated-pk
