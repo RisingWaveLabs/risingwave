@@ -184,7 +184,7 @@ services:
       retries: 5
 
   pubsub-emulator:
-    image: gcr.io/google.com/cloudsdktool/google-cloud-cli:475.0.0-emulators
+    image: gcr.io/google.com/cloudsdktool/google-cloud-cli:583.0.0-emulators
     command: >
       gcloud beta emulators pubsub start --project=demo --host-port=0.0.0.0:8900
     ports:

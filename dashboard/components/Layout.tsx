@@ -124,6 +124,11 @@ const navSections: NavSectionData[] = [
     items: [
       { href: "/await_tree/", title: "Await tree dump", icon: IconHourglass },
       {
+        href: "/cpu_profiling/",
+        title: "CPU profiling",
+        icon: IconActivity,
+      },
+      {
         href: "/heap_profiling/",
         title: "Heap profiling",
         icon: IconMemoryStick,
