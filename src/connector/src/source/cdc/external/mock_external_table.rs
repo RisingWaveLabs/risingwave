@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use futures::stream::BoxStream;
 use futures_async_stream::try_stream;
@@ -31,6 +31,7 @@ use crate::source::cdc::external::{
 pub struct MockExternalTableReader {
     binlog_watermarks: Vec<MySqlOffset>,
     snapshot_cnt: AtomicUsize,
+    snapshot_errors_remaining: AtomicUsize,
     cdc_offset_idx: AtomicUsize,
     parallel_backfill_snapshots: Vec<OwnedRow>,
 }
@@ -86,9 +87,30 @@ impl MockExternalTableReader {
         Self {
             binlog_watermarks,
             snapshot_cnt: AtomicUsize::new(0),
+            snapshot_errors_remaining: AtomicUsize::new(0),
             parallel_backfill_snapshots,
             cdc_offset_idx: AtomicUsize::new(0),
         }
+    }
+
+    pub fn new_with_snapshot_errors(snapshot_errors: usize) -> Self {
+        Self {
+            snapshot_errors_remaining: AtomicUsize::new(snapshot_errors),
+            ..Self::new()
+        }
+    }
+
+    fn take_snapshot_error(&self) -> ConnectorResult<()> {
+        if self
+            .snapshot_errors_remaining
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |remaining| {
+                remaining.checked_sub(1)
+            })
+            .is_ok()
+        {
+            return Err(anyhow::anyhow!("mock snapshot read error").into());
+        }
+        Ok(())
     }
 
     pub fn get_normalized_table_name(_table_name: &SchemaTableName) -> String {
@@ -107,9 +129,9 @@ impl MockExternalTableReader {
     /// After that we will emit the buffered upstream chunks all in one.
     #[try_stream(boxed, ok = OwnedRow, error = ConnectorError)]
     async fn snapshot_read_inner(&self) {
-        let snap_idx = self
-            .snapshot_cnt
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.take_snapshot_error()?;
+
+        let snap_idx = self.snapshot_cnt.fetch_add(1, Ordering::Relaxed);
         println!("snapshot read: idx {}", snap_idx);
 
         let snap0 = vec![
@@ -151,6 +173,7 @@ impl MockExternalTableReader {
 
     #[try_stream(boxed, ok = OwnedRow, error = ConnectorError)]
     async fn split_snapshot_read_inner(&self, left: OwnedRow, right: OwnedRow) {
+        self.take_snapshot_error()?;
         for row in &self.parallel_backfill_snapshots {
             if (left[0].is_none()
                 || cmp_datum(&row[0], &left[0], OrderType::ascending_nulls_first()).is_ge())
@@ -165,9 +188,7 @@ impl MockExternalTableReader {
 
 impl ExternalTableReader for MockExternalTableReader {
     async fn current_cdc_offset(&self) -> ConnectorResult<CdcOffset> {
-        let idx = self
-            .cdc_offset_idx
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let idx = self.cdc_offset_idx.fetch_add(1, Ordering::Relaxed);
         if idx < self.binlog_watermarks.len() {
             Ok(CdcOffset::MySql(self.binlog_watermarks[idx].clone()))
         } else {

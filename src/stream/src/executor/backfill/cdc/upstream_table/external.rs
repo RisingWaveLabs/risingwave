@@ -12,6 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#[cfg(test)]
+use std::collections::VecDeque;
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
+#[cfg(test)]
+use std::sync::{Arc, Mutex};
+
 use risingwave_common::catalog::{Schema, TableId};
 use risingwave_common::util::sort_util::OrderType;
 use risingwave_connector::error::ConnectorResult;
@@ -47,6 +54,12 @@ pub struct ExternalStorageTable {
     /// Indices of primary key.
     /// Note that the index is based on the all columns of the table.
     pk_indices: Vec<usize>,
+
+    #[cfg(test)]
+    mock_snapshot_errors: Option<Arc<Mutex<VecDeque<usize>>>>,
+
+    #[cfg(test)]
+    mock_reader_create_count: Arc<AtomicUsize>,
 }
 
 impl ExternalStorageTable {
@@ -74,6 +87,10 @@ impl ExternalStorageTable {
             schema,
             pk_order_types,
             pk_indices,
+            #[cfg(test)]
+            mock_snapshot_errors: None,
+            #[cfg(test)]
+            mock_reader_create_count: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -89,7 +106,24 @@ impl ExternalStorageTable {
             schema: Schema::empty().to_owned(),
             pk_order_types: vec![],
             pk_indices: vec![],
+            mock_snapshot_errors: None,
+            mock_reader_create_count: Arc::new(AtomicUsize::new(0)),
         }
+    }
+
+    #[cfg(test)]
+    pub fn with_mock_snapshot_errors(
+        mut self,
+        snapshot_errors: impl IntoIterator<Item = usize>,
+    ) -> Self {
+        self.mock_snapshot_errors =
+            Some(Arc::new(Mutex::new(snapshot_errors.into_iter().collect())));
+        self
+    }
+
+    #[cfg(test)]
+    pub fn mock_reader_create_count(&self) -> usize {
+        self.mock_reader_create_count.load(Ordering::Relaxed)
     }
 
     pub fn table_id(&self) -> TableId {
@@ -116,6 +150,20 @@ impl ExternalStorageTable {
     }
 
     pub async fn create_table_reader(&self) -> ConnectorResult<ExternalTableReaderImpl> {
+        #[cfg(test)]
+        if let Some(snapshot_errors) = &self.mock_snapshot_errors {
+            self.mock_reader_create_count
+                .fetch_add(1, Ordering::Relaxed);
+            let snapshot_errors = snapshot_errors
+                .lock()
+                .expect("mock snapshot error queue must not be poisoned")
+                .pop_front()
+                .unwrap_or_default();
+            return Ok(ExternalTableReaderImpl::Mock(
+                risingwave_connector::source::cdc::external::mock_external_table::MockExternalTableReader::new_with_snapshot_errors(snapshot_errors),
+            ));
+        }
+
         self.table_type
             .create_table_reader(
                 self.config.clone(),

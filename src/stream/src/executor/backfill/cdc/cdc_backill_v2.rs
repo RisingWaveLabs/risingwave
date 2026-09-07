@@ -30,11 +30,10 @@ use risingwave_connector::source::cdc::external::{
 use risingwave_connector::source::{CdcTableSnapshotSplit, CdcTableSnapshotSplitRaw};
 use risingwave_pb::common::ThrottleType;
 use rw_futures_util::pausable;
-use thiserror_ext::AsReport;
-use tracing::Instrument;
 
 use crate::executor::backfill::cdc::cdc_backfill::{
-    build_reader_and_poll_upstream, get_cdc_json_parse_handling_from_properties, transform_upstream,
+    build_reader_and_poll_upstream, create_table_reader_with_retry,
+    get_cdc_json_parse_handling_from_properties, transform_upstream,
 };
 use crate::executor::backfill::cdc::state_v2::ParallelizedCdcBackfillState;
 use crate::executor::backfill::cdc::upstream_table::external::ExternalStorageTable;
@@ -43,7 +42,6 @@ use crate::executor::backfill::cdc::upstream_table::snapshot::{
 };
 use crate::executor::backfill::utils::{get_cdc_chunk_last_offset, mapping_chunk, mapping_message};
 use crate::executor::prelude::*;
-use crate::executor::source::get_infinite_backoff_strategy;
 use crate::task::cdc_progress::CdcProgressReporter;
 pub struct ParallelizedCdcBackfillExecutor<S: StateStore> {
     actor_ctx: ActorContextRef,
@@ -254,79 +252,80 @@ impl<S: StateStore> ParallelizedCdcBackfillExecutor<S> {
                 None
             };
 
-            // After init the state table and forward the initial barrier to downstream,
-            // we now try to create the table reader with retry.
-            let mut table_reader: Option<ExternalTableReaderImpl> = None;
-            let external_table = self.external_table.clone();
-            let actor_id = self.actor_ctx.id;
-            let fragment_id = self.actor_ctx.fragment_id;
-            let mut future = Box::pin(async move {
-                let backoff = get_infinite_backoff_strategy();
-                tokio_retry::Retry::spawn(backoff, || async {
-                    match external_table.create_table_reader().await {
-                        Ok(reader) => Ok(reader),
-                        Err(e) => {
-                            tracing::warn!(error = %e.as_report(), actor_id = %actor_id, fragment_id = %fragment_id, "failed to create cdc table reader, retrying...");
-                            Err(e)
-                        }
-                    }
-                })
-                    .instrument(tracing::info_span!("create_cdc_table_reader_with_retry"))
-                    .await
-                    .expect("Retry create cdc table reader until success.")
-            });
-            loop {
-                if let Some(msg) =
-                    build_reader_and_poll_upstream(&mut upstream, &mut table_reader, &mut future)
-                        .await?
-                {
-                    if let Some(msg) = mapping_message(msg, &self.output_indices) {
-                        match msg {
-                            Message::Barrier(barrier) => {
-                                state_impl.commit_state(barrier.epoch).await?;
-                                if is_reset_barrier(&barrier, self.actor_ctx.id) {
-                                    next_reset_barrier = Some(barrier);
-                                    continue 'with_cdc_table_snapshot_splits;
+            let offset_parse_func = self.external_table.table_type().get_cdc_offset_parser()?;
+
+            // A reader is only needed while at least one assigned snapshot split is unfinished.
+            // Once all splits are complete, the executor only forwards the table-filtered CDC
+            // stream and must not depend on the upstream snapshot table still existing.
+            let upstream_table_reader = if next_split_idx < actor_snapshot_splits.len() {
+                let mut table_reader: Option<ExternalTableReaderImpl> = None;
+                let external_table = self.external_table.clone();
+                let actor_id = self.actor_ctx.id;
+                let fragment_id = self.actor_ctx.fragment_id;
+                let mut future = Box::pin(create_table_reader_with_retry(
+                    external_table,
+                    actor_id,
+                    fragment_id,
+                ));
+                loop {
+                    if let Some(msg) = build_reader_and_poll_upstream(
+                        &mut upstream,
+                        &mut table_reader,
+                        &mut future,
+                    )
+                    .await?
+                    {
+                        if let Some(msg) = mapping_message(msg, &self.output_indices) {
+                            match msg {
+                                Message::Barrier(barrier) => {
+                                    state_impl.commit_state(barrier.epoch).await?;
+                                    if is_reset_barrier(&barrier, self.actor_ctx.id) {
+                                        next_reset_barrier = Some(barrier);
+                                        continue 'with_cdc_table_snapshot_splits;
+                                    }
+                                    yield Message::Barrier(barrier);
                                 }
-                                yield Message::Barrier(barrier);
-                            }
-                            Message::Chunk(chunk) => {
-                                if chunk.cardinality() == 0 {
-                                    continue;
+                                Message::Chunk(chunk) => {
+                                    if chunk.cardinality() == 0 {
+                                        continue;
+                                    }
+                                    if let Some(filtered_chunk) = filter_stream_chunk(
+                                        chunk,
+                                        &current_actor_bounds,
+                                        snapshot_split_column_index,
+                                    ) && filtered_chunk.cardinality() > 0
+                                    {
+                                        yield Message::Chunk(filtered_chunk);
+                                    }
                                 }
-                                if let Some(filtered_chunk) = filter_stream_chunk(
-                                    chunk,
-                                    &current_actor_bounds,
-                                    snapshot_split_column_index,
-                                ) && filtered_chunk.cardinality() > 0
-                                {
-                                    yield Message::Chunk(filtered_chunk);
+                                Message::Watermark(_) => {
+                                    // Ignore watermark, like the `CdcBackfillExecutor`.
                                 }
-                            }
-                            Message::Watermark(_) => {
-                                // Ignore watermark, like the `CdcBackfillExecutor`.
                             }
                         }
+                    } else {
+                        assert!(table_reader.is_some(), "table reader must be created");
+                        tracing::info!(
+                            %table_id,
+                            upstream_table_name,
+                            "table reader created successfully"
+                        );
+                        break;
                     }
-                } else {
-                    assert!(table_reader.is_some(), "table reader must created");
-                    tracing::info!(
-                        %table_id,
-                        upstream_table_name,
-                        "table reader created successfully"
-                    );
-                    break;
                 }
-            }
-            let upstream_table_reader = UpstreamTableReader::new(
-                self.external_table.clone(),
-                table_reader.expect("table reader must created"),
-            );
-            // let mut upstream = upstream.peekable();
-            let offset_parse_func = upstream_table_reader.reader.get_cdc_offset_parser();
+                Some(UpstreamTableReader::new(
+                    self.external_table.clone(),
+                    table_reader.expect("table reader must be created"),
+                ))
+            } else {
+                None
+            };
 
             // Backfill snapshot splits sequentially.
             for split in actor_snapshot_splits.iter().skip(next_split_idx) {
+                let upstream_table_reader = upstream_table_reader
+                    .as_ref()
+                    .expect("unfinished snapshot split must have a table reader");
                 tracing::info!(
                     %table_id,
                     upstream_table_name,
@@ -567,7 +566,9 @@ impl<S: StateStore> ParallelizedCdcBackfillExecutor<S> {
                 }
             }
 
-            upstream_table_reader.disconnect().await?;
+            if let Some(upstream_table_reader) = upstream_table_reader {
+                upstream_table_reader.disconnect().await?;
+            }
             tracing::info!(
                 %table_id,
                 upstream_table_name,
