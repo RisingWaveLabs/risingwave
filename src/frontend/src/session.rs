@@ -786,6 +786,9 @@ pub struct SessionImpl {
 
     /// staging catalogs for the current session
     staging_catalog_manager: Arc<Mutex<StagingCatalogManager>>,
+
+    /// SQL-level prepared statements for simple query mode.
+    simple_query_prepared_statement_manager: Arc<Mutex<SimpleQueryPreparedStatementManager>>,
 }
 
 /// If TEMPORARY or TEMP is specified, the source is created as a temporary source.
@@ -852,6 +855,39 @@ impl StagingCatalogManager {
     }
 }
 
+#[derive(Default, Clone)]
+struct SimpleQueryPreparedStatementManager {
+    statements: HashMap<String, PrepareStatement>,
+}
+
+impl SimpleQueryPreparedStatementManager {
+    fn insert(&mut self, name: String, statement: PrepareStatement) -> Result<()> {
+        if self.statements.contains_key(&name) {
+            return Err(ErrorCode::BindError(format!(
+                "prepared statement \"{}\" already exists",
+                name
+            ))
+            .into());
+        }
+        self.statements.insert(name, statement);
+        Ok(())
+    }
+
+    fn get(&self, name: &str) -> Result<PrepareStatement> {
+        self.statements.get(name).cloned().ok_or_else(|| {
+            ErrorCode::ItemNotFound(format!("prepared statement \"{}\"", name)).into()
+        })
+    }
+
+    fn remove(&mut self, name: &str) {
+        self.statements.remove(name);
+    }
+
+    fn clear(&mut self) {
+        self.statements.clear();
+    }
+}
+
 #[derive(Error, Debug)]
 pub enum CheckRelationError {
     #[error("{0}")]
@@ -897,6 +933,7 @@ impl SessionImpl {
             cursor_manager: Arc::new(CursorManager::new(cursor_metrics)),
             temporary_source_manager: Default::default(),
             staging_catalog_manager: Default::default(),
+            simple_query_prepared_statement_manager: Default::default(),
         }
     }
 
@@ -930,6 +967,7 @@ impl SessionImpl {
             cursor_manager: Arc::new(CursorManager::new(env.cursor_metrics)),
             temporary_source_manager: Default::default(),
             staging_catalog_manager: Default::default(),
+            simple_query_prepared_statement_manager: Default::default(),
         }
     }
 
@@ -1489,6 +1527,32 @@ impl SessionImpl {
 
     pub fn staging_catalog_manager(&self) -> StagingCatalogManager {
         self.staging_catalog_manager.lock().clone()
+    }
+
+    pub fn create_simple_query_prepared_statement(
+        &self,
+        name: String,
+        statement: PrepareStatement,
+    ) -> Result<()> {
+        self.simple_query_prepared_statement_manager
+            .lock()
+            .insert(name, statement)
+    }
+
+    pub fn get_simple_query_prepared_statement(&self, name: &str) -> Result<PrepareStatement> {
+        self.simple_query_prepared_statement_manager
+            .lock()
+            .get(name)
+    }
+
+    pub fn drop_simple_query_prepared_statement(&self, name: &str) {
+        self.simple_query_prepared_statement_manager
+            .lock()
+            .remove(name)
+    }
+
+    pub fn drop_all_simple_query_prepared_statements(&self) {
+        self.simple_query_prepared_statement_manager.lock().clear();
     }
 
     pub async fn check_cluster_limits(&self) -> Result<()> {

@@ -1,0 +1,133 @@
+statement ok
+prepare ps_math(int) as select $1 + 1;
+
+query I
+execute ps_math(41);
+----
+42
+
+statement ok
+deallocate ps_math;
+
+statement ok
+deallocate ps_math;
+
+statement error prepared statement
+execute ps_math(41);
+
+statement ok
+create table t_prepare_simple_query(v int);
+
+statement ok
+prepare ps_insert(int) as insert into t_prepare_simple_query values ($1);
+
+statement ok
+execute ps_insert(7);
+
+statement ok
+flush;
+
+query I
+select v from t_prepare_simple_query order by v;
+----
+7
+
+statement ok
+prepare ps_update(int, int) as update t_prepare_simple_query set v = $1 where v = $2;
+
+statement ok
+execute ps_update(9, 7);
+
+statement ok
+flush;
+
+query I
+select v from t_prepare_simple_query order by v;
+----
+9
+
+statement ok
+prepare ps_delete(int) as delete from t_prepare_simple_query where v = $1;
+
+statement ok
+execute ps_delete(9);
+
+statement ok
+flush;
+
+query I
+select count(*)::int from t_prepare_simple_query;
+----
+0
+
+statement ok
+prepare ps_text(varchar) as select $1 || '-ok';
+
+query T
+execute ps_text('rw');
+----
+rw-ok
+
+statement ok
+prepare ps_null(int) as select $1 is null;
+
+query B
+execute ps_null(null);
+----
+t
+
+statement ok
+prepare ps_bool(bool) as select $1;
+
+query B
+execute ps_bool(false);
+----
+f
+
+statement ok
+prepare ps_date(date) as select $1::varchar;
+
+query T
+execute ps_date(date '2026-06-29');
+----
+2026-06-29
+
+statement ok
+prepare ps_negative(int) as select $1;
+
+query I
+execute ps_negative(-7);
+----
+-7
+
+statement ok
+start transaction read only;
+
+query I
+execute ps_negative(5);
+----
+5
+
+statement error read-only transaction
+execute ps_insert(8);
+
+statement ok
+commit;
+
+statement error already exists
+prepare ps_null(int) as select $1;
+
+statement error wrong number of parameters
+execute ps_null;
+
+statement error unsupported EXECUTE parameter expression
+execute ps_null(1 + 2);
+
+statement error not supported
+prepare ps_ddl as create table t_prepare_rejected(v int);
+
+statement ok
+deallocate all;
+
+statement ok
+drop table t_prepare_simple_query;

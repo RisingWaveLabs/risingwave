@@ -1676,9 +1676,26 @@ pub async fn handle(
             name,
             data_types,
             statement,
-        } => prepared_statement::handle_prepare(name, data_types, statement),
+        } => {
+            prepared_statement::handle_prepare(
+                handler_args.session.clone(),
+                name,
+                data_types,
+                statement,
+            )
+            .await
+        }
+        Statement::Execute { name, parameters } => {
+            prepared_statement::handle_execute(
+                handler_args.session.clone(),
+                name,
+                parameters,
+                formats,
+            )
+            .await
+        }
         Statement::Deallocate { name, prepare } => {
-            prepared_statement::handle_deallocate(name, prepare)
+            prepared_statement::handle_deallocate(handler_args.session.clone(), name, prepare)
         }
         Statement::Vacuum { object_name, full } => {
             vacuum::handle_vacuum(handler_args, object_name, full).await
