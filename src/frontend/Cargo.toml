@@ -51,7 +51,7 @@ maplit = "1"
 md5 = { package = "md-5", version = "0.10.6" }
 memcomparable = "0.2"
 mysql_async = { workspace = true }
-mysql_common = { version = "0.35", default-features = false, features = [
+mysql_common = { version = "0.38", default-features = false, features = [
     "chrono",
 ] }
 num-integer = "0.1"
