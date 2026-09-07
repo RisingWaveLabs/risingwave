@@ -161,18 +161,18 @@ impl NotificationManager {
 
     pub fn notify_snapshot(
         &self,
-        worker_key: WorkerKey,
-        subscribe_type: SubscribeType,
+        sender: UnboundedSender<Notification>,
         meta_snapshot: MetaSnapshot,
     ) {
-        self.notify_without_version(
-            Target {
-                subscribe_type,
-                worker_key: Some(worker_key),
-            },
-            Operation::Snapshot,
-            Info::Snapshot(meta_snapshot),
-        )
+        let response = SubscribeResponse {
+            status: None,
+            operation: Operation::Snapshot as i32,
+            info: Some(Info::Snapshot(meta_snapshot)),
+            version: Default::default(),
+        };
+        let _ = sender.send(Ok(response)).inspect_err(|err| {
+            tracing::warn!("Failed to notify direct subscriber: {}", err.as_report());
+        });
     }
 
     pub fn notify_all_without_version(&self, operation: Operation, info: Info) {
@@ -423,14 +423,10 @@ mod tests {
         let (tx1, mut rx1) = mpsc::unbounded_channel();
         let (tx2, mut rx2) = mpsc::unbounded_channel();
         let (tx3, mut rx3) = mpsc::unbounded_channel();
-        mgr.insert_sender(SubscribeType::Hummock, worker_key1.clone(), tx1);
+        mgr.insert_sender(SubscribeType::Hummock, worker_key1.clone(), tx1.clone());
         mgr.insert_sender(SubscribeType::Frontend, worker_key1.clone(), tx2);
         mgr.insert_sender(SubscribeType::Frontend, worker_key2, tx3);
-        mgr.notify_snapshot(
-            worker_key1.clone(),
-            SubscribeType::Hummock,
-            MetaSnapshot::default(),
-        );
+        mgr.notify_snapshot(tx1, MetaSnapshot::default());
         assert!(rx1.recv().await.is_some());
         assert!(rx2.try_recv().is_err());
         assert!(rx3.try_recv().is_err());
@@ -466,6 +462,29 @@ mod tests {
         assert!(hummock_rx1.recv().await.is_some());
         assert!(hummock_rx2.try_recv().is_err());
         assert!(frontend_rx1.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn test_snapshot_uses_original_sender_after_resubscribe() {
+        let mgr = NotificationManager::new(SqlMetaStore::for_test().await).await;
+        let worker_key = WorkerKey(HostAddress {
+            host: "a".to_owned(),
+            port: 1,
+        });
+        let (tx1, mut rx1) = mpsc::unbounded_channel();
+        mgr.insert_sender(SubscribeType::Hummock, worker_key.clone(), tx1.clone());
+        mgr.notify_snapshot(tx1, MetaSnapshot::default());
+
+        let (tx2, mut rx2) = mpsc::unbounded_channel();
+        mgr.insert_sender(SubscribeType::Hummock, worker_key, tx2);
+
+        assert!(rx1.recv().await.is_some());
+        assert!(rx2.try_recv().is_err());
+
+        mgr.notify_hummock(Operation::Add, Info::Database(Default::default()))
+            .await;
+        assert!(rx1.try_recv().is_err());
+        assert!(rx2.recv().await.is_some());
     }
 
     #[tokio::test]
