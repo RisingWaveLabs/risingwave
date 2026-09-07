@@ -56,7 +56,8 @@ pub fn find_udf_impl(
 
 /// UDF implementation descriptor.
 ///
-/// Every UDF implementation should provide 3 functions:
+/// Every UDF implementation describes how it is selected, created, and built, together with the
+/// capabilities supported by its execution path.
 pub struct UdfImplDescriptor {
     /// Returns if a function matches the implementation.
     ///
@@ -72,6 +73,10 @@ pub struct UdfImplDescriptor {
     ///
     /// This function will be called before the UDF is executed on the backend.
     pub build_fn: fn(opts: BuildOptions<'_>) -> Result<Box<dyn UdfImpl>>,
+
+    /// Returns whether this implementation and function kind honor
+    /// `always_retry_on_network_error` during execution.
+    pub supports_always_retry_on_network_error: fn(kind: UdfKind) -> bool,
 }
 
 /// Options for creating a function.

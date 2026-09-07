@@ -94,6 +94,10 @@ static EXTERNAL: UdfImplDescriptor = UdfImplDescriptor {
             always_retry_on_network_error: opts.always_retry_on_network_error,
         }))
     },
+    // `always_retry_on_network_error` is read only by `ExternalFunction::call`, the scalar UDF
+    // execution entry point. Table UDFs use `call_table_function` instead, which does not retry
+    // at all.
+    supports_always_retry_on_network_error: |kind| kind.is_scalar(),
 };
 
 #[derive(Debug)]

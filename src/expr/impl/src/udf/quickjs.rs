@@ -102,6 +102,7 @@ static QUICKJS: UdfImplDescriptor = UdfImplDescriptor {
             }) as Box<dyn UdfImpl>)
         })
     },
+    supports_always_retry_on_network_error: |_| false,
 };
 
 #[derive(Debug)]

@@ -4,6 +4,9 @@ statement ok
 set streaming_unsafe_allow_unmaterialized_impure_expr to default;
 
 statement ok
+set rw_implicit_flush to true;
+
+statement ok
 create table t (a int);
 
 # StreamFilter: impure in filter predicate on retract stream should error.
@@ -38,6 +41,279 @@ select a, rand_series(a) from t;
 skipif madsim
 statement ok
 drop function rand_series(int);
+
+# External scalar UDFs require network retries when opting out of stored results. Validation runs
+# before RisingWave connects to the UDF server, so this test does not require a running server.
+skipif madsim
+statement error `always_retry_on_network_error` must be true when `unsafe_skip_materializing_exprs` is true for an external scalar UDF
+create function rejected_external_without_retry(v int) returns int language java immutable
+as 'identity'
+using link 'http://localhost:8815'
+with (unsafe_skip_materializing_exprs = true);
+
+skipif madsim
+statement error `IMMUTABLE` must be specified when `unsafe_skip_materializing_exprs` is true
+create function rejected_without_immutable(v int) returns int language javascript as $$
+export function rejected_without_immutable(v) {
+    return v;
+}
+$$ with (unsafe_skip_materializing_exprs = true);
+
+# Embedded scalar UDFs execute locally and do not use the external network-retry loop.
+skipif madsim
+statement ok
+create function identity_without_stored_result(v int) returns int language javascript immutable as $$
+export function identity_without_stored_result(v) {
+    return v;
+}
+$$ with (unsafe_skip_materializing_exprs = true);
+
+skipif madsim
+statement ok
+create function identity_with_stored_result(v int) returns int language javascript immutable as $$
+export function identity_with_stored_result(v) {
+    return v;
+}
+$$ with (always_retry_on_network_error = true);
+
+# The per-function execution policy must be visible to users through the function catalog.
+skipif madsim
+query TB
+select name, unsafe_skip_materializing_exprs
+from rw_catalog.rw_functions
+where name in ('identity_with_stored_result', 'identity_without_stored_result')
+order by name;
+----
+identity_with_stored_result f
+identity_without_stored_result t
+
+skipif madsim
+statement ok
+create materialized view mv_without_stored_result as
+select identity_without_stored_result(a) as a from t;
+
+# `t` is not append-only, and an MV reads its snapshot. Therefore the decisive branch in
+# `StreamTableScan::new_with_scan_range` selects RETRACT.
+# RETRACT is the protobuf default and is omitted from its JSON, so map an absent value back to it.
+skipif madsim
+query TT
+with scan_node as (
+    select jsonb_path_query_first(
+        f.node,
+        '$.**.**.** ? (exists(@.streamScan))'
+    ) as node
+    from rw_catalog.rw_fragment_infos f
+    join rw_catalog.rw_relations r on r.id = f.table_id
+    where r.name = 'mv_without_stored_result'
+)
+select
+    coalesce(node->>'streamKind', 'STREAM_KIND_RETRACT'),
+    node->'streamScan'->>'streamScanType'
+from scan_node;
+----
+STREAM_KIND_RETRACT STREAM_SCAN_TYPE_SNAPSHOT_BACKFILL
+
+skipif madsim
+query I
+select count(*)
+from rw_catalog.rw_internal_tables
+where job_id = (
+    select id from rw_catalog.rw_materialized_views where name = 'mv_without_stored_result'
+)
+and name like '%materializedexprs%';
+----
+0
+
+# Exercise the opted-out UDF on an actual RETRACT stream. The update emits a complete old row and
+# a new row; the delete then retracts the second result.
+skipif madsim
+statement ok
+insert into t values (10), (20);
+
+skipif madsim
+statement ok
+update t set a = 11 where a = 10;
+
+skipif madsim
+statement ok
+delete from t where a = 20;
+
+skipif madsim
+query I
+select * from mv_without_stored_result;
+----
+11
+
+skipif madsim
+statement ok
+create materialized view mv_nested_random as
+select identity_without_stored_result(random()::int) as a from t;
+
+# The impure descendant makes the complete top-level expression impure, but it still requires only
+# one MaterializedExprs state table.
+skipif madsim
+query I
+select count(*)
+from rw_catalog.rw_internal_tables
+where job_id = (
+    select id from rw_catalog.rw_materialized_views where name = 'mv_nested_random'
+)
+and name like '%materializedexprs%';
+----
+1
+
+# A sink without a snapshot reads its table input as an UPSERT stream. Insert a row before creating
+# the sinks to prove that this snapshot-free path skips preexisting data.
+skipif madsim
+statement ok
+create table upsert_udf_input (id int primary key, v int);
+
+skipif madsim
+statement ok
+insert into upsert_udf_input values (0, 0);
+
+skipif madsim
+statement ok
+create table upsert_udf_marked_output (v int, id int primary key);
+
+skipif madsim
+statement ok
+create table upsert_udf_unmarked_output (v int, id int primary key);
+
+skipif madsim
+statement ok
+create sink upsert_udf_marked_sink into upsert_udf_marked_output as
+select identity_without_stored_result(v) as v, id
+from upsert_udf_input
+with (snapshot = 'false');
+
+# `upsert_udf_input` is not append-only, and `snapshot = 'false'` selects a snapshot-free scan.
+# Therefore `backfill_type.without_snapshot()` selects UPSERT in `StreamTableScan`.
+skipif madsim
+query TT
+with scan_node as (
+    select jsonb_path_query_first(
+        f.node,
+        '$.**.**.** ? (exists(@.streamScan))'
+    ) as node
+    from rw_catalog.rw_fragment_infos f
+    join rw_catalog.rw_relations r on r.id = f.table_id
+    where r.name = 'upsert_udf_marked_sink'
+)
+select
+    coalesce(node->>'streamKind', 'STREAM_KIND_RETRACT'),
+    node->'streamScan'->>'streamScanType'
+from scan_node
+where node is not null;
+----
+STREAM_KIND_UPSERT STREAM_SCAN_TYPE_UPSTREAM_ONLY
+
+# An UPSERT project's stream key consists only of direct input references, so no matter the UDF is
+# pure or impure it does not need result materialization.
+skipif madsim
+query I
+select count(*)
+from rw_catalog.rw_internal_tables
+where job_id = (
+    select id from rw_catalog.rw_sinks where name = 'upsert_udf_marked_sink'
+)
+and name like '%materializedexprs%';
+----
+0
+
+skipif madsim
+statement ok
+create sink upsert_udf_unmarked_sink into upsert_udf_unmarked_output as
+select identity_with_stored_result(v) as v, id
+from upsert_udf_input
+with (snapshot = 'false');
+
+skipif madsim
+query I
+select count(*)
+from rw_catalog.rw_internal_tables
+where job_id = (
+    select id from rw_catalog.rw_sinks where name = 'upsert_udf_unmarked_sink'
+)
+and name like '%materializedexprs%';
+----
+0
+
+# Both snapshot-free sinks skip the preexisting row.
+skipif madsim
+query II
+select * from upsert_udf_marked_output order by id;
+----
+
+skipif madsim
+query II
+select * from upsert_udf_unmarked_output order by id;
+----
+
+# Exercise both project variants on actual UPSERT records. The update emits a live upsert record;
+# the delete then removes the second key.
+skipif madsim
+statement ok
+insert into upsert_udf_input values (1, 10), (2, 20);
+
+skipif madsim
+statement ok
+update upsert_udf_input set v = 11 where id = 1;
+
+skipif madsim
+statement ok
+delete from upsert_udf_input where id = 2;
+
+skipif madsim
+query II
+select * from upsert_udf_marked_output order by id;
+----
+11 1
+
+skipif madsim
+query II
+select * from upsert_udf_unmarked_output order by id;
+----
+11 1
+
+skipif madsim
+statement ok
+drop sink upsert_udf_marked_sink;
+
+skipif madsim
+statement ok
+drop sink upsert_udf_unmarked_sink;
+
+skipif madsim
+statement ok
+drop table upsert_udf_marked_output;
+
+skipif madsim
+statement ok
+drop table upsert_udf_unmarked_output;
+
+skipif madsim
+statement ok
+drop table upsert_udf_input;
+
+skipif madsim
+statement ok
+drop materialized view mv_nested_random;
+
+skipif madsim
+statement ok
+drop materialized view mv_without_stored_result;
+
+skipif madsim
+statement ok
+drop function identity_without_stored_result(int);
+
+skipif madsim
+statement ok
+drop function identity_with_stored_result(int);
+
+statement ok
+set rw_implicit_flush to default;
 
 statement ok
 drop table t;

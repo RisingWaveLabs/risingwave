@@ -61,6 +61,7 @@ impl UserDefinedFunction {
             link: udf.link.clone(),
             compressed_binary: udf.compressed_binary.clone(),
             always_retry_on_network_error: udf.always_retry_on_network_error,
+            unsafe_skip_materializing_exprs: false,
             is_batched: udf.is_batched,
             is_async: udf.is_async,
             created_at_epoch: None,

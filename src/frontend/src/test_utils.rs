@@ -457,8 +457,10 @@ impl CatalogWriter for MockCatalogWriter {
         Ok(())
     }
 
-    async fn create_function(&self, _function: PbFunction) -> Result<()> {
-        unreachable!()
+    async fn create_function(&self, mut function: PbFunction) -> Result<()> {
+        function.id = self.gen_id();
+        self.catalog.write().create_function(&function);
+        Ok(())
     }
 
     async fn create_connection(

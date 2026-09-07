@@ -32,6 +32,7 @@ static WASM: UdfImplDescriptor = UdfImplDescriptor {
     match_fn: |language, _runtime, _link| language == "wasm",
     create_fn: create_wasm,
     build_fn: build,
+    supports_always_retry_on_network_error: |_| false,
 };
 
 #[linkme::distributed_slice(UDF_IMPLS)]
@@ -39,6 +40,7 @@ static RUST: UdfImplDescriptor = UdfImplDescriptor {
     match_fn: |language, _runtime, _link| language == "rust",
     create_fn: create_rust,
     build_fn: build,
+    supports_always_retry_on_network_error: |_| false,
 };
 
 fn create_wasm(opts: CreateOptions<'_>) -> Result<CreateFunctionOutput> {

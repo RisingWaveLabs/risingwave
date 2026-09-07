@@ -1966,6 +1966,8 @@ mod tests {
             ..Default::default()
         };
         let arg_types = vec![test_data_type.clone()];
+        // This fixture represents an `IMMUTABLE` UDF. Function behavior is validated by the
+        // frontend and is not persisted in `PbFunction`.
         let pb_function = PbFunction {
             schema_id: TEST_SCHEMA_ID,
             database_id: TEST_DATABASE_ID,
@@ -1974,6 +1976,8 @@ mod tests {
             arg_types,
             return_type: Some(test_data_type.clone()),
             language: "python".to_owned(),
+            always_retry_on_network_error: true,
+            unsafe_skip_materializing_exprs: true,
             kind: Some(risingwave_pb::catalog::function::Kind::Scalar(
                 Default::default(),
             )),
@@ -1996,6 +2000,8 @@ mod tests {
         assert_eq!(function.return_type.to_protobuf(), test_data_type);
         assert_eq!(function.arg_types.to_protobuf().len(), 1);
         assert_eq!(function.language, "python");
+        assert!(function.always_retry_on_network_error);
+        assert!(function.unsafe_skip_materializing_exprs);
 
         mgr.create_schema(PbSchema {
             database_id: TEST_DATABASE_ID,

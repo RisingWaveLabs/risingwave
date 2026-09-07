@@ -15,10 +15,11 @@
 use std::borrow::Cow;
 
 use expr_node::Type;
+use risingwave_expr::sig::FuncName;
 use risingwave_pb::expr::expr_node;
 
-use super::{ExprImpl, ExprVisitor};
-use crate::expr::FunctionCall;
+use super::{ExprImpl, ExprVisitor, FunctionCall, TableFunction, UserDefinedFunction};
+use crate::expr::table_function::TableFunctionType;
 
 #[derive(Default)]
 pub(crate) struct ImpureAnalyzer {
@@ -42,66 +43,67 @@ impl ImpureAnalyzer {
     }
 }
 
-impl ExprVisitor for ImpureAnalyzer {
-    fn visit_user_defined_function(&mut self, func_call: &super::UserDefinedFunction) {
-        let name = &func_call.catalog.name;
-        self.impure = Some(format!("user-defined function `{name}`").into());
+trait BuiltinFunctionCall {
+    fn func_name(&self) -> FuncName;
+}
+
+impl BuiltinFunctionCall for FunctionCall {
+    fn func_name(&self) -> FuncName {
+        self.func_type().into()
     }
+}
 
-    fn visit_table_function(&mut self, func_call: &super::TableFunction) {
-        use crate::expr::table_function::TableFunctionType as Type;
-        let func_type = func_call.function_type;
-        match func_type {
-            Type::Unspecified => unreachable!(),
-
-            // deterministic
-            Type::GenerateSeries
-            | Type::Unnest
-            | Type::RegexpMatches
-            | Type::Range
-            | Type::GenerateSubscripts
-            | Type::PgExpandarray
-            | Type::JsonbArrayElements
-            | Type::JsonbArrayElementsText
-            | Type::JsonbEach
-            | Type::JsonbEachText
-            | Type::JsonbObjectKeys
-            | Type::JsonbPathQuery
-            | Type::JsonbPopulateRecordset
-            | Type::JsonbToRecordset => {
-                func_call.args.iter().for_each(|expr| self.visit_expr(expr));
-            }
-
-            // indeterministic
-            Type::FileScan
-            | Type::PostgresQuery
-            | Type::MysqlQuery
-            | Type::InternalBackfillProgress
-            | Type::InternalSourceBackfillProgress
-            | Type::InternalGetChannelDeltaStats
-            | Type::PgGetKeywords => {
-                self.impure = Some(func_type.as_str_name().into());
-            }
-            Type::UserDefined => {
-                let name = &func_call.user_defined.as_ref().unwrap().name;
-                self.impure = Some(format!("user-defined table function `{name}`").into());
-            }
-        }
+impl BuiltinFunctionCall for TableFunction {
+    fn func_name(&self) -> FuncName {
+        self.function_type.into()
     }
+}
 
-    fn visit_now(&mut self, _: &super::Now) {
-        self.impure = Some("NOW or PROCTIME".into());
-    }
-
-    fn visit_secret_ref(&mut self, secret_ref: &super::SecretRef) {
-        self.impure = Some(format!("secret reference `{}`", secret_ref.secret_name).into());
-    }
-
-    fn visit_function_call(&mut self, func_call: &super::FunctionCall) {
-        let func_type = func_call.func_type();
-        match func_type {
-            Type::Unspecified => unreachable!(),
-            #[expect(deprecated)]
+/// Returns whether a built-in function produces the same result for the same inputs.
+///
+/// The volatile built-ins are listed once here so every built-in expression variant uses the same
+/// purity classification.
+fn is_builtin_function_deterministic<F>(func_call: &F) -> bool
+where
+    F: BuiltinFunctionCall + ?Sized,
+{
+    match func_call.func_name() {
+        FuncName::Scalar(Type::Unspecified) => unreachable!(),
+        FuncName::Scalar(
+            Type::TestFeature
+            | Type::License
+            | Type::Proctime
+            | Type::PgSleep
+            | Type::PgSleepFor
+            | Type::PgSleepUntil
+            | Type::CastRegclass
+            | Type::PgGetIndexdef
+            | Type::ColDescription
+            | Type::PgGetViewdef
+            | Type::PgGetUserbyid
+            | Type::PgIndexesSize
+            | Type::PgRelationSize
+            | Type::PgGetSerialSequence
+            | Type::PgIndexColumnHasProperty
+            | Type::HasTablePrivilege
+            | Type::HasAnyColumnPrivilege
+            | Type::HasSchemaPrivilege
+            | Type::MakeTimestamptz
+            | Type::PgIsInRecovery
+            | Type::RwRecoveryStatus
+            | Type::RwClusterId
+            | Type::RwFragmentVnodes
+            | Type::RwActorVnodes
+            | Type::PgTableIsVisible
+            | Type::HasFunctionPrivilege
+            | Type::OpenaiEmbedding
+            | Type::HasDatabasePrivilege
+            | Type::Random
+            | Type::ClockTimestamp
+            | Type::GenRandomUuid,
+        ) => false,
+        #[expect(deprecated)]
+        FuncName::Scalar(
             Type::Add
             | Type::Subtract
             | Type::Multiply
@@ -369,54 +371,116 @@ impl ExprVisitor for ImpureAnalyzer {
             | Type::VnodeUser
             | Type::RwEpochToTs
             | Type::CheckNotNull
-            | Type::CompositeCast =>
-            // expression output is deterministic(same result for the same input)
-            {
-                func_call
-                    .inputs()
-                    .iter()
-                    .for_each(|expr| self.visit_expr(expr));
-            }
-            // expression output is not deterministic
-            Type::TestFeature
-            | Type::License
-            | Type::Proctime
-            | Type::PgSleep
-            | Type::PgSleepFor
-            | Type::PgSleepUntil
-            | Type::CastRegclass
-            | Type::PgGetIndexdef
-            | Type::ColDescription
-            | Type::PgGetViewdef
-            | Type::PgGetUserbyid
-            | Type::PgIndexesSize
-            | Type::PgRelationSize
-            | Type::PgGetSerialSequence
-            | Type::PgIndexColumnHasProperty
-            | Type::HasTablePrivilege
-            | Type::HasAnyColumnPrivilege
-            | Type::HasSchemaPrivilege
-            | Type::MakeTimestamptz
-            | Type::PgIsInRecovery
-            | Type::RwRecoveryStatus
-            | Type::RwClusterId
-            | Type::RwFragmentVnodes
-            | Type::RwActorVnodes
-            | Type::PgTableIsVisible
-            | Type::HasFunctionPrivilege
-            | Type::OpenaiEmbedding
-            | Type::HasDatabasePrivilege
-            | Type::Random
-            | Type::ClockTimestamp
-            | Type::GenRandomUuid => self.impure = Some(func_type.as_str_name().into()),
+            | Type::CompositeCast,
+        ) => true,
+        FuncName::Table(TableFunctionType::Unspecified | TableFunctionType::UserDefined) => {
+            unreachable!()
+        }
+        FuncName::Table(
+            TableFunctionType::FileScan
+            | TableFunctionType::PostgresQuery
+            | TableFunctionType::MysqlQuery
+            | TableFunctionType::InternalBackfillProgress
+            | TableFunctionType::InternalSourceBackfillProgress
+            | TableFunctionType::InternalGetChannelDeltaStats
+            | TableFunctionType::PgGetKeywords,
+        ) => false,
+        FuncName::Table(
+            TableFunctionType::GenerateSeries
+            | TableFunctionType::Unnest
+            | TableFunctionType::RegexpMatches
+            | TableFunctionType::Range
+            | TableFunctionType::GenerateSubscripts
+            | TableFunctionType::PgExpandarray
+            | TableFunctionType::JsonbArrayElements
+            | TableFunctionType::JsonbArrayElementsText
+            | TableFunctionType::JsonbEach
+            | TableFunctionType::JsonbEachText
+            | TableFunctionType::JsonbObjectKeys
+            | TableFunctionType::JsonbPathQuery
+            | TableFunctionType::JsonbPopulateRecordset
+            | TableFunctionType::JsonbToRecordset,
+        ) => true,
+        FuncName::Aggregate(_) | FuncName::Udf(_) => {
+            unreachable!("only scalar and table built-ins are accepted")
         }
     }
 }
 
+impl ExprVisitor for ImpureAnalyzer {
+    fn visit_user_defined_function(&mut self, func_call: &UserDefinedFunction) {
+        if !func_call.catalog.unsafe_skip_materializing_exprs {
+            let name = &func_call.catalog.name;
+            self.impure = Some(format!("user-defined function `{name}`").into());
+        } else {
+            func_call.args.iter().for_each(|expr| self.visit_expr(expr));
+        }
+    }
+
+    fn visit_table_function(&mut self, func_call: &TableFunction) {
+        // Scalar UDFs have their own `UserDefinedFunction` expression variant. UDTFs instead
+        // share `TableFunction` with built-ins and carry their catalog in `user_defined`.
+        if func_call.function_type == TableFunctionType::UserDefined {
+            let catalog = func_call.user_defined.as_ref().unwrap();
+            if !catalog.unsafe_skip_materializing_exprs {
+                self.impure =
+                    Some(format!("user-defined table function `{}`", catalog.name).into());
+            } else {
+                func_call.args.iter().for_each(|expr| self.visit_expr(expr));
+            }
+        } else if is_builtin_function_deterministic(func_call) {
+            func_call.args.iter().for_each(|expr| self.visit_expr(expr));
+        } else {
+            self.impure = Some(func_call.function_type.as_str_name().into());
+        }
+    }
+
+    fn visit_now(&mut self, _: &super::Now) {
+        self.impure = Some("NOW or PROCTIME".into());
+    }
+
+    fn visit_secret_ref(&mut self, secret_ref: &super::SecretRef) {
+        self.impure = Some(format!("secret reference `{}`", secret_ref.secret_name).into());
+    }
+
+    fn visit_function_call(&mut self, func_call: &FunctionCall) {
+        if is_builtin_function_deterministic(func_call) {
+            func_call
+                .inputs()
+                .iter()
+                .for_each(|expr| self.visit_expr(expr));
+        } else {
+            self.impure = Some(func_call.func_type().as_str_name().into());
+        }
+    }
+}
+
+/// Returns whether the planner classifies an expression as pure.
+///
+/// This classification combines semantic purity with UDF result-materialization policy.
+/// Semantically impure nodes are non-deterministic or have side effects. A UDF with
+/// `unsafe_skip_materializing_exprs = true` follows the recursive purity of its arguments because
+/// creating such a UDF requires an `IMMUTABLE` declaration. The planner trusts that declaration;
+/// it cannot guarantee that the implementation is deterministic or side-effect-free.
+///
+/// A UDF with `unsafe_skip_materializing_exprs = false` is classified as impure even if it is
+/// actually deterministic and side-effect-free. Keeping result materialization enabled may be
+/// desirable solely as a caching optimization. Therefore, an expression classified as impure is
+/// not necessarily semantically impure.
 pub fn is_pure(expr: &ExprImpl) -> bool {
     !is_impure(expr)
 }
 
+/// Returns whether the planner classifies an expression as impure.
+///
+/// This is the inverse of [`is_pure`]. It returns `true` when any node is semantically impure or
+/// when a UDF has `unsafe_skip_materializing_exprs = false`. In the latter case, streaming
+/// projection planning materializes the complete top-level expression on retract inputs so the
+/// evaluated result can be preserved. UPSERT projects bypass result materialization independently
+/// of this classification.
+///
+/// Consequently, `true` can describe a semantically pure UDF that merely requests result caching;
+/// it does not necessarily mean that the UDF is non-deterministic or has side effects.
 pub fn is_impure(expr: &ExprImpl) -> bool {
     let mut a = ImpureAnalyzer::default();
     a.visit_expr(expr);
@@ -439,10 +503,30 @@ pub fn impure_expr_desc(expr: &ExprImpl) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use risingwave_common::types::DataType;
+    use risingwave_pb::catalog::PbFunction;
+    use risingwave_pb::catalog::function::{Kind, ScalarFunction};
     use risingwave_pb::expr::expr_node::Type;
 
-    use crate::expr::{ExprImpl, FunctionCall, InputRef, is_impure, is_pure};
+    use crate::catalog::function_catalog::FunctionCatalog;
+    use crate::expr::{ExprImpl, FunctionCall, InputRef, UserDefinedFunction, is_impure, is_pure};
+
+    fn udf_expr(
+        unsafe_skip_materializing_exprs: bool,
+        return_type: DataType,
+        args: Vec<ExprImpl>,
+    ) -> ExprImpl {
+        let catalog = FunctionCatalog::from(&PbFunction {
+            name: "test_udf".to_owned(),
+            kind: Some(Kind::Scalar(ScalarFunction {})),
+            return_type: Some(return_type.into()),
+            unsafe_skip_materializing_exprs,
+            ..Default::default()
+        });
+        UserDefinedFunction::new(Arc::new(catalog), args).into()
+    }
 
     fn expect_pure(expr: &ExprImpl) {
         assert!(is_pure(expr));
@@ -477,5 +561,31 @@ mod tests {
         .unwrap()
         .into();
         expect_impure(&e);
+    }
+
+    /// Verifies that UDF result-materialization settings participate in recursive purity analysis.
+    #[test]
+    fn test_udf_unsafe_skip_materializing_exprs() {
+        let input: ExprImpl = InputRef::new(0, DataType::Int16).into();
+
+        let materialized_udf = udf_expr(false, DataType::Int16, vec![input.clone()]);
+        expect_impure(&materialized_udf);
+
+        // Creation requires an opted-out UDF to be declared IMMUTABLE, so the planner classifies
+        // it as pure when all of its descendants are pure.
+        let skipped_udf = udf_expr(true, DataType::Int16, vec![input]);
+        expect_pure(&skipped_udf);
+
+        let text_input: ExprImpl = InputRef::new(0, DataType::Varchar).into();
+        let nested_materialized_udf = udf_expr(false, DataType::Varchar, vec![text_input]);
+        let regclass_with_materialized_udf: ExprImpl =
+            FunctionCall::new(Type::CastRegclass, vec![nested_materialized_udf])
+                .unwrap()
+                .into();
+        let outer_skipped_udf =
+            udf_expr(true, DataType::Int32, vec![regclass_with_materialized_udf]);
+        // An opted-out outer UDF is still recursively impure when one of its descendants is
+        // impure. Stream planning therefore materializes this complete top-level expression.
+        expect_impure(&outer_skipped_udf);
     }
 }

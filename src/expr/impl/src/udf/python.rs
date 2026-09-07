@@ -55,6 +55,7 @@ static PYTHON: UdfImplDescriptor = UdfImplDescriptor {
             name: opts.name_in_runtime.to_owned(),
         }))
     },
+    supports_always_retry_on_network_error: |_| false,
 };
 
 #[derive(Debug)]

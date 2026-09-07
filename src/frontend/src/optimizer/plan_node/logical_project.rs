@@ -270,12 +270,20 @@ impl ToStream for LogicalProject {
             });
         let should_materialize_expr = match new_input.stream_kind() {
             StreamKind::AppendOnly => None,
-            StreamKind::Retract | StreamKind::Upsert if unsafe_allow_unmaterialized_impure_expr => {
-                // This deliberately leaves impure expressions in `StreamProject` on retract/upsert
+            StreamKind::Upsert => {
+                // A project propagates its input stream key only through direct `InputRef`s.
+                // `logical_rewrite_for_stream` appends any missing key columns as hidden direct
+                // references, so a computed impure expression cannot itself be a stream-key
+                // column. Therefore, we can safely leave impure expressions in `StreamProject`
+                // on upsert streams.
+                None
+            }
+            StreamKind::Retract if unsafe_allow_unmaterialized_impure_expr => {
+                // This deliberately leaves impure expressions in `StreamProject` on retract
                 // streams. The behavior is unsafe and only enabled by the explicit session option.
                 None
             }
-            kind @ (StreamKind::Retract | StreamKind::Upsert) => {
+            StreamKind::Retract => {
                 // Extract impure functions to `MaterializedExprs` operator
                 let mut impure_field_names = BTreeMap::new();
                 let mut impure_expr_indices = HashSet::new();
@@ -297,15 +305,6 @@ impl ToStream for LogicalProject {
                     })
                     .collect();
                 if impure_exprs.is_empty() {
-                    None
-                } else if kind == StreamKind::Upsert
-                    && new_input
-                        .stream_key()
-                        .into_iter()
-                        .flatten()
-                        .all(|stream_key_idx| !impure_expr_indices.contains(stream_key_idx))
-                {
-                    // We're operating on non-stream-key columns of upsert stream, no need to materialize.
                     None
                 } else {
                     Some((impure_field_names, impure_expr_indices, impure_exprs))

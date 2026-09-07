@@ -366,6 +366,10 @@ message Function {
   optional uint64 created_at_epoch = 22;
   // Cluster version (tracked by git commit) when created
   optional string created_at_cluster_version = 23;
+  // Unsafe: whether to skip materializing evaluated results of this function for retractable
+  // streams. Re-evaluation can produce inconsistent results or fail if the function is not truly
+  // deterministic and side-effect-free. False by default.
+  bool unsafe_skip_materializing_exprs = 24;
 
   oneof kind {
     ScalarFunction scalar = 11;
