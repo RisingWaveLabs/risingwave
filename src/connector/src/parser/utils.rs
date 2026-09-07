@@ -45,24 +45,30 @@ use risingwave_pb::plan_common::additional_column::ColumnType;
 use crate::parser::{AccessError, AccessResult};
 use crate::source::cdc::DebeziumCdcMeta;
 
-/// get kafka topic name
+fn get_topic<'a>(
+    props: &'a BTreeMap<String, String>,
+    connector_topic_key: &str,
+) -> ConnectorResult<&'a String> {
+    const TOPIC_KEY: &str = "topic";
+
+    if let Some(topic) = props.get(connector_topic_key) {
+        return Ok(topic);
+    }
+    if let Some(topic) = props.get(TOPIC_KEY) {
+        return Ok(topic);
+    }
+
+    bail!("Must specify '{}' or '{}'", connector_topic_key, TOPIC_KEY)
+}
+
+/// Get the Kafka topic name.
 pub(super) fn get_kafka_topic(props: &BTreeMap<String, String>) -> ConnectorResult<&String> {
-    const KAFKA_TOPIC_KEY1: &str = "kafka.topic";
-    const KAFKA_TOPIC_KEY2: &str = "topic";
+    get_topic(props, "kafka.topic")
+}
 
-    if let Some(topic) = props.get(KAFKA_TOPIC_KEY1) {
-        return Ok(topic);
-    }
-    if let Some(topic) = props.get(KAFKA_TOPIC_KEY2) {
-        return Ok(topic);
-    }
-
-    // config
-    bail!(
-        "Must specify '{}' or '{}'",
-        KAFKA_TOPIC_KEY1,
-        KAFKA_TOPIC_KEY2
-    )
+/// Get the Pulsar topic name.
+pub(super) fn get_pulsar_topic(props: &BTreeMap<String, String>) -> ConnectorResult<&String> {
+    get_topic(props, "pulsar.topic")
 }
 
 /// download bytes from http(s) url

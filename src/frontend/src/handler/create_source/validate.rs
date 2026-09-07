@@ -123,6 +123,75 @@ fn validate_license(connector: &str) -> Result<()> {
     Ok(())
 }
 
+fn option_is_set(options: &WithOptions, key: &str) -> bool {
+    options.contains_key(key)
+        || options.secret_ref().contains_key(key)
+        || options.connection_ref().contains_key(key)
+}
+
+fn option_keys(options: &WithOptions) -> impl Iterator<Item = &str> {
+    options
+        .keys()
+        .chain(options.secret_ref().keys())
+        .chain(options.connection_ref().keys())
+        .map(String::as_str)
+}
+
+fn validate_pulsar_schema_options(
+    format_encode: &FormatEncodeOptions,
+    connector: &str,
+) -> Result<bool> {
+    let options = WithOptions::try_from(format_encode.row_options())?;
+    if let Some(option) = option_keys(&options).find(|option| {
+        option.starts_with(PULSAR_SCHEMA_PREFIX)
+            && !matches!(
+                *option,
+                PULSAR_SCHEMA_URL_KEY | PULSAR_SCHEMA_AUTH_TOKEN_KEY
+            )
+    }) {
+        return Err(RwError::from(ProtocolError(format!(
+            "unsupported Pulsar schema option `{option}`"
+        ))));
+    }
+
+    let has_url = option_is_set(&options, PULSAR_SCHEMA_URL_KEY);
+    let has_token = option_is_set(&options, PULSAR_SCHEMA_AUTH_TOKEN_KEY);
+    if has_token && !has_url {
+        return Err(RwError::from(ProtocolError(format!(
+            "`{PULSAR_SCHEMA_AUTH_TOKEN_KEY}` requires `{PULSAR_SCHEMA_URL_KEY}`"
+        ))));
+    }
+    if !has_url {
+        return Ok(false);
+    }
+
+    if connector != PULSAR_CONNECTOR
+        || format_encode.format != Format::Plain
+        || format_encode.row_encode != Encode::Avro
+    {
+        return Err(RwError::from(ProtocolError(format!(
+            "Pulsar schema requires connector = '{PULSAR_CONNECTOR}' with FORMAT PLAIN ENCODE AVRO"
+        ))));
+    }
+    if !options.connection_ref().is_empty() {
+        return Err(RwError::from(ProtocolError(
+            "Pulsar schema options do not support connection references".to_owned(),
+        )));
+    }
+
+    if let Some(option) = option_keys(&options).find(|option| {
+        matches!(*option, "schema.location" | AWS_GLUE_SCHEMA_ARN_KEY)
+            || *option == "schema.registry"
+            || option.starts_with("schema.registry.")
+    }) {
+        return Err(RwError::from(ProtocolError(format!(
+            "`{option}` cannot be combined with `{PULSAR_SCHEMA_URL_KEY}`"
+        ))));
+    }
+
+    Ok(true)
+}
+
 pub fn validate_compatibility(
     format_encode: &FormatEncodeOptions,
     props: &mut BTreeMap<String, String>,
@@ -157,7 +226,8 @@ pub fn validate_compatibility(
         })?;
 
     validate_license(&connector)?;
-    if connector != KAFKA_CONNECTOR {
+    let uses_pulsar_schema = validate_pulsar_schema_options(format_encode, &connector)?;
+    if connector != KAFKA_CONNECTOR && !uses_pulsar_schema {
         let res = match (&format_encode.format, &format_encode.row_encode) {
             (Format::Plain, Encode::Protobuf) | (Format::Plain, Encode::Avro) => {
                 let mut options = WithOptions::try_from(format_encode.row_options())?;
@@ -284,4 +354,113 @@ pub fn validate_compatibility(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use risingwave_sqlparser::ast::SqlOption;
+
+    use super::*;
+
+    fn format_encode(
+        format: Format,
+        encode: Encode,
+        options: &[(&str, &str)],
+    ) -> FormatEncodeOptions {
+        let row_options = options
+            .iter()
+            .map(|(name, value)| {
+                let name = name.to_string();
+                let value = value.to_string();
+                SqlOption::try_from((&name, &value)).unwrap()
+            })
+            .collect();
+        FormatEncodeOptions {
+            format,
+            row_encode: encode,
+            row_options,
+            key_encode: None,
+        }
+    }
+
+    fn source_options(connector: &str) -> BTreeMap<String, String> {
+        BTreeMap::from([(UPSTREAM_SOURCE_KEY.to_owned(), connector.to_owned())])
+    }
+
+    #[test]
+    fn pulsar_schema_accepts_minimal_plain_avro_options() {
+        let format_encode = format_encode(
+            Format::Plain,
+            Encode::Avro,
+            &[
+                (PULSAR_SCHEMA_URL_KEY, "http://localhost:8080"),
+                (PULSAR_SCHEMA_AUTH_TOKEN_KEY, "schema-token"),
+            ],
+        );
+        validate_compatibility(&format_encode, &mut source_options(PULSAR_CONNECTOR)).unwrap();
+    }
+
+    #[test]
+    fn pulsar_schema_token_requires_url() {
+        let format_encode = format_encode(
+            Format::Plain,
+            Encode::Avro,
+            &[(PULSAR_SCHEMA_AUTH_TOKEN_KEY, "schema-token")],
+        );
+        assert!(
+            validate_compatibility(&format_encode, &mut source_options(PULSAR_CONNECTOR)).is_err()
+        );
+    }
+
+    #[test]
+    fn pulsar_schema_rejects_other_connectors_and_formats() {
+        let kafka = format_encode(
+            Format::Plain,
+            Encode::Avro,
+            &[(PULSAR_SCHEMA_URL_KEY, "http://localhost:8080")],
+        );
+        assert!(validate_compatibility(&kafka, &mut source_options(KAFKA_CONNECTOR)).is_err());
+
+        let upsert = format_encode(
+            Format::Upsert,
+            Encode::Avro,
+            &[(PULSAR_SCHEMA_URL_KEY, "http://localhost:8080")],
+        );
+        assert!(validate_compatibility(&upsert, &mut source_options(PULSAR_CONNECTOR)).is_err());
+    }
+
+    #[test]
+    fn pulsar_schema_rejects_overlapping_and_unknown_options() {
+        for option in [
+            "schema.registry",
+            "schema.registry.username",
+            "schema.location",
+            AWS_GLUE_SCHEMA_ARN_KEY,
+            "schema.pulsar.ca",
+        ] {
+            let format_encode = format_encode(
+                Format::Plain,
+                Encode::Avro,
+                &[
+                    (PULSAR_SCHEMA_URL_KEY, "http://localhost:8080"),
+                    (option, "value"),
+                ],
+            );
+            assert!(
+                validate_compatibility(&format_encode, &mut source_options(PULSAR_CONNECTOR))
+                    .is_err(),
+                "expected `{option}` to be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn confluent_schema_registry_behavior_is_unchanged() {
+        let format_encode = format_encode(
+            Format::Plain,
+            Encode::Avro,
+            &[("schema.registry", "http://localhost:8081")],
+        );
+        validate_compatibility(&format_encode, &mut source_options(KAFKA_CONNECTOR)).unwrap();
+    }
 }

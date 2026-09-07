@@ -45,6 +45,9 @@ use risingwave_connector::parser::{
     fetch_json_schema_and_map_to_columns,
 };
 use risingwave_connector::schema::AWS_GLUE_SCHEMA_ARN_KEY;
+use risingwave_connector::schema::pulsar_schema::{
+    PULSAR_SCHEMA_AUTH_TOKEN_KEY, PULSAR_SCHEMA_PREFIX, PULSAR_SCHEMA_URL_KEY,
+};
 use risingwave_connector::schema::schema_registry::{
     SCHEMA_REGISTRY_BACKOFF_DURATION_KEY, SCHEMA_REGISTRY_BACKOFF_FACTOR_KEY,
     SCHEMA_REGISTRY_CA_PEM_PATH, SCHEMA_REGISTRY_MAX_DELAY_KEY, SCHEMA_REGISTRY_PASSWORD,
@@ -156,6 +159,14 @@ fn try_consume_schema_registry_config_from_options(
     .for_each(|key| {
         try_consume_string_from_options(format_encode_options, key);
     });
+}
+
+fn try_consume_pulsar_schema_config_from_options(
+    format_encode_options: &mut BTreeMap<String, String>,
+) {
+    for key in [PULSAR_SCHEMA_URL_KEY, PULSAR_SCHEMA_AUTH_TOKEN_KEY] {
+        try_consume_string_from_options(format_encode_options, key);
+    }
 }
 
 fn consume_string_from_options(
