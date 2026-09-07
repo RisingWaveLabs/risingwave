@@ -844,8 +844,8 @@ impl Binder {
         input_fields: &[Field],
     ) -> RwResult<BoundSymbolDefinition> {
         let symbol = s.symbol.real_value();
-        // A per-symbol prefix keeps the placeholder relation and columns unique across DEFINE items, which
-        // all bind in the same context.
+        // A per-symbol prefix makes diagnostics for the placeholder relation and columns easier to
+        // associate with the DEFINE item that created them.
         let prefix = format!("{NAV_TABLE}_{symbol}");
 
         let mut cond = s.definition.clone();
@@ -865,7 +865,8 @@ impl Binder {
         } = extractor;
 
         // Bring the navigation placeholders into scope as a synthetic relation so the predicate
-        // type-checks. They are appended to the current context, so capture the base index first.
+        // type-checks. Capture the base index first, then restore the context immediately after
+        // binding: another DEFINE must not be able to address this predicate's internal columns.
         //
         // Why a synthetic relation rather than a bespoke binder: after extraction each navigation
         // expression is a fresh column of a known type, and the rest of the predicate is ordinary
@@ -873,17 +874,24 @@ impl Binder {
         // normal `bind_expr` resolve everything in one pass (name resolution, coercion, operator
         // type-checking) and hand back `InputRef`s we then remap to slots. Building a separate typed
         // binder for the predicate would duplicate that machinery for no behavioural gain. The
-        // relation name is internal (`__mr_nav_*`) and never escapes binding.
+        // relation name is internal (`__mr_nav_*`) and never escapes this predicate's binding.
         let nav_base = self.context.columns.len();
-        if !nav_fields.is_empty() {
+        let bind_result = if nav_fields.is_empty() {
+            self.bind_expr(&cond)
+        } else {
+            let context = self.context.clone();
             let cols: Vec<(bool, Field)> = nav_fields.iter().map(|f| (false, f.clone())).collect();
-            self.bind_table_to_context(cols, prefix.clone(), None, None)?;
-        }
+            let result = self
+                .bind_table_to_context(cols, prefix.clone(), None, None)
+                .and_then(|_| self.bind_expr(&cond));
+            self.context = context;
+            result
+        };
 
         // On failure, list the variables actually in scope: the classic trap is identifier case
         // folding — `PATTERN ("A" ...)` registers `"A"` while an unquoted `A.v` in the predicate
         // folds to `a.v` and misses it, and the generic bind error gives no way to see that.
-        let expr = self.bind_expr(&cond).map_err(|e| {
+        let expr = bind_result.map_err(|e| {
             crate::error::ErrorCode::BindError(format!(
                 "{}\nwhile binding the DEFINE predicate of `{symbol}`; pattern variables in scope \
                  (case-sensitive as written): {}",

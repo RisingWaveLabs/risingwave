@@ -240,6 +240,12 @@ pub struct IncrementalMatcher {
     /// WITHIN-deadline prune in particular would otherwise delete rows carrying a match the
     /// truncated scan never reached.
     incomplete: bool,
+    /// Absolute buffer position where a budget-truncated match scan will resume. Unlike
+    /// `matchless_upto`, this may follow successful matches: the corresponding leftmost-prefix of
+    /// matches remains in `matched`, and the next refresh appends matches found from this cursor.
+    /// Reset whenever rows are appended or invalidated, because those changes can alter previously
+    /// provisional matches and their skip-resume positions.
+    scan_cursor: usize,
     /// Positions `[next_pos, dead_upto)` proven dead at the boundary by the freeze walks of this
     /// and earlier visits (`next_pos <= matchless_upto <= dead_upto` always). Deadness is monotone
     /// under appends — a walk reads only rows at or before its position (there is no forward
@@ -296,6 +302,7 @@ impl IncrementalMatcher {
             next_pos: 0,
             seq_index: Vec::new(),
             incomplete: false,
+            scan_cursor: 0,
             dead_upto: 0,
             matchless_upto: 0,
             freeze_truncated: false,
@@ -312,6 +319,7 @@ impl IncrementalMatcher {
         self.next_pos = 0;
         self.seq_index.clear();
         self.incomplete = false;
+        self.scan_cursor = 0;
         self.dead_upto = 0;
         self.matchless_upto = 0;
         self.freeze_truncated = false;
@@ -391,6 +399,11 @@ impl IncrementalMatcher {
             new_row_seqs.iter().all(|s| !self.seq_index.contains(s)),
             "re-feeds must go through refresh_matcher/truncate, not advance"
         );
+        // Appended rows can extend a greedy match or make a formerly boundary-blocked start match,
+        // so a saved scan prefix is no longer reusable. Matchless-forever starts remain valid.
+        self.incomplete = false;
+        self.scan_cursor = self.matchless_upto;
+        self.freeze_truncated = false;
         self.seq_index.extend_from_slice(new_row_seqs);
         self.rescan(matcher, budget, memoize).await
     }
@@ -432,11 +445,42 @@ impl IncrementalMatcher {
             self.matchless_upto,
             self.dead_upto
         );
-        let mut tail: Vec<LabeledMatch> = Vec::new();
-        {
-            // Begin past the starts earlier rescans proved matchless forever (suffix-relative, like
-            // everything the finder sees).
-            let mut scan = MatchScan::starting_at(self.matchless_upto - offset);
+        let continuing_scan = self.incomplete;
+        let resume_freeze = !continuing_scan && self.freeze_truncated;
+        let mut tail_abs: Vec<LabeledMatch> = if continuing_scan || resume_freeze {
+            // Preserve the already-scanned leftmost prefix. Matches are seq-anchored in storage, so
+            // recover their current buffer positions before appending the resumed scan's suffix.
+            let mut search_from = self.next_pos;
+            self.matched[self.frozen_count..]
+                .iter()
+                .map(|m| {
+                    let start = search_from
+                        + self.seq_index[search_from..]
+                            .iter()
+                            .position(|&seq| seq == m.start_seq)
+                            .expect("provisional match start seq must still be fed");
+                    search_from = start + 1;
+                    LabeledMatch {
+                        start,
+                        end: start + m.labels.len(),
+                        labels: m.labels.clone(),
+                    }
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let mut scan_truncated = false;
+        if !resume_freeze {
+            // A truncated refresh resumes after the successful matches already retained above.
+            // A fresh scan starts after the starts proven matchless forever.
+            let scan_start = if continuing_scan {
+                self.scan_cursor
+            } else {
+                self.matchless_upto
+            };
+            debug_assert!(self.next_pos <= scan_start && scan_start <= n_rows);
+            let mut scan = MatchScan::starting_at(scan_start - offset);
             while let Some(m) = self
                 .nfa
                 .next_match(
@@ -449,29 +493,23 @@ impl IncrementalMatcher {
                 )
                 .await?
             {
-                tail.push(m);
+                tail_abs.push(LabeledMatch {
+                    start: m.start + offset,
+                    end: m.end + offset,
+                    labels: m.labels,
+                });
             }
-            // Remember what this scan proved, even when the budget cut it short: that is what
-            // makes the next rescan cheaper than this one. A matchless start is dead as well.
-            self.matchless_upto = offset + scan.matchless_upto();
+            self.scan_cursor = offset + scan.next_start();
+            // Extend the matchless prefix only when this pull began exactly at its end. Once a
+            // successful match creates a gap, the later cursor is resumable but not matchless.
+            if scan_start == self.matchless_upto {
+                self.matchless_upto = offset + scan.matchless_upto();
+            }
             self.dead_upto = self.dead_upto.max(self.matchless_upto);
+            // Capture this before freeze walks spend more budget. A completed scan followed by a
+            // truncated freeze keeps its complete tail and resumes only the freeze next visit.
+            scan_truncated = budget.hit;
         }
-        // Whether the pull loop stopped because the budget died (including a budget already spent
-        // on entry) rather than because the scan genuinely finished. Captured BEFORE the freeze
-        // walks below spend more budget: a completed scan whose freeze checks exhaust the budget
-        // still has a COMPLETE tail — freezing is conservative on exhaustion, completeness is not
-        // affected.
-        let scan_truncated = budget.hit;
-
-        // Lift suffix-relative spans back to absolute buffer positions.
-        let tail_abs: Vec<LabeledMatch> = tail
-            .into_iter()
-            .map(|m| LabeledMatch {
-                start: m.start + offset,
-                end: m.end + offset,
-                labels: m.labels,
-            })
-            .collect();
 
         // Freeze the leading run of matches whose scan region `[cursor, resume)` is entirely dead at
         // the boundary. A dead position's scan outcome is final — no path from it can consume past
@@ -526,6 +564,7 @@ impl IncrementalMatcher {
         // Freezing moves the resume point past matches, including past starts the finder never
         // proved anything about; the matchless prefix begins at the resume point by definition.
         self.matchless_upto = self.matchless_upto.max(cursor);
+        self.scan_cursor = self.scan_cursor.max(cursor);
         self.freeze_truncated = freeze_truncated;
 
         // Drop the previous provisional tail and reattach the freshly scanned suffix, moving each
@@ -625,6 +664,8 @@ impl IncrementalMatcher {
         // frozen prefix.
         self.dead_upto = cursor;
         self.matchless_upto = cursor;
+        self.scan_cursor = cursor;
+        self.incomplete = false;
         self.freeze_truncated = false;
         self.frozen_count = kept;
         self.matched.truncate(kept);
@@ -730,6 +771,9 @@ impl IncrementalMatcher {
         // need not hold — conservative, and resumable.
         self.dead_upto = self.next_pos;
         self.matchless_upto = self.next_pos;
+        self.scan_cursor = self.next_pos;
+        self.incomplete = false;
+        self.freeze_truncated = false;
         self.seq_index.drain(..final_pos);
         Finalized::Rebased
     }
@@ -2627,6 +2671,50 @@ mod tests {
             n_rows - N
         );
         assert!(!inc.needs_refresh());
+    }
+
+    /// A successful match advances `MatchScan::next_start` without advancing `matchless_upto`.
+    /// With overlapping matches, a visit can therefore spend its whole budget after returning a
+    /// long prefix while proving no start matchless. Refreshes must retain that prefix and resume
+    /// at the saved scan cursor; restarting at `matchless_upto == 0` repeats the same matches
+    /// forever and leaves the partition permanently incomplete.
+    #[tokio::test]
+    async fn finder_resumes_after_budget_truncated_overlapping_matches() {
+        const RUN: usize = 80;
+        const BUDGET: usize = 1024;
+        let nfa = Nfa::compile(&quant(Pattern::Var("a".into()), Quantifier::Plus, false));
+        let rows: Vec<BTreeSet<String>> =
+            std::iter::repeat_n(BTreeSet::from(["a".to_owned()]), RUN)
+                .chain(std::iter::once(BTreeSet::from(["x".to_owned()])))
+                .collect();
+        let matcher = SetMatcher::new(rows);
+        let mut inc = IncrementalMatcher::new(std::sync::Arc::new(nfa), SkipMode::ToNextRow);
+        let seqs: Vec<Seq> = (0..=RUN as i64).map(Seq).collect();
+
+        let mut budget = ScanBudget::new(BUDGET);
+        inc.advance(&seqs, &matcher, &mut budget, true)
+            .await
+            .unwrap();
+        assert!(budget.hit, "the first scan must be truncated");
+        assert!(inc.is_incomplete());
+        let first_prefix_len = inc.provisional().len();
+        assert!(
+            first_prefix_len > 0 && first_prefix_len < RUN,
+            "the first visit must find a strict non-empty prefix"
+        );
+
+        let mut visits = 1;
+        while inc.needs_refresh() {
+            assert!(visits < 32, "the scan/freeze did not converge");
+            budget = ScanBudget::new(BUDGET);
+            inc.refresh(&matcher, &mut budget, true).await.unwrap();
+            visits += 1;
+        }
+
+        assert!(visits > 1, "the test must exercise cursor resumption");
+        assert_eq!(inc.provisional().len(), RUN);
+        assert_eq!(inc.frozen(), RUN);
+        assert_eq!(inc.resume_pos(), RUN);
     }
 
     #[tokio::test]

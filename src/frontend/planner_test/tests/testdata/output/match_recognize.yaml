@@ -23,6 +23,32 @@
           └─StreamExchange { dist: HashShard(t.id) }
             └─StreamFilter { predicate: IsNotNull(t.ts) }
               └─StreamTableScan { table: t, columns: [t.id, t.ts, t.v, t._row_id], stream_scan_type: SnapshotBackfill, stream_key: [t._row_id], pk: [_row_id], dist: UpstreamHashShard(t._row_id) }
+- name: MATCH_RECOGNIZE predicate pushdown visits every shared CTE parent
+  sql: |
+    create table t(id int, ts int, v int, watermark for ts as ts - 10) append only;
+    with cte as (select * from t)
+    select * from cte match_recognize (
+      partition by id
+      order by ts
+      measures a.v as value
+      one row per match
+      after match skip past last row
+      pattern (a)
+      define a as a.v > 0
+    )
+    union all
+    select id, v from cte;
+  logical_plan: |-
+    LogicalUnion { all: true }
+    ├─LogicalProject { exprs: [partition_0, value] }
+    │ └─LogicalMatchRecognize { partition_by: [t.id], order_by: [t.ts], measures: ["value"], pattern: a }
+    │   └─LogicalShare { id: 2 }
+    │     └─LogicalProject { exprs: [t.id, t.ts, t.v] }
+    │       └─LogicalScan { table: t, columns: [t.id, t.ts, t.v, t._row_id, t._rw_timestamp] }
+    └─LogicalProject { exprs: [t.id, t.v] }
+      └─LogicalShare { id: 2 }
+        └─LogicalProject { exprs: [t.id, t.ts, t.v] }
+          └─LogicalScan { table: t, columns: [t.id, t.ts, t.v, t._row_id, t._rw_timestamp] }
 - name: MATCH_RECOGNIZE with a CLASSIFIER() measure
   sql: |
     create table t(id int, ts int, v int, watermark for ts as ts - 10) append only;
@@ -472,6 +498,21 @@
   binder_error: |-
     Feature is not yet implemented: IGNORE NULLS on PREV() in MATCH_RECOGNIZE DEFINE
     No tracking issue yet. Feel free to submit a feature request at https://github.com/risingwavelabs/risingwave/issues/new?labels=type%2Ffeature&template=feature_request.yml
+- name: MATCH_RECOGNIZE isolates internal navigation columns between DEFINE items
+  sql: |
+    create table t(id int, ts int, v int, watermark for ts as ts - 10) append only;
+    select * from t match_recognize (
+      partition by id
+      order by ts
+      measures a.v as m
+      one row per match
+      after match skip past last row
+      pattern (a b)
+      define a as prev(a.v) = a.v, b as __mr_nav_a_0 > 0
+    );
+  binder_error: |-
+    Bind error: Failed to bind expression: __mr_nav_a_0 > 0: Item not found: Invalid column: __mr_nav_a_0
+    while binding the DEFINE predicate of `b`; pattern variables in scope (case-sensitive as written): a, b
 - name: MATCH_RECOGNIZE rejects AFTER MATCH SKIP TO a variable absent from PATTERN (it degraded on every match)
   sql: |
     create table t(id int, ts int, v int, watermark for ts as ts - 10) append only;

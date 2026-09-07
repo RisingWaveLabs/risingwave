@@ -20,9 +20,9 @@ use risingwave_sqlparser::ast::{AfterMatchSkip, MatchRecognizePattern, RowsPerMa
 use super::generic::GenericPlanRef;
 use super::stream::StreamPlanNodeMetadata;
 use super::{
-    ColPrunable, ColumnPruningContext, ExprRewritable, ExprVisitable, Logical, LogicalFilter,
+    ColPrunable, ColumnPruningContext, ExprRewritable, ExprVisitable, Logical,
     LogicalPlanRef as PlanRef, LogicalProject, PlanBase, PlanTreeNodeUnary, PredicatePushdown,
-    PredicatePushdownContext, ToBatch, ToStream, ToStreamContext, generic,
+    PredicatePushdownContext, ToBatch, ToStream, ToStreamContext, gen_filter_and_pushdown, generic,
 };
 use crate::binder::{BoundMeasure, BoundSymbolDefinition, MeasureSlotKind};
 use crate::error::Result;
@@ -182,10 +182,11 @@ impl PredicatePushdown for LogicalMatchRecognize {
     fn predicate_pushdown(
         &self,
         predicate: Condition,
-        _ctx: &mut PredicatePushdownContext,
+        ctx: &mut PredicatePushdownContext,
     ) -> PlanRef {
-        // Output columns are computed (partition/measures), so do not push predicates through.
-        LogicalFilter::create(self.clone().into(), predicate)
+        // Output columns are computed (partition/measures), so do not push predicates through, but
+        // keep recursing so a share below this node receives a contribution from every parent.
+        gen_filter_and_pushdown(self, predicate, Condition::true_cond(), ctx)
     }
 }
 

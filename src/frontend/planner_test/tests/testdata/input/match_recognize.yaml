@@ -13,6 +13,23 @@
   expected_outputs:
     - logical_plan
     - stream_plan
+- name: MATCH_RECOGNIZE predicate pushdown visits every shared CTE parent
+  sql: |
+    create table t(id int, ts int, v int, watermark for ts as ts - 10) append only;
+    with cte as (select * from t)
+    select * from cte match_recognize (
+      partition by id
+      order by ts
+      measures a.v as value
+      one row per match
+      after match skip past last row
+      pattern (a)
+      define a as a.v > 0
+    )
+    union all
+    select id, v from cte;
+  expected_outputs:
+    - logical_plan
 - name: MATCH_RECOGNIZE with a CLASSIFIER() measure
   sql: |
     create table t(id int, ts int, v int, watermark for ts as ts - 10) append only;
@@ -417,6 +434,20 @@
       after match skip past last row
       pattern (a b)
       define a as a.v > 0, b as b.v < prev(b.v, 1 ignore nulls)
+    );
+  expected_outputs:
+    - binder_error
+- name: MATCH_RECOGNIZE isolates internal navigation columns between DEFINE items
+  sql: |
+    create table t(id int, ts int, v int, watermark for ts as ts - 10) append only;
+    select * from t match_recognize (
+      partition by id
+      order by ts
+      measures a.v as m
+      one row per match
+      after match skip past last row
+      pattern (a b)
+      define a as prev(a.v) = a.v, b as __mr_nav_a_0 > 0
     );
   expected_outputs:
     - binder_error

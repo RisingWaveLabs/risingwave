@@ -170,11 +170,12 @@ A partition can contain many matches, and two matches may produce byte-identical
 `_match_id` column** (the same mechanism sources use for `_row_id`); the stream key is the partition
 columns plus `_match_id`. It is hidden, so `SELECT *` returns only the user columns.
 
-The executor fills `_match_id` with the **match's start row's `seq`** (the buffered row's PK
-tiebreaker, assigned once at ingest — see [State and fault tolerance](#state-and-fault-tolerance)).
-This is unique forever — an emitted match's start row is always consumed, so no later match can
-share it — and, unlike an id minted at emission time, it is **deterministic across recovery
-replay**: re-emitting a match after a rollback reproduces byte-identical output.
+The executor fills `_match_id` with the **match's start row's `seq`** (the matcher-state PK
+tiebreaker, assigned when the matcher ingests the already-sorted row — see
+[State and fault tolerance](#state-and-fault-tolerance)). This is unique forever — an emitted
+match's start row is always consumed, so no later match can share it — and, unlike an id minted at
+emission time, it is **deterministic across recovery replay**: re-emitting a match after a rollback
+reproduces byte-identical output.
 
 ### Emit semantics
 
@@ -445,17 +446,18 @@ re-feeding, and `DEFINE`/`MEASURES` are evaluated at match time. (The upstream `
 its own buffer table for rows not yet released; a row lives in exactly one of the two at every
 checkpoint.)
 
-`seq` is the PK tiebreaker for rows with equal `ORDER BY` keys, and it must be **monotonic in
-arrival order**: the state-table order is the re-feed order, and a tie re-fed in a different order
-than the live matcher saw would silently change which row a match binds. It is a plain per-actor
-counter whose seed is the maximum retained seq **or the barrier epoch's physical time (`<< 20`),
-whichever is larger**. The epoch floor is load-bearing, not belt-and-braces: consumed rows are
-deleted, so a retained-max-only seed would re-mint the seqs of fully-consumed matches after a
-restart or rescale — and a reused seq collides `_match_id`s, silently replacing an earlier match's
-row in the materialized view. Barrier epochs' physical time is strictly increasing (the meta
-service restores it from the maximum committed epoch across failover), so the floor clears every
-seq ever minted. A partition is owned by one actor at a time, so per-partition uniqueness survives
-ownership moves.
+`seq` is the matcher state table's PK tiebreaker for rows with equal `ORDER BY` keys. It does not
+choose their order: `StreamWatermarkSort` has already emitted them using its physical table key
+before the matcher assigns `seq`. The counter must be **monotonic in matcher ingestion order** so
+recovery re-feeds ties in the same order the live matcher saw; changing that order would silently
+change which row a match binds. It is a plain per-actor counter whose seed is the maximum retained
+seq **or the barrier epoch's physical time (`<< 20`), whichever is larger**. The epoch floor is
+load-bearing, not belt-and-braces: consumed rows are deleted, so a retained-max-only seed would
+re-mint the seqs of fully-consumed matches after a restart or rescale — and a reused seq collides
+`_match_id`s, silently replacing an earlier match's row in the materialized view. Barrier epochs'
+physical time is strictly increasing (the meta service restores it from the maximum committed
+epoch across failover), so the floor clears every seq ever minted. A partition is owned by one
+actor at a time, so per-partition uniqueness survives ownership moves.
 
 - **Recovery.** After the first barrier the executor scans its owned vnodes and re-feeds each
   partition's rows into a fresh matcher — one batched feed per partition. No emission happens
@@ -497,12 +499,20 @@ tracks the same bound. Wiring this into RisingWave's memory accounting is a plan
 
 ### Observability
 
-Three counters, labelled `(table_id, actor_id, fragment_id)` like the neighbouring over-window set:
-`stream_match_recognize_matches_emitted_count`, `stream_match_recognize_evicted_rows_count` (rows
-leaving the buffer, whether consumed by an emitted match or pruned as a dead prefix), and
-`stream_match_recognize_scan_budget_exhausted_count` — the alerting hook for
-catastrophic-backtracking degradation: the log line is deduplicated per pass, the counter counts
-every affected visit.
+Four counters and one gauge are labelled `(table_id, actor_id, fragment_id)`, like the neighbouring
+over-window set:
+
+- `stream_match_recognize_matches_emitted_count`: matches emitted.
+- `stream_match_recognize_evicted_rows_count`: rows leaving the matcher buffer, whether consumed by
+  an emitted match or pruned as a dead prefix.
+- `stream_match_recognize_scan_budget_exhausted_count`: the alerting hook for
+  catastrophic-backtracking degradation. The log line is deduplicated per pass; the counter counts
+  every affected partition visit.
+- `stream_match_recognize_within_deadline_overflow_count`: buffered rows for which adding the
+  `WITHIN` bound exceeds the `ORDER BY` type's range. Their deadline becomes unbounded, so the
+  window never closes through watermark progress.
+- `stream_match_recognize_retained_rows` (gauge): rows currently resident in matcher memory, summed
+  across the actor's partitions.
 
 ## Semantic edges for CEP use
 
@@ -540,14 +550,21 @@ is the candidate future feature that would make direct layering work.
 
 ### Simultaneous events are linearized
 
-Rows tying on the full `ORDER BY` are ordered by ingestion order (`seq` freezes the sort's release
-order, which for ties follows the upstream row identity — an arrival artifact). The order is stable
-across recovery and rescale, but re-creating the MV or replaying the topic may interleave the same
-logical events differently and change the result — including breaking a contiguous match when a
-third same-timestamp row lands between two others. This is standard-conformant (a non-total
-`ORDER BY` makes results implementation-dependent), and two supported mechanisms make tie order
-intentional instead of accidental: secondary `ORDER BY` columns (realized physically by the sort)
-and `PERMUTE` for order-independent steps (`PERMUTE` is not available in Flink or BigQuery).
+Rows tying on the full query `ORDER BY` are ordered by `StreamWatermarkSort`'s remaining physical
+table key: distribution-key columns followed by upstream stream-key columns, excluding columns
+already present in the order key. For an append-only table with a primary key, this commonly means
+that tied rows follow primary-key order rather than arrival order. The matcher assigns `seq` only
+after the sort emits a row; `seq` preserves that established order in matcher state and does not
+choose it.
+
+The physical tie order is stable across recovery and rescale while those keys stay the same, but it
+is not part of the SQL query's ordering contract and can change when the physical keys or row
+identities change. Such a change can alter an order-sensitive result — including breaking a
+contiguous match when a third same-key row lands between two others. This is standard-conformant (a
+non-total `ORDER BY` makes results implementation-dependent), and two supported mechanisms make tie
+order intentional instead of physical: add secondary `ORDER BY` columns that make the query order
+total, or use `PERMUTE` for order-independent steps (`PERMUTE` is not available in Flink or
+BigQuery).
 
 ### Without `WITHIN`, watermark progress finalizes nothing
 
