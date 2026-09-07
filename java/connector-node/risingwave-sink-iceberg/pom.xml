@@ -16,10 +16,10 @@
     <name>risingwave-sink-iceberg</name>
 
     <properties>
-        <iceberg.version>1.10.1</iceberg.version>
+        <iceberg.version>1.11.0</iceberg.version>
         <!-- Keep in sync with the versions bundled in org.apache.iceberg:iceberg-gcp-bundle -->
-        <google.cloud.storage.version>2.55.0</google.cloud.storage.version>
-        <google.cloud.kms.version>2.75.0</google.cloud.kms.version>
+        <google.cloud.storage.version>2.72.0</google.cloud.storage.version>
+        <google.cloud.kms.version>2.99.0</google.cloud.kms.version>
         <maven.compiler.source>21</maven.compiler.source>
         <maven.compiler.target>21</maven.compiler.target>
         <maven.javadoc.skip>true</maven.javadoc.skip>
@@ -208,7 +208,7 @@
         <dependency>
             <groupId>org.apache.thrift</groupId>
             <artifactId>libthrift</artifactId>
-            <version>0.16.0</version>
+            <version>0.24.0</version>
             <exclusions>
                 <!-- Hive Metastore uses the binary socket transport, not Thrift's servlet transport. -->
                 <exclusion>
@@ -221,7 +221,7 @@
         <dependency>
             <groupId>org.jline</groupId>
             <artifactId>jline</artifactId>
-            <version>3.25.0</version>
+            <version>3.30.16</version>
         </dependency>
         <dependency>
             <groupId>org.apache.hadoop</groupId>

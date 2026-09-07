@@ -44,13 +44,13 @@
         <dependency>
             <groupId>com.amazon.redshift</groupId>
             <artifactId>redshift-jdbc42</artifactId>
-            <version>2.2.2</version>
+            <version>2.2.8</version>
         </dependency>
         <!-- https://mvnrepository.com/artifact/net.snowflake/snowflake-jdbc -->
         <dependency>
             <groupId>net.snowflake</groupId>
             <artifactId>snowflake-jdbc</artifactId>
-            <version>3.23.1</version>
+            <version>3.28.0</version>
         </dependency>
 
         <dependency>
