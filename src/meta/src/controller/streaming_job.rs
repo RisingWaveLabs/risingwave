@@ -3506,7 +3506,10 @@ impl CatalogController {
                             {
                                 let mut new_sink_props = sink.properties.0.clone();
                                 new_sink_props.extend(alter_props.clone());
-                                SinkType::validate_alter_config(&new_sink_props)
+                                SinkType::validate_alter_config_change(
+                                    &new_sink_props,
+                                    &alter_props,
+                                )
                             },
                             |sink: &str| Err(SinkError::Config(anyhow!(
                                 "unsupported sink type {}",
@@ -3822,7 +3825,7 @@ fn validate_sink_props(sink: &sink::Model, props: &BTreeMap<String, String>) -> 
                 {
                     let mut new_props = sink.properties.0.clone();
                     new_props.extend(props.clone());
-                    SinkType::validate_alter_config(&new_props)
+                    SinkType::validate_alter_config_change(&new_props, props)
                 },
                 |sink: &str| Err(SinkError::Config(anyhow!("unsupported sink type {}", sink)))
             )?

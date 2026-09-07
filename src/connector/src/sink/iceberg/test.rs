@@ -661,6 +661,7 @@ fn test_parse_compaction_config() {
         MANIFEST_MIN_MERGE_COUNT_DEFAULT as usize
     );
     assert_eq!(config.max_snapshots_num_before_compaction, None);
+    assert_eq!(config.compaction_type, None);
     assert_eq!(config.target_file_size_mb(), 1024); // Default
     assert_eq!(config.write_parquet_compression(), "zstd"); // Default
     assert_eq!(config.write_parquet_max_row_group_rows(), None); // Default
@@ -981,6 +982,67 @@ fn test_upsert_accepts_copy_on_write() {
     assert!(result.is_ok());
     let config = result.unwrap();
     assert_eq!(config.write_mode, IcebergWriteMode::CopyOnWrite);
+}
+
+fn iceberg_compaction_alter_config(
+    write_mode: &str,
+    compaction_type: &str,
+    enable_compaction: bool,
+) -> BTreeMap<String, String> {
+    BTreeMap::from([
+        ("connector".to_owned(), "iceberg".to_owned()),
+        ("type".to_owned(), "upsert".to_owned()),
+        ("primary_key".to_owned(), "id".to_owned()),
+        ("warehouse.path".to_owned(), "s3://iceberg".to_owned()),
+        ("catalog.type".to_owned(), "storage".to_owned()),
+        ("catalog.name".to_owned(), "demo".to_owned()),
+        ("database.name".to_owned(), "test_db".to_owned()),
+        ("table.name".to_owned(), "test_table".to_owned()),
+        ("write_mode".to_owned(), write_mode.to_owned()),
+        ("compaction.type".to_owned(), compaction_type.to_owned()),
+        (
+            "enable_compaction".to_owned(),
+            enable_compaction.to_string(),
+        ),
+    ])
+}
+
+#[test]
+fn test_alter_allows_legacy_copy_on_write_compaction_type() {
+    use crate::sink::Sink;
+    use crate::sink::iceberg::IcebergSink;
+
+    let mut values = iceberg_compaction_alter_config("copy-on-write", "full", false);
+    values.insert("compaction_interval_sec".to_owned(), "120".to_owned());
+    let alter_props = BTreeMap::from([("compaction_interval_sec".to_owned(), "120".to_owned())]);
+
+    IcebergSink::validate_alter_config_change(&values, &alter_props).unwrap();
+
+    values.insert("enable_compaction".to_owned(), "true".to_owned());
+    let alter_props = BTreeMap::from([("enable_compaction".to_owned(), "true".to_owned())]);
+    IcebergSink::validate_alter_config_change(&values, &alter_props).unwrap();
+}
+
+#[test]
+fn test_alter_merge_on_read_compaction_checks_explicit_type_license() {
+    use crate::sink::Sink;
+    use crate::sink::iceberg::IcebergSink;
+
+    let values = iceberg_compaction_alter_config("merge-on-read", "auto", false);
+    let alter_props = BTreeMap::from([("compaction.type".to_owned(), "auto".to_owned())]);
+    let error = IcebergSink::validate_alter_config_change(&values, &alter_props).unwrap_err();
+    assert!(
+        error.to_string().contains("feature IcebergCompaction"),
+        "unexpected error: {error}"
+    );
+
+    let values = iceberg_compaction_alter_config("merge-on-read", "auto", true);
+    let alter_props = BTreeMap::from([("enable_compaction".to_owned(), "true".to_owned())]);
+    let error = IcebergSink::validate_alter_config_change(&values, &alter_props).unwrap_err();
+    assert!(
+        error.to_string().contains("feature IcebergCompaction"),
+        "unexpected error: {error}"
+    );
 }
 
 // Regression: an upsert sink whose pk column has upper-case letters must resolve.

@@ -225,13 +225,12 @@ where
 }
 
 /// Compaction type for Iceberg sink
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum CompactionType {
-    /// Auto compaction - selects a localized strategy from the current snapshot
+    /// Auto compaction - compacts the union of small and delete-heavy files
     Auto,
     /// Full compaction - rewrites all data files
-    #[default]
     Full,
     /// Small files compaction - only compact small files
     SmallFiles,
@@ -463,7 +462,7 @@ pub struct IcebergConfig {
     pub target_file_size_mb: Option<u64>,
 
     /// Compaction type: `auto`, `full`, `small-files`, or `files-with-delete`
-    /// If not set, will default to `full`
+    /// If not set, defaults to `auto` when Iceberg compaction is licensed, otherwise `full`
     #[serde(rename = "compaction.type", default)]
     #[with_option(allow_alter_on_fly, iceberg_engine)]
     pub compaction_type: Option<CompactionType>,
@@ -816,12 +815,6 @@ impl IcebergConfig {
 
     pub fn target_file_size_mb(&self) -> u64 {
         self.target_file_size_mb.unwrap_or(1024)
-    }
-
-    /// Get the compaction type as an enum
-    /// This method parses the string and returns the enum value
-    pub fn compaction_type(&self) -> CompactionType {
-        self.compaction_type.unwrap_or_default()
     }
 
     /// Get the parquet compression codec

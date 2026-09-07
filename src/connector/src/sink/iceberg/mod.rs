@@ -40,6 +40,7 @@ use iceberg::table::Table;
 pub use metadata::*;
 pub use position_delete::*;
 use risingwave_common::bail;
+use risingwave_common::license::Feature;
 use tokio::sync::mpsc::UnboundedSender;
 pub use writer::*;
 
@@ -87,6 +88,63 @@ impl Debug for IcebergSink {
             .field("config", &self.config)
             .finish()
     }
+}
+
+fn validate_explicit_compaction_type(config: &IcebergConfig) -> Result<()> {
+    let Some(compaction_type) = config.compaction_type else {
+        return Ok(());
+    };
+
+    if config.write_mode == IcebergWriteMode::CopyOnWrite {
+        bail!(
+            "`compaction.type` must not be set when `write_mode` is `copy-on-write`; \
+             copy-on-write selects its compaction policy automatically"
+        );
+    }
+
+    if !matches!(compaction_type, CompactionType::Full) {
+        Feature::IcebergCompaction
+            .check_available()
+            .map_err(|e| anyhow!(e))?;
+    }
+
+    Ok(())
+}
+
+fn validate_compaction_option_compatibility(config: &IcebergConfig) -> Result<()> {
+    // Value ranges are validated by `IcebergConfig::from_btreemap`. This only rejects
+    // options that are incompatible with the selected merge-on-read strategy.
+    // COW ignores legacy persisted types, so merge-on-read type-option compatibility does not apply.
+    if config.write_mode == IcebergWriteMode::CopyOnWrite {
+        return Ok(());
+    }
+
+    let Some(compaction_type) = config.compaction_type else {
+        return Ok(());
+    };
+
+    let unsupported_option = match compaction_type {
+        // Auto uses both selection thresholds.
+        CompactionType::Auto => None,
+        // Keep accepting strategy-specific thresholds that Full ignores.
+        CompactionType::Full => None,
+        CompactionType::SmallFiles => config
+            .delete_files_count_threshold
+            .is_some()
+            .then_some(COMPACTION_DELETE_FILES_COUNT_THRESHOLD),
+        CompactionType::FilesWithDelete => config
+            .small_files_threshold_mb
+            .is_some()
+            .then_some(COMPACTION_SMALL_FILES_THRESHOLD_MB),
+    };
+    if let Some(option) = unsupported_option {
+        bail!(
+            "`{option}` is not supported for '{}' compaction type",
+            compaction_type.as_str()
+        );
+    }
+
+    Ok(())
 }
 
 impl IcebergSink {
@@ -172,80 +230,8 @@ impl Sink for IcebergSink {
             &self.config.r#type,
             self.config.write_mode,
         )?;
-
-        // Validate compaction type configuration
-        let compaction_type = self.config.compaction_type();
-
-        // Check COW mode constraints
-        // COW mode only supports 'full' compaction type
-        if self.config.write_mode == IcebergWriteMode::CopyOnWrite
-            && compaction_type != CompactionType::Full
-        {
-            bail!(
-                "'copy-on-write' mode only supports 'full' compaction type, got: '{}'",
-                compaction_type
-            );
-        }
-
-        match compaction_type {
-            CompactionType::Auto => {
-                risingwave_common::license::Feature::IcebergCompaction
-                    .check_available()
-                    .map_err(|e| anyhow::anyhow!(e))?;
-
-                if self.config.write_mode != IcebergWriteMode::MergeOnRead {
-                    bail!(
-                        "'auto' compaction type only supports 'merge-on-read' write mode, got: '{}'",
-                        self.config.write_mode
-                    );
-                }
-            }
-            CompactionType::SmallFiles => {
-                // 1. check license
-                risingwave_common::license::Feature::IcebergCompaction
-                    .check_available()
-                    .map_err(|e| anyhow::anyhow!(e))?;
-
-                // 2. check write mode
-                if self.config.write_mode != IcebergWriteMode::MergeOnRead {
-                    bail!(
-                        "'small-files' compaction type only supports 'merge-on-read' write mode, got: '{}'",
-                        self.config.write_mode
-                    );
-                }
-
-                // 3. check conflicting parameters
-                if self.config.delete_files_count_threshold.is_some() {
-                    bail!(
-                        "`compaction.delete-files-count-threshold` is not supported for 'small-files' compaction type"
-                    );
-                }
-            }
-            CompactionType::FilesWithDelete => {
-                // 1. check license
-                risingwave_common::license::Feature::IcebergCompaction
-                    .check_available()
-                    .map_err(|e| anyhow::anyhow!(e))?;
-
-                // 2. check write mode
-                if self.config.write_mode != IcebergWriteMode::MergeOnRead {
-                    bail!(
-                        "'files-with-delete' compaction type only supports 'merge-on-read' write mode, got: '{}'",
-                        self.config.write_mode
-                    );
-                }
-
-                // 3. check conflicting parameters
-                if self.config.small_files_threshold_mb.is_some() {
-                    bail!(
-                        "`compaction.small-files-threshold-mb` must not be set for 'files-with-delete' compaction type"
-                    );
-                }
-            }
-            CompactionType::Full => {
-                // Full compaction has no special requirements
-            }
-        }
+        validate_explicit_compaction_type(&self.config)?;
+        validate_compaction_option_compatibility(&self.config)?;
 
         let table = self.create_and_validate_table().await?;
         self.config
@@ -255,6 +241,34 @@ impl Sink for IcebergSink {
 
     fn support_schema_change() -> bool {
         true
+    }
+
+    fn validate_alter_config_change(
+        config: &BTreeMap<String, String>,
+        alter_props: &BTreeMap<String, String>,
+    ) -> Result<()> {
+        let compaction_type_changed = alter_props.contains_key(COMPACTION_TYPE);
+        let compaction_options_changed = compaction_type_changed
+            || alter_props.contains_key(COMPACTION_SMALL_FILES_THRESHOLD_MB)
+            || alter_props.contains_key(COMPACTION_DELETE_FILES_COUNT_THRESHOLD);
+        let enabling_compaction = alter_props
+            .get(ENABLE_COMPACTION)
+            .is_some_and(|value| value.eq_ignore_ascii_case("true"));
+
+        if compaction_options_changed || enabling_compaction {
+            let iceberg_config = IcebergConfig::from_btreemap(config.clone())?;
+            let validate_explicit_type = compaction_type_changed
+                || (enabling_compaction
+                    && iceberg_config.write_mode == IcebergWriteMode::MergeOnRead);
+
+            // Persisted COW types are legacy-only and must not block compaction activation.
+            if validate_explicit_type {
+                validate_explicit_compaction_type(&iceberg_config)?;
+            }
+            validate_compaction_option_compatibility(&iceberg_config)?;
+        }
+
+        Self::validate_alter_config(config)
     }
 
     fn validate_alter_config(config: &BTreeMap<String, String>) -> Result<()> {

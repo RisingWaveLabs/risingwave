@@ -18,14 +18,13 @@ use std::time::{Duration, Instant};
 
 use itertools::Itertools;
 use parking_lot::RwLock;
+use risingwave_common::license::Feature;
 use risingwave_connector::connector_common::{
     IcebergCommittedSnapshot, IcebergSinkCompactionUpdate,
 };
 use risingwave_connector::sink::SinkParam;
 use risingwave_connector::sink::catalog::{SinkCatalog, SinkId};
-use risingwave_connector::sink::iceberg::{
-    CompactionType, IcebergConfig, should_enable_iceberg_cow,
-};
+use risingwave_connector::sink::iceberg::{CompactionType, IcebergConfig, IcebergWriteMode};
 use risingwave_hummock_sdk::HummockContextId;
 use risingwave_pb::iceberg_compaction::IcebergCompactionTask;
 use risingwave_pb::iceberg_compaction::iceberg_compaction_task::TaskType;
@@ -815,17 +814,24 @@ impl IcebergCompactionManager {
     }
 
     fn resolve_schedule_values(&self, iceberg_config: &IcebergConfig) -> (TaskType, u64, usize) {
+        // COW compaction type is an internal policy. Ignore the legacy persisted value so that
+        // both existing and new COW sinks follow the license-based default.
+        let configured_type = match iceberg_config.write_mode {
+            IcebergWriteMode::CopyOnWrite => None,
+            IcebergWriteMode::MergeOnRead => iceberg_config.compaction_type,
+        };
+        let compaction_type = match configured_type {
+            Some(compaction_type) => compaction_type,
+            None if Feature::IcebergCompaction.check_available().is_ok() => CompactionType::Auto,
+            None => CompactionType::Full,
+        };
+
         (
-            if should_enable_iceberg_cow(iceberg_config.r#type.as_str(), iceberg_config.write_mode)
-            {
-                TaskType::Full
-            } else {
-                match iceberg_config.compaction_type() {
-                    CompactionType::Auto => TaskType::Auto,
-                    CompactionType::Full => TaskType::Full,
-                    CompactionType::SmallFiles => TaskType::SmallFiles,
-                    CompactionType::FilesWithDelete => TaskType::FilesWithDelete,
-                }
+            match compaction_type {
+                CompactionType::Auto => TaskType::Auto,
+                CompactionType::Full => TaskType::Full,
+                CompactionType::SmallFiles => TaskType::SmallFiles,
+                CompactionType::FilesWithDelete => TaskType::FilesWithDelete,
             },
             iceberg_config.compaction_interval_sec(),
             iceberg_config.trigger_snapshot_count(),
