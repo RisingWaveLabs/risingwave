@@ -297,6 +297,9 @@ impl QueryManager {
     ///
     /// A PostgreSQL `CancelRequest` targets the session's current statement, so cursor-owned
     /// queries are excluded: one session can have multiple cursor queries running concurrently.
+    /// When the session ends or the frontend shuts down, the session manager calls this method for
+    /// ordinary queries and separately shuts down the cursor manager, whose session-scoped token
+    /// terminates all cursor-owned queries.
     pub fn cancel_non_cursor_queries_in_session(&self, session_id: SessionId) {
         let query_execution_info = self.query_execution_info.read().unwrap();
         for query in query_execution_info.query_execution_map.values() {
