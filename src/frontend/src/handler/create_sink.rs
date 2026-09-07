@@ -41,8 +41,8 @@ use risingwave_connector::sink::kafka::KAFKA_SINK;
 use risingwave_connector::sink::snowflake_redshift::redshift::RedshiftSink;
 use risingwave_connector::sink::snowflake_redshift::snowflake::SnowflakeV2Sink;
 use risingwave_connector::sink::{
-    CONNECTOR_TYPE_KEY, SINK_SNAPSHOT_OPTION, SINK_TYPE_OPTION, SINK_USER_FORCE_APPEND_ONLY_OPTION,
-    SINK_USER_IGNORE_DELETE_OPTION, Sink, enforce_secret_sink,
+    CONNECTOR_TYPE_KEY, SINK_SNAPSHOT_OPTION, SINK_TYPE_OPTION, SINK_TYPE_UPSERT,
+    SINK_USER_FORCE_APPEND_ONLY_OPTION, SINK_USER_IGNORE_DELETE_OPTION, Sink, enforce_secret_sink,
 };
 use risingwave_connector::{
     AUTO_SCHEMA_CHANGE_KEY, SINK_CREATE_TABLE_IF_NOT_EXISTS_KEY, SINK_INTERMEDIATE_TABLE_NAME,
@@ -117,6 +117,34 @@ pub struct SinkPlanContext {
     pub target_table_catalog: Option<Arc<TableCatalog>>,
     pub dependencies: HashSet<ObjectId>,
     pub since_timestamp_epoch: Option<u64>,
+}
+
+fn maybe_fill_intermediate_table_name(
+    with_options: &mut WithOptionsSecResolved,
+    connector: &str,
+    sink_name: &str,
+) -> Result<()> {
+    let should_fill = with_options
+        .value_eq_ignore_case(SINK_CREATE_TABLE_IF_NOT_EXISTS_KEY, "true")
+        && with_options.value_eq_ignore_case(SINK_TYPE_OPTION, SINK_TYPE_UPSERT)
+        && matches!(
+            connector,
+            RedshiftSink::SINK_NAME | SnowflakeV2Sink::SINK_NAME
+        );
+    if !should_fill || with_options.contains_key(SINK_INTERMEDIATE_TABLE_NAME) {
+        return Ok(());
+    }
+
+    let table_name = with_options
+        .get(SINK_TARGET_TABLE_NAME)
+        .ok_or_else(|| ErrorCode::BindError("'table.name' option must be specified.".to_owned()))?;
+    let intermediate_table_name =
+        format!("rw_{}_{}_{}", sink_name, table_name, uuid::Uuid::new_v4());
+    with_options.insert(
+        SINK_INTERMEDIATE_TABLE_NAME.to_owned(),
+        intermediate_table_name,
+    );
+    Ok(())
 }
 
 pub async fn gen_sink_plan(
@@ -241,35 +269,11 @@ pub async fn gen_sink_plan(
                     "auto schema change not supported for sink-into-table".to_owned(),
                 )));
             }
-            if resolved_with_options
-                .value_eq_ignore_case(SINK_CREATE_TABLE_IF_NOT_EXISTS_KEY, "true")
-                && connector == RedshiftSink::SINK_NAME
-                || connector == SnowflakeV2Sink::SINK_NAME
-            {
-                if let Some(table_name) = resolved_with_options.get(SINK_TARGET_TABLE_NAME) {
-                    // auto fill intermediate table name if target table name is specified
-                    if resolved_with_options
-                        .get(SINK_INTERMEDIATE_TABLE_NAME)
-                        .is_none()
-                    {
-                        // generate the intermediate table name with random value appended to the target table name
-                        let intermediate_table_name = format!(
-                            "rw_{}_{}_{}",
-                            sink_table_name,
-                            table_name,
-                            uuid::Uuid::new_v4()
-                        );
-                        resolved_with_options.insert(
-                            SINK_INTERMEDIATE_TABLE_NAME.to_owned(),
-                            intermediate_table_name,
-                        );
-                    }
-                } else {
-                    return Err(RwError::from(ErrorCode::BindError(
-                        "'table.name' option must be specified.".to_owned(),
-                    )));
-                }
-            }
+            maybe_fill_intermediate_table_name(
+                &mut resolved_with_options,
+                &connector,
+                &sink_table_name,
+            )?;
             Box::new(gen_query_from_table_name(from_name))
         }
         CreateSink::AsQuery(query) => {
@@ -1208,11 +1212,74 @@ pub fn validate_compatibility(connector: &str, format_desc: &FormatEncodeOptions
 
 #[cfg(test)]
 pub mod tests {
+    use std::collections::BTreeMap;
+
     use risingwave_common::catalog::{CreateType, DEFAULT_DATABASE_NAME, DEFAULT_SCHEMA_NAME};
     use risingwave_common::config::FrontendConfig;
+    use risingwave_connector::sink::Sink;
+    use risingwave_connector::sink::snowflake_redshift::redshift::RedshiftSink;
+    use risingwave_connector::sink::snowflake_redshift::snowflake::SnowflakeV2Sink;
+    use risingwave_connector::{
+        SINK_CREATE_TABLE_IF_NOT_EXISTS_KEY, SINK_INTERMEDIATE_TABLE_NAME, SINK_TARGET_TABLE_NAME,
+    };
 
+    use crate::WithOptionsSecResolved;
     use crate::catalog::root_catalog::SchemaPath;
+    use crate::handler::create_sink::maybe_fill_intermediate_table_name;
     use crate::test_utils::{LocalFrontend, PROTO_FILE_DATA, create_proto_file};
+
+    #[test]
+    fn test_fill_intermediate_table_name_for_upsert_auto_create_only() {
+        for (connector, sink_type, create_table, should_fill) in [
+            (SnowflakeV2Sink::SINK_NAME, "append-only", false, false),
+            (SnowflakeV2Sink::SINK_NAME, "append-only", true, false),
+            (SnowflakeV2Sink::SINK_NAME, "upsert", false, false),
+            (SnowflakeV2Sink::SINK_NAME, "upsert", true, true),
+            (RedshiftSink::SINK_NAME, "upsert", true, true),
+            ("jdbc", "upsert", true, false),
+        ] {
+            let mut options = WithOptionsSecResolved::without_secrets(BTreeMap::from([
+                ("type".to_owned(), sink_type.to_owned()),
+                (
+                    SINK_CREATE_TABLE_IF_NOT_EXISTS_KEY.to_owned(),
+                    create_table.to_string(),
+                ),
+                (SINK_TARGET_TABLE_NAME.to_owned(), "target".to_owned()),
+            ]));
+
+            maybe_fill_intermediate_table_name(&mut options, connector, "sink").unwrap();
+
+            assert_eq!(
+                options.contains_key(SINK_INTERMEDIATE_TABLE_NAME),
+                should_fill,
+                "connector={connector}, type={sink_type}, create_table={create_table}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_fill_intermediate_table_name_preserves_user_value() {
+        let mut options = WithOptionsSecResolved::without_secrets(BTreeMap::from([
+            ("type".to_owned(), "upsert".to_owned()),
+            (
+                SINK_CREATE_TABLE_IF_NOT_EXISTS_KEY.to_owned(),
+                "true".to_owned(),
+            ),
+            (SINK_TARGET_TABLE_NAME.to_owned(), "target".to_owned()),
+            (
+                SINK_INTERMEDIATE_TABLE_NAME.to_owned(),
+                "custom_cdc".to_owned(),
+            ),
+        ]));
+
+        maybe_fill_intermediate_table_name(&mut options, SnowflakeV2Sink::SINK_NAME, "sink")
+            .unwrap();
+
+        assert_eq!(
+            options.get(SINK_INTERMEDIATE_TABLE_NAME).unwrap(),
+            "custom_cdc"
+        );
+    }
 
     #[tokio::test]
     async fn test_create_sink_handler() {

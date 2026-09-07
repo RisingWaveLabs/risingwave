@@ -82,10 +82,8 @@ impl AugmentedRow {
             return Ok(row);
         }
         self.current_row_count += 1;
-        row.insert(
-            __ROW_ID.to_owned(),
-            Value::String(format!("{}_{}", self.current_epoch, self.current_row_count)),
-        );
+        let row_id = format!("{}_{}", self.current_epoch, self.current_row_count);
+        row.insert(__ROW_ID.to_owned(), Value::String(row_id));
         row.insert(
             __OP.to_owned(),
             Value::Number(serde_json::Number::from(op.to_i16())),
