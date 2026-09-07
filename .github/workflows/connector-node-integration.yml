@@ -24,6 +24,8 @@ jobs:
       - uses: dorny/paths-filter@v3
         id: filter
         with:
+          # Empty for other events; without it, `merge_group` would diff against `main`.
+          base: ${{ github.event.merge_group.base_ref }}
           filters: |
             java:
               - 'java/**'
