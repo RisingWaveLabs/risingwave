@@ -473,26 +473,28 @@ impl<K: HashKey, S: StateStore> HashAggExecutor<K, S> {
                 }
             }
         } else {
-            // emit on update
-            // TODO(wrj,rc): we may need to parallelize it and set a reasonable concurrency limit.
-            for mut agg_group in vars.dirty_groups.values_mut() {
-                let agg_group = agg_group.as_mut();
-                let (change, stats) = agg_group
-                    .build_outputs_change(&this.storages, &this.agg_funcs)
-                    .await?;
+            let storage = &this.storages;
+            let agg_funcs = &this.agg_funcs;
+            let futs = vars
+                .dirty_groups
+                .drain()
+                .map(|(key, mut agg_group)| async move {
+                    let (change, stats) =
+                        agg_group.build_outputs_change(storage, agg_funcs).await?;
+                    Ok::<_, StreamExecutorError>((change, stats, key, agg_group))
+                });
+            let mut buffered = stream::iter(futs).buffer_unordered(10).fuse();
+            while let Some(result) = buffered.next().await {
+                let (change, stats, key, agg_group) = result?;
                 vars.stats.merge_state_cache_stats(stats);
-
                 if let Some(change) = change
                     && let Some(chunk) = vars.chunk_builder.append_record(change)
                 {
                     yield chunk;
                 }
+                // move dirty groups back to cache
+                vars.agg_group_cache.put(key, Some(agg_group));
             }
-        }
-
-        // move dirty groups back to cache
-        for (key, agg_group) in vars.dirty_groups.drain() {
-            vars.agg_group_cache.put(key, Some(agg_group));
         }
 
         // Yield the remaining rows in chunk builder.
