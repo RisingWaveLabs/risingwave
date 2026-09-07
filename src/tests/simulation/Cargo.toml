@@ -25,7 +25,7 @@ paste = "1"
 pin-project = "1.1"
 pretty_assertions = "1"
 rand = { workspace = true }
-rand_chacha = { version = "0.9" }
+rand_chacha = { version = "0.10" }
 rdkafka = { workspace = true }
 risingwave_batch = { workspace = true }
 risingwave_batch_executors = { workspace = true }
