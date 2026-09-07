@@ -50,6 +50,8 @@ pub struct Interval {
 impl ZeroHeapSize for Interval {}
 
 const USECS_PER_SEC: i64 = 1_000_000;
+const USECS_PER_MINUTE: i64 = 60 * USECS_PER_SEC;
+const USECS_PER_HOUR: i64 = 3600 * USECS_PER_SEC;
 const USECS_PER_DAY: i64 = 86400 * USECS_PER_SEC;
 const USECS_PER_MONTH: i64 = 30 * USECS_PER_DAY;
 
@@ -61,6 +63,8 @@ impl Interval {
         usecs: i64::MIN,
     };
     pub const USECS_PER_DAY: i64 = USECS_PER_DAY;
+    pub const USECS_PER_HOUR: i64 = USECS_PER_HOUR;
+    pub const USECS_PER_MINUTE: i64 = USECS_PER_MINUTE;
     pub const USECS_PER_MONTH: i64 = USECS_PER_MONTH;
     pub const USECS_PER_SEC: i64 = USECS_PER_SEC;
 

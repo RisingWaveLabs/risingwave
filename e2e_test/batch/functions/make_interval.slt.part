@@ -1,0 +1,116 @@
+statement ok
+SET RW_IMPLICIT_FLUSH TO true;
+
+# positive cases
+
+# no arguments
+query T
+SELECT make_interval();
+----
+00:00:00
+
+# year
+query T
+SELECT make_interval(1);
+----
+1 year
+
+# month
+query T
+SELECT make_interval(0, 1);
+----
+1 mon
+
+# week
+query T
+SELECT make_interval(0, 0, 1);
+----
+7 days
+
+# day
+query T
+SELECT make_interval(0, 0, 0, 1);
+----
+1 day
+
+# hour
+query T
+SELECT make_interval(0, 0, 0, 0, 1);
+----
+01:00:00
+
+# minute
+query T
+SELECT make_interval(0, 0, 0, 0, 0, 1);
+----
+00:01:00
+
+# second
+query T
+SELECT make_interval(0, 0, 0, 0, 0, 0, 1);
+----
+00:00:01
+
+# rounds units to higher unit
+query T
+SELECT make_interval(0, 12);
+----
+1 year
+
+query T
+SELECT make_interval(1, 12);
+----
+2 years
+
+# negative cases
+
+# inf
+query error
+SELECT make_interval('inf')
+
+query error
+SELECT make_interval('-inf')
+
+# NaN
+query error
+SELECT make_interval('NaN')
+
+# overflows
+query error
+SELECT make_interval(178956971);
+
+query error
+SELECT make_interval(-178956971);
+
+query error
+SELECT make_interval(1, 2147483647);
+
+query error
+SELECT make_interval(-1, -2147483648);
+
+query error
+SELECT make_interval(0, 0, 306783379);
+
+query error
+SELECT make_interval(0, 0, -306783379);
+
+query error
+SELECT make_interval(0, 0, 1, 2147483647);
+
+query error
+SELECT make_interval(0, 0, -1, -2147483648);
+
+query error
+SELECT make_interval(0, 0, 0, 0, 0, 0, 1e308);
+
+query error
+SELECT make_interval(0, 0, 0, 0, 0, 0, 1e18);
+
+query error
+SELECT make_interval(0, 0, 0, 0, 0, 0, -1e18);
+
+query error
+SELECT make_interval(0, 0, 0, 0, 0, 1, 9223372036800.0);
+
+query error
+SELECT make_interval(0, 0, 0, 0, 0, -1, -9223372036800.0);

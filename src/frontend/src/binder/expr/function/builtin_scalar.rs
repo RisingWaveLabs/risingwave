@@ -222,6 +222,7 @@ impl Binder {
                 ("make_time", raw_call(ExprType::MakeTime)),
                 ("make_timestamp", raw_call(ExprType::MakeTimestamp)),
                 ("make_timestamptz", raw_call(ExprType::MakeTimestamptz)),
+                ("make_interval", raw_call(ExprType::MakeInterval)),
                 ("timezone", guard_by_len(|_binder, [arg0, arg1]| {
                     // swap the first and second argument
                     Ok(FunctionCall::new(ExprType::AtTimeZone, vec![arg1, arg0])?.into())

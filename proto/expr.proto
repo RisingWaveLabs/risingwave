@@ -65,6 +65,7 @@ message ExprNode {
     MAKE_TIME = 114;
     MAKE_TIMESTAMP = 115;
     DATE_BIN = 116;
+    MAKE_INTERVAL = 117;
     // From f64 to timestamp.
     // e.g. `select to_timestamp(1672044740.0)`
     SEC_TO_TIMESTAMPTZ = 104;

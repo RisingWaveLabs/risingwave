@@ -68,6 +68,7 @@ mod jsonb_record;
 mod jsonb_set;
 mod length;
 mod lower;
+mod make_interval;
 mod make_time;
 mod map_filter;
 mod md5;
