@@ -37,7 +37,7 @@ use crate::executor::backfill::cdc::cdc_backfill::{
 use crate::executor::backfill::cdc::state_v2::ParallelizedCdcBackfillState;
 use crate::executor::backfill::cdc::upstream_table::external::ExternalStorageTable;
 use crate::executor::backfill::cdc::upstream_table::snapshot::{
-    SplitSnapshotReadArgs, UpstreamTableRead, UpstreamTableReader,
+    SplitSnapshotReadArgs, SplitSnapshotReadArgsInput, UpstreamTableRead, UpstreamTableReader,
 };
 use crate::executor::backfill::utils::{
     cmp_pk_unsigned_aware, get_cdc_chunk_last_offset, get_new_pos, mapping_chunk, mapping_message,
@@ -407,16 +407,14 @@ impl<S: StateStore> ParallelizedCdcBackfillExecutor<S> {
                             split_cdc_offset_low =
                                 upstream_table_reader.current_cdc_offset().await?;
                         }
-                        if let Some(ref cdc_offset) = split_cdc_offset_low {
-                            if actor_cdc_offset_low
+                        if let Some(ref cdc_offset) = split_cdc_offset_low
+                            && actor_cdc_offset_low
                                 .as_ref()
                                 .is_none_or(|cur| cur > cdc_offset)
-                            {
-                                actor_cdc_offset_low = split_cdc_offset_low.clone();
-                            }
+                        {
+                            actor_cdc_offset_low = split_cdc_offset_low.clone();
                         }
 
-                        // why needed?
                         // Apply changes to the already snapshotted prefix before starting the new
                         // query. Changes after the cursor are reflected by that query instead.
                         let (emitted_chunks, _) = partition_current_split_buffer(
@@ -433,19 +431,24 @@ impl<S: StateStore> ParallelizedCdcBackfillExecutor<S> {
 
                         let attempt_state = {
                             let left_upstream = upstream.by_ref().map(Either::Left);
-                            let read_args = SplitSnapshotReadArgs::new(
-                                current_pk_pos.clone(),
-                                pk_names.clone(),
-                                (!is_leftmost_bound(&split.left_bound_inclusive))
+                            let read_args =
+                                SplitSnapshotReadArgs::new(SplitSnapshotReadArgsInput {
+                                    current_pos: current_pk_pos.clone(),
+                                    primary_keys: pk_names.clone(),
+                                    left_bound_inclusive: (!is_leftmost_bound(
+                                        &split.left_bound_inclusive,
+                                    ))
                                     .then(|| split.left_bound_inclusive.clone()),
-                                (!is_rightmost_bound(&split.right_bound_exclusive))
+                                    right_bound_exclusive: (!is_rightmost_bound(
+                                        &split.right_bound_exclusive,
+                                    ))
                                     .then(|| split.right_bound_exclusive.clone()),
-                                cdc_table_snapshot_split_column.clone(),
-                                self.rate_limit_rps,
-                                additional_columns.clone(),
-                                schema_table_name.clone(),
-                                external_database_name.clone(),
-                            );
+                                    split_columns: cdc_table_snapshot_split_column.clone(),
+                                    rate_limit_rps: self.rate_limit_rps,
+                                    additional_columns: additional_columns.clone(),
+                                    schema_table_name: schema_table_name.clone(),
+                                    database_name: external_database_name.clone(),
+                                });
                             let right_snapshot = pin!(
                                 upstream_table_reader
                                     .snapshot_read_table_split(read_args)

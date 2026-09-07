@@ -94,18 +94,31 @@ pub struct SplitSnapshotReadArgs {
     pub database_name: String,
 }
 
+pub struct SplitSnapshotReadArgsInput {
+    pub current_pos: Option<OwnedRow>,
+    pub primary_keys: Vec<String>,
+    pub left_bound_inclusive: Option<OwnedRow>,
+    pub right_bound_exclusive: Option<OwnedRow>,
+    pub split_columns: Vec<Field>,
+    pub rate_limit_rps: Option<u32>,
+    pub additional_columns: Vec<ColumnDesc>,
+    pub schema_table_name: SchemaTableName,
+    pub database_name: String,
+}
+
 impl SplitSnapshotReadArgs {
-    pub fn new(
-        current_pos: Option<OwnedRow>,
-        primary_keys: Vec<String>,
-        left_bound_inclusive: Option<OwnedRow>,
-        right_bound_exclusive: Option<OwnedRow>,
-        split_columns: Vec<Field>,
-        rate_limit_rps: Option<u32>,
-        additional_columns: Vec<ColumnDesc>,
-        schema_table_name: SchemaTableName,
-        database_name: String,
-    ) -> Self {
+    pub fn new(input: SplitSnapshotReadArgsInput) -> Self {
+        let SplitSnapshotReadArgsInput {
+            current_pos,
+            primary_keys,
+            left_bound_inclusive,
+            right_bound_exclusive,
+            split_columns,
+            rate_limit_rps,
+            additional_columns,
+            schema_table_name,
+            database_name,
+        } = input;
         Self {
             current_pos,
             primary_keys,
