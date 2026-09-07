@@ -998,7 +998,7 @@
     select Array(select c from t2 where b = d) arr from t1;
   batch_plan: |-
     BatchExchange { order: [], dist: Single }
-    └─BatchHashJoin { type: LeftOuter, predicate: t1.b IS NOT DISTINCT FROM t1.b, output: [$expr1] }
+    └─BatchHashJoin { type: Inner, predicate: t1.b IS NOT DISTINCT FROM t1.b, output: [$expr1] }
       ├─BatchExchange { order: [], dist: HashShard(t1.b) }
       │ └─BatchScan { table: t1, columns: [t1.b], distribution: SomeShard }
       └─BatchProject { exprs: [t1.b, Coalesce(array_agg(t2.c) filter(IsNotNull(1:Int32)), ARRAY[]:List(Int32)) as $expr1] }
@@ -1014,7 +1014,7 @@
   stream_plan: |-
     StreamMaterialize { columns: [arr, t1._row_id(hidden), t1.b(hidden), t1.b#1(hidden)], stream_key: [t1._row_id, t1.b], pk_columns: [t1._row_id, t1.b], pk_conflict: NoCheck }
     └─StreamExchange { dist: HashShard(t1._row_id, t1.b) }
-      └─StreamHashJoin { type: LeftOuter, predicate: t1.b IS NOT DISTINCT FROM t1.b, output: [$expr1, t1._row_id, t1.b, t1.b] }
+      └─StreamHashJoin { type: Inner, predicate: t1.b IS NOT DISTINCT FROM t1.b, output: [$expr1, t1._row_id, t1.b, t1.b] }
         ├─StreamExchange { dist: HashShard(t1.b) }
         │ └─StreamTableScan { table: t1, columns: [t1.b, t1._row_id], stream_scan_type: SnapshotBackfill, stream_key: [t1._row_id], pk: [_row_id], dist: UpstreamHashShard(t1._row_id) }
         └─StreamProject { exprs: [t1.b, Coalesce(array_agg(t2.c) filter(IsNotNull(1:Int32)), ARRAY[]:List(Int32)) as $expr1] }
@@ -1046,7 +1046,7 @@
     BatchExchange { order: [rw_users.name ASC], dist: Single }
     └─BatchProject { exprs: [rw_users.name, rw_users.is_super, true:Boolean, rw_users.create_user, rw_users.create_db, rw_users.can_login, -1:Int32, null:Timestamptz, $expr1, true:Boolean, true:Boolean] }
       └─BatchSort { order: [rw_users.name ASC] }
-        └─BatchHashJoin { type: LeftOuter, predicate: rw_users.id IS NOT DISTINCT FROM rw_users.id, output: all }
+        └─BatchHashJoin { type: Inner, predicate: rw_users.id IS NOT DISTINCT FROM rw_users.id, output: all }
           ├─BatchExchange { order: [], dist: HashShard(rw_users.id) }
           │ └─BatchFilter { predicate: Not(RegexpEq(rw_users.name, '^pg_':Varchar)) }
           │   └─BatchSysScan { table: rw_users, columns: [rw_users.id, rw_users.name, rw_users.is_super, rw_users.create_db, rw_users.create_user, rw_users.can_login], distribution: Single }
@@ -1083,7 +1083,7 @@
     FROM array_types AS t0;
   batch_plan: |-
     BatchExchange { order: [], dist: Single }
-    └─BatchHashJoin { type: LeftOuter, predicate: array_types.x IS NOT DISTINCT FROM array_types.x, output: [$expr1] }
+    └─BatchHashJoin { type: Inner, predicate: array_types.x IS NOT DISTINCT FROM array_types.x, output: [$expr1] }
       ├─BatchExchange { order: [], dist: HashShard(array_types.x) }
       │ └─BatchScan { table: array_types, columns: [array_types.x], distribution: SomeShard }
       └─BatchProject { exprs: [array_types.x, Coalesce(array_agg(array_types.x) filter(IsNotNull(1:Int32)), ARRAY[]:List(List(Int64))) as $expr1] }

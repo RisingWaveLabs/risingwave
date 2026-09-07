@@ -1,0 +1,80 @@
+# https://github.com/risingwavelabs/risingwave/issues/26654
+# Correlated ARRAY(SELECT ...) subquery inside a streaming MV must never emit
+# NULL: empty inner input must materialize as `{}` and transient states during
+# insert/update must not surface a NULL row.
+
+statement ok
+create table t1 (id int primary key);
+
+statement ok
+create table t2 (id int primary key, t1_id int, val varchar);
+
+statement ok
+create materialized view mv as
+select t1.id, ARRAY(select t2.val from t2 where t2.t1_id = t1.id) as arr
+from t1;
+
+# Outer row with no matching inner rows must yield an empty array, never NULL.
+statement ok
+insert into t1 values (1);
+
+statement ok
+flush;
+
+query IT
+select id, arr from mv order by id;
+----
+1 {}
+
+# After inserting matching inner rows, the array must be populated and non-null.
+statement ok
+insert into t2 values (10, 1, 'alpha'), (11, 1, 'beta');
+
+statement ok
+flush;
+
+query IT
+select id, array_length(arr, 1) is not null, array_length(arr, 1) from mv order by id;
+----
+1 t 2
+
+# The row must remain non-null across an inner-row delete that empties the array.
+statement ok
+delete from t2 where t1_id = 1;
+
+statement ok
+flush;
+
+query IT
+select id, arr from mv order by id;
+----
+1 {}
+
+# Adding another outer row and its inner rows: no NULL leak on either.
+statement ok
+insert into t1 values (2);
+
+statement ok
+insert into t2 values (20, 2, 'gamma');
+
+statement ok
+flush;
+
+query IT
+select id, arr from mv where id = 2;
+----
+2 {gamma}
+
+query I
+select count(*) from mv where arr is null;
+----
+0
+
+statement ok
+drop materialized view mv;
+
+statement ok
+drop table t2;
+
+statement ok
+drop table t1;
