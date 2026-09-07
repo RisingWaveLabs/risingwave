@@ -19,7 +19,7 @@ use super::loader::LoadedSchema;
 use super::schema_registry::Subject;
 
 impl LoadedSchema for AvroSchema {
-    fn compile(primary: Subject, _: Vec<Subject>) -> Result<Self, SchemaFetchError> {
+    fn compile(primary: Subject, _: Vec<(String, Subject)>) -> Result<Self, SchemaFetchError> {
         AvroSchema::parse_str(&primary.schema.content)
             .map_err(|e| SchemaFetchError::SchemaCompile(e.into()))
     }

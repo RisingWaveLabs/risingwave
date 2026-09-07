@@ -129,7 +129,7 @@ where
 }
 
 /// `Schema` format of confluent schema registry
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub struct ConfluentSchema {
     /// The id of the schema
     pub id: i32,
@@ -138,7 +138,7 @@ pub struct ConfluentSchema {
 }
 
 /// `Subject` stored in confluent schema registry
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub struct Subject {
     /// The version of the current schema
     pub version: i32,
@@ -153,7 +153,6 @@ pub struct Subject {
 #[derive(Debug, Deserialize)]
 pub struct SchemaReference {
     /// The name of the reference.
-    #[expect(dead_code)]
     pub name: String,
     /// The subject that the referenced schema belongs to
     pub subject: String,

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
 use std::sync::Arc;
 use std::time::Duration;
@@ -315,15 +315,23 @@ impl Client {
     }
 
     /// get the latest version of the subject and all it's references(deps)
+    /// with the names they are referenced by (e.g. protobuf import path)
     pub async fn get_subject_and_references(
         &self,
         subject: &str,
-    ) -> SrResult<(Subject, Vec<Subject>)> {
-        let mut subjects = vec![];
-        let mut visited = HashSet::new();
-        let mut queue = vec![(subject.to_owned(), "latest".to_owned())];
-        // use bfs to get all references
-        while let Some((subject, version)) = queue.pop() {
+    ) -> SrResult<(Subject, Vec<(String, Subject)>)> {
+        let mut subjects: Vec<(String, Subject)> = vec![];
+        let mut visited: HashMap<String, usize> = HashMap::new(); // subject -> index in `subjects`
+        let mut queued_names = HashSet::new();
+        let mut queue = vec![(String::new(), subject.to_owned(), "latest".to_owned())];
+        // use dfs to get all references
+        while let Some((ref_name, subject, version)) = queue.pop() {
+            // a subject referenced under a second name is cloned rather than fetched again
+            if let Some(&i) = visited.get(&subject) {
+                let fetched = subjects[i].1.clone();
+                subjects.push((ref_name, fetched));
+                continue;
+            }
             let res: GetBySubjectResp = self
                 .concurrent_req(Method::GET, &["subjects", &subject, "versions", &version])
                 .await?;
@@ -335,16 +343,16 @@ impl Client {
                 version: res.version,
                 name: res.subject.clone(),
             };
-            subjects.push(ref_subject);
-            visited.insert(res.subject);
+            visited.insert(res.subject, subjects.len());
+            subjects.push((ref_name, ref_subject));
             queue.extend(
                 res.references
                     .into_iter()
-                    .filter(|r| !visited.contains(&r.subject))
-                    .map(|r| (r.subject, r.version.to_string())),
+                    .filter(|r| queued_names.insert(r.name.clone()))
+                    .map(|r| (r.name, r.subject, r.version.to_string())),
             );
         }
-        let origin_subject = subjects.remove(0);
+        let (_, origin_subject) = subjects.remove(0);
 
         Ok((origin_subject, subjects))
     }

@@ -111,7 +111,10 @@ pub async fn fetch_from_registry(
 }
 
 impl LoadedSchema for FileDescriptor {
-    fn compile(primary: Subject, references: Vec<Subject>) -> Result<Self, SchemaFetchError> {
+    fn compile(
+        primary: Subject,
+        references: Vec<(String, Subject)>,
+    ) -> Result<Self, SchemaFetchError> {
         let primary_name = primary.name.clone();
 
         match compile_pb_subject(primary, references)
@@ -131,13 +134,13 @@ impl LoadedSchema for FileDescriptor {
 
 fn compile_pb_subject(
     primary_subject: Subject,
-    dependency_subjects: Vec<Subject>,
+    dependency_subjects: Vec<(String, Subject)>,
 ) -> Result<FileDescriptorSet, SchemaFetchError> {
     compile_pb(
         (primary_subject.name.clone(), primary_subject.schema.content),
         dependency_subjects
             .into_iter()
-            .map(|s| (s.name.clone(), s.schema.content)),
+            .map(|(ref_name, s)| (ref_name, s.schema.content)),
     )
     .map_err(|e| SchemaFetchError::SchemaCompile(e.into()))
 }
