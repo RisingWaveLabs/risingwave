@@ -16,7 +16,6 @@ use std::future::Future;
 
 use futures::{Stream, pin_mut};
 use futures_async_stream::try_stream;
-use itertools::Itertools;
 use risingwave_common::array::StreamChunk;
 use risingwave_common::catalog::{ColumnDesc, Field};
 use risingwave_common::row::OwnedRow;
@@ -84,8 +83,10 @@ impl SnapshotReadArgs {
 
 #[derive(Debug, Clone)]
 pub struct SplitSnapshotReadArgs {
-    pub left_bound_inclusive: OwnedRow,
-    pub right_bound_exclusive: OwnedRow,
+    pub current_pos: Option<OwnedRow>,
+    pub primary_keys: Vec<String>,
+    pub left_bound_inclusive: Option<OwnedRow>,
+    pub right_bound_exclusive: Option<OwnedRow>,
     pub split_columns: Vec<Field>,
     pub rate_limit_rps: Option<u32>,
     pub additional_columns: Vec<ColumnDesc>,
@@ -95,8 +96,10 @@ pub struct SplitSnapshotReadArgs {
 
 impl SplitSnapshotReadArgs {
     pub fn new(
-        left_bound_inclusive: OwnedRow,
-        right_bound_exclusive: OwnedRow,
+        current_pos: Option<OwnedRow>,
+        primary_keys: Vec<String>,
+        left_bound_inclusive: Option<OwnedRow>,
+        right_bound_exclusive: Option<OwnedRow>,
         split_columns: Vec<Field>,
         rate_limit_rps: Option<u32>,
         additional_columns: Vec<ColumnDesc>,
@@ -104,6 +107,8 @@ impl SplitSnapshotReadArgs {
         database_name: String,
     ) -> Self {
         Self {
+            current_pos,
+            primary_keys,
             left_bound_inclusive,
             right_bound_exclusive,
             split_columns,
@@ -176,15 +181,7 @@ fn with_additional_columns(
 impl UpstreamTableRead for UpstreamTableReader<ExternalStorageTable> {
     #[try_stream(ok = Option<StreamChunk>, error = StreamExecutorError)]
     async fn snapshot_read_full_table(&self, args: SnapshotReadArgs, batch_size: u32) {
-        let primary_keys = self
-            .table
-            .pk_indices()
-            .iter()
-            .map(|idx| {
-                let f = &self.table.schema().fields[*idx];
-                f.name.clone()
-            })
-            .collect_vec();
+        let primary_keys = self.table.pk_names();
 
         // prepare rate limiter
         if args.rate_limit_rps == Some(0) {
@@ -302,6 +299,8 @@ impl UpstreamTableRead for UpstreamTableReader<ExternalStorageTable> {
 
         let row_stream = self.reader.split_snapshot_read(
             self.table.schema_table_name(),
+            read_args.current_pos.clone(),
+            read_args.primary_keys.clone(),
             read_args.left_bound_inclusive.clone(),
             read_args.right_bound_exclusive.clone(),
             read_args.split_columns.clone(),

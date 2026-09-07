@@ -431,11 +431,7 @@ impl<S: StateStore> CdcBackfillExecutor<S> {
             // Whether each pk column needs unsigned `i64` comparison. Frontend up-casts narrower
             // unsigned integers, while unsigned float/double/decimal keep their native comparison
             // semantics; only `BIGINT UNSIGNED` can overflow into a negative `i64` in RisingWave.
-            let schema = self.external_table.schema();
-            let pk_names: Vec<String> = pk_indices
-                .iter()
-                .map(|&i| schema.fields[i].name.clone())
-                .collect();
+            let pk_names = self.external_table.pk_names();
             let mut pk_needs_unsigned_i64_compare = upstream_table_reader
                 .reader
                 .pk_column_unsigned_i64_compare_flags(&pk_names)?;

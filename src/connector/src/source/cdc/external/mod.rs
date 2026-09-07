@@ -265,8 +265,10 @@ pub trait ExternalTableReader: Sized {
     fn split_snapshot_read(
         &self,
         table_name: SchemaTableName,
-        left: OwnedRow,
-        right: OwnedRow,
+        start_pk: Option<OwnedRow>,
+        primary_keys: Vec<String>,
+        left: Option<OwnedRow>,
+        right: Option<OwnedRow>,
         split_columns: Vec<Field>,
     ) -> BoxStream<'_, ConnectorResult<OwnedRow>>;
 }
@@ -383,11 +385,20 @@ impl ExternalTableReader for ExternalTableReaderImpl {
     fn split_snapshot_read(
         &self,
         table_name: SchemaTableName,
-        left: OwnedRow,
-        right: OwnedRow,
+        start_pk: Option<OwnedRow>,
+        primary_keys: Vec<String>,
+        left: Option<OwnedRow>,
+        right: Option<OwnedRow>,
         split_columns: Vec<Field>,
     ) -> BoxStream<'_, ConnectorResult<OwnedRow>> {
-        self.split_snapshot_read_inner(table_name, left, right, split_columns)
+        self.split_snapshot_read_inner(
+            table_name,
+            start_pk,
+            primary_keys,
+            left,
+            right,
+            split_columns,
+        )
     }
 }
 
@@ -471,23 +482,45 @@ impl ExternalTableReaderImpl {
     async fn split_snapshot_read_inner(
         &self,
         table_name: SchemaTableName,
-        left: OwnedRow,
-        right: OwnedRow,
+        start_pk: Option<OwnedRow>,
+        primary_keys: Vec<String>,
+        left: Option<OwnedRow>,
+        right: Option<OwnedRow>,
         split_columns: Vec<Field>,
     ) {
         let stream = match self {
-            ExternalTableReaderImpl::MySql(mysql) => {
-                mysql.split_snapshot_read(table_name, left, right, split_columns)
-            }
-            ExternalTableReaderImpl::Postgres(postgres) => {
-                postgres.split_snapshot_read(table_name, left, right, split_columns)
-            }
-            ExternalTableReaderImpl::SqlServer(sql_server) => {
-                sql_server.split_snapshot_read(table_name, left, right, split_columns)
-            }
-            ExternalTableReaderImpl::Mock(mock) => {
-                mock.split_snapshot_read(table_name, left, right, split_columns)
-            }
+            ExternalTableReaderImpl::MySql(mysql) => mysql.split_snapshot_read(
+                table_name,
+                start_pk,
+                primary_keys,
+                left,
+                right,
+                split_columns,
+            ),
+            ExternalTableReaderImpl::Postgres(postgres) => postgres.split_snapshot_read(
+                table_name,
+                start_pk,
+                primary_keys,
+                left,
+                right,
+                split_columns,
+            ),
+            ExternalTableReaderImpl::SqlServer(sql_server) => sql_server.split_snapshot_read(
+                table_name,
+                start_pk,
+                primary_keys,
+                left,
+                right,
+                split_columns,
+            ),
+            ExternalTableReaderImpl::Mock(mock) => mock.split_snapshot_read(
+                table_name,
+                start_pk,
+                primary_keys,
+                left,
+                right,
+                split_columns,
+            ),
         };
 
         pin_mut!(stream);

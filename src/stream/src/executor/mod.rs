@@ -757,16 +757,6 @@ impl<M: PartialEq> PartialEq for BarrierInner<M> {
 }
 
 impl Mutation {
-    /// Return the backfill throttle configuration for `fragment_id`.
-    pub fn backfill_throttle_config(&self, fragment_id: FragmentId) -> Option<&ThrottleConfig> {
-        let Mutation::Throttle(fragment_throttles) = self else {
-            return None;
-        };
-        fragment_throttles
-            .get(&fragment_id)
-            .filter(|config| config.throttle_type() == ThrottleType::Backfill)
-    }
-
     /// Get all actors to be stopped (dropped) by this mutation.
     pub fn all_stop_actors(&self) -> Option<&HashSet<ActorId>> {
         match self {
@@ -781,6 +771,17 @@ impl Mutation {
     pub fn is_stop(&self, actor_id: ActorId) -> bool {
         self.all_stop_actors()
             .is_some_and(|actors| actors.contains(&actor_id))
+    }
+
+    /// Return the backfill throttle configuration for `fragment_id`.
+    pub fn backfill_throttle_config(&self, fragment_id: FragmentId) -> Option<&ThrottleConfig> {
+        if let Mutation::Throttle(fragment_throttles) = self {
+            fragment_throttles
+                .get(&fragment_id)
+                .filter(|config| config.throttle_type() == ThrottleType::Backfill)
+        } else {
+            None
+        }
     }
 
     /// Return true if the mutation is stop.

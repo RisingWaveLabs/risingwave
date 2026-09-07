@@ -12,12 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::cmp::Ordering as CmpOrdering;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use futures::stream::BoxStream;
 use futures_async_stream::try_stream;
 use risingwave_common::catalog::Field;
-use risingwave_common::row::OwnedRow;
+use risingwave_common::row::{OwnedRow, Row};
 use risingwave_common::types::{DataType, ScalarImpl};
 use risingwave_common::util::sort_util::{OrderType, cmp_datum};
 
@@ -34,6 +35,7 @@ pub struct MockExternalTableReader {
     snapshot_errors_remaining: AtomicUsize,
     cdc_offset_idx: AtomicUsize,
     parallel_backfill_snapshots: Vec<OwnedRow>,
+    parallel_backfill_pk_indices: Vec<usize>,
 }
 
 impl MockExternalTableReader {
@@ -89,6 +91,7 @@ impl MockExternalTableReader {
             snapshot_cnt: AtomicUsize::new(0),
             snapshot_errors_remaining: AtomicUsize::new(0),
             parallel_backfill_snapshots,
+            parallel_backfill_pk_indices: vec![0],
             cdc_offset_idx: AtomicUsize::new(0),
         }
     }
@@ -172,16 +175,48 @@ impl MockExternalTableReader {
     }
 
     #[try_stream(boxed, ok = OwnedRow, error = ConnectorError)]
-    async fn split_snapshot_read_inner(&self, left: OwnedRow, right: OwnedRow) {
+    async fn split_snapshot_read_inner(
+        &self,
+        start_pk: Option<OwnedRow>,
+        left: Option<OwnedRow>,
+        right: Option<OwnedRow>,
+    ) {
         self.take_snapshot_error()?;
-        for row in &self.parallel_backfill_snapshots {
-            if (left[0].is_none()
-                || cmp_datum(&row[0], &left[0], OrderType::ascending_nulls_first()).is_ge())
-                && (right[0].is_none()
-                    || cmp_datum(&row[0], &right[0], OrderType::ascending_nulls_first()).is_lt())
-            {
-                yield row.clone();
-            }
+        let compare_pk = |row: &OwnedRow, cursor: &OwnedRow| {
+            self.parallel_backfill_pk_indices
+                .iter()
+                .zip(cursor.iter())
+                .find_map(|(&idx, cursor_datum)| {
+                    let ordering =
+                        cmp_datum(&row[idx], cursor_datum, OrderType::ascending_nulls_first());
+                    (ordering != CmpOrdering::Equal).then_some(ordering)
+                })
+                .unwrap_or(CmpOrdering::Equal)
+        };
+        let mut rows = self
+            .parallel_backfill_snapshots
+            .iter()
+            .filter(|row| {
+                left.as_ref().is_none_or(|left| {
+                    cmp_datum(&row[0], &left[0], OrderType::ascending_nulls_first()).is_ge()
+                }) && right.as_ref().is_none_or(|right| {
+                    cmp_datum(&row[0], &right[0], OrderType::ascending_nulls_first()).is_lt()
+                }) && start_pk
+                    .as_ref()
+                    .is_none_or(|cursor| compare_pk(row, cursor).is_gt())
+            })
+            .collect::<Vec<_>>();
+        rows.sort_by(|left, right| {
+            let right_pk = OwnedRow::new(
+                self.parallel_backfill_pk_indices
+                    .iter()
+                    .map(|&idx| right[idx].clone())
+                    .collect(),
+            );
+            compare_pk(left, &right_pk)
+        });
+        for row in rows {
+            yield row.clone();
         }
     }
 }
@@ -219,12 +254,14 @@ impl ExternalTableReader for MockExternalTableReader {
     fn split_snapshot_read(
         &self,
         _table_name: SchemaTableName,
-        left: OwnedRow,
-        right: OwnedRow,
+        start_pk: Option<OwnedRow>,
+        _primary_keys: Vec<String>,
+        left: Option<OwnedRow>,
+        right: Option<OwnedRow>,
         split_columns: Vec<Field>,
     ) -> BoxStream<'_, ConnectorResult<OwnedRow>> {
         assert_eq!(split_columns.len(), 1);
         assert_eq!(split_columns[0].data_type, DataType::Int64);
-        self.split_snapshot_read_inner(left, right)
+        self.split_snapshot_read_inner(start_pk, left, right)
     }
 }

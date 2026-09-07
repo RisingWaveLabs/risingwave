@@ -70,7 +70,7 @@ impl StreamCdcTableScan {
     /// schema: | `split_id` | `pk...` | `backfill_finished` | `row_count` | `cdc_offset` |
     ///
     /// For parallelized cdc backfill:
-    /// schema: | `split_id` | `pk...` | `backfill_finished` | `row_count` | `cdc_offset_low` | `cdc_offset_high` |
+    /// schema: | `split_id` | `backfill_finished` | `row_count` | `cdc_offset_low` | `cdc_offset_high` | `pk...` |
     pub fn build_backfill_state_catalog(
         &self,
         state: &mut BuildFragmentGraphState,
@@ -78,14 +78,23 @@ impl StreamCdcTableScan {
     ) -> TableCatalog {
         if is_parallelized_backfill {
             let mut catalog_builder = TableCatalogBuilder::default();
+            let upstream_schema = &self.core.get_table_columns();
             // Use `split_id` as primary key in state table.
             catalog_builder.add_column(&Field::with_name(DataType::Int64, "split_id"));
             catalog_builder.add_order_column(0, OrderType::ascending());
+
             catalog_builder.add_column(&Field::with_name(DataType::Boolean, "backfill_finished"));
             // `row_count` column, the number of rows read from snapshot
             catalog_builder.add_column(&Field::with_name(DataType::Int64, "row_count"));
             catalog_builder.add_column(&Field::with_name(DataType::Jsonb, "cdc_offset_low"));
             catalog_builder.add_column(&Field::with_name(DataType::Jsonb, "cdc_offset_high"));
+
+            // pk columns
+            for col_order in self.core.primary_key() {
+                let col = &upstream_schema[col_order.column_index];
+                catalog_builder.add_column(&Field::from(col));
+            }
+
             catalog_builder
                 .build(vec![], 1)
                 .with_id(state.gen_table_id_wrapped())
