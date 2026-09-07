@@ -16,7 +16,7 @@ use pgwire::pg_response::StatementType;
 use risingwave_common::session_config::SessionConfig;
 use risingwave_common::system_param::reader::SystemParamsRead;
 use risingwave_common::system_param::{NOTICE_BARRIER_INTERVAL_MS, NOTICE_CHECKPOINT_FREQUENCY};
-use risingwave_sqlparser::ast::{Ident, SetVariableValue};
+use risingwave_sqlparser::ast::{FileCacheType, Ident, SetVariableValue};
 
 use super::variable::set_var_to_param_str;
 use super::{HandlerArgs, RwPgResponse};
@@ -81,4 +81,29 @@ pub async fn handle_alter_system(
         }
     }
     Ok(builder.into())
+}
+
+pub async fn handle_clear_file_cache(
+    handler_args: HandlerArgs,
+    cache_type: FileCacheType,
+) -> Result<RwPgResponse> {
+    if !handler_args.session.is_super_user() {
+        return Err(ErrorCode::PermissionDenied(
+            "must be superuser to clear file cache".to_owned(),
+        )
+        .into());
+    }
+
+    let (clear_meta_cache, clear_data_cache) = match cache_type {
+        FileCacheType::Meta => (true, false),
+        FileCacheType::Data => (false, true),
+        FileCacheType::All => (true, true),
+    };
+    handler_args
+        .session
+        .env()
+        .meta_client()
+        .clear_file_cache(clear_meta_cache, clear_data_cache)
+        .await?;
+    Ok(RwPgResponse::empty_result(StatementType::ALTER_SYSTEM))
 }

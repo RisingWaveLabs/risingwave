@@ -73,8 +73,8 @@ use risingwave_sqlparser::parser::{Parser, ParserError};
 use sea_orm::ActiveValue::Set;
 use sea_orm::sea_query::{Expr, Query, SimpleExpr};
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, DatabaseTransaction, EntityTrait, IntoActiveModel, JoinType,
-    NotSet, PaginatorTrait, QueryFilter, QuerySelect, RelationTrait, TransactionTrait,
+    ActiveModelTrait, ColumnTrait, Condition, DatabaseTransaction, EntityTrait, IntoActiveModel,
+    JoinType, NotSet, PaginatorTrait, QueryFilter, QuerySelect, RelationTrait, TransactionTrait,
 };
 use thiserror_ext::AsReport;
 
@@ -89,8 +89,9 @@ use crate::controller::utils::{
     PartialObject, build_object_group_for_delete, check_if_belongs_to_iceberg_table,
     check_relation_name_duplicate, check_sink_into_table_cycle, ensure_job_not_canceled,
     ensure_object_id, ensure_user_id, fetch_target_fragments, get_belong_objects,
-    get_belong_objects_by_ids, get_table_columns, grant_default_privileges_automatically,
-    insert_fragment_relations, list_object_dependencies_by_object_id, list_user_info_by_ids,
+    get_belong_objects_by_ids, get_referring_objects, get_table_columns,
+    grant_default_privileges_automatically, insert_fragment_relations,
+    list_object_dependencies_by_object_id, list_user_info_by_ids, upsert_user_privileges,
 };
 use crate::error::MetaErrorInner;
 use crate::manager::{NotificationVersion, StreamingJob, StreamingJobType};
@@ -123,6 +124,19 @@ pub struct CancelStreamingJobInfo {
     pub streaming_job_ids: Vec<JobId>,
     /// State tables to unregister after the barrier is collected.
     pub state_table_ids: Vec<TableId>,
+}
+
+#[derive(Debug)]
+pub struct IndependentJobChangeLogInfo {
+    pub job_id: JobId,
+    pub state_table_ids: HashSet<TableId>,
+    pub upstream_table_snapshot_epochs: HashMap<TableId, Option<u64>>,
+}
+
+#[derive(Debug)]
+pub struct TableChangeLogTruncateInfo {
+    pub subscription_retention_seconds: HashMap<TableId, u64>,
+    pub independent_jobs: Vec<IndependentJobChangeLogInfo>,
 }
 
 fn serverless_backfill_resource_group_placeholder(job_id: JobId) -> String {
@@ -225,6 +239,118 @@ fn update_sink_node_rate_limit(node: &mut PbNodeBody, rate_limit: Option<u32>) -
 }
 
 impl CatalogController {
+    pub async fn get_table_change_log_truncate_info(
+        &self,
+    ) -> MetaResult<TableChangeLogTruncateInfo> {
+        let inner = self.inner.read().await;
+
+        let subscriptions: Vec<(TableId, i64)> = Subscription::find()
+            .select_only()
+            .columns([
+                subscription::Column::DependentTableId,
+                subscription::Column::RetentionSeconds,
+            ])
+            .into_tuple()
+            .all(&inner.db)
+            .await?;
+        let mut subscription_retention_seconds = HashMap::new();
+        for (table_id, retention_seconds) in subscriptions {
+            let retention_seconds = u64::try_from(retention_seconds).map_err(|_| {
+                anyhow!(
+                    "subscription on table {} has invalid retention seconds {}",
+                    table_id,
+                    retention_seconds
+                )
+            })?;
+            subscription_retention_seconds
+                .entry(table_id)
+                .and_modify(|retention: &mut u64| *retention = (*retention).max(retention_seconds))
+                .or_insert(retention_seconds);
+        }
+
+        let jobs: Vec<JobId> = StreamingJobModel::find()
+            .select_only()
+            .column(streaming_job::Column::JobId)
+            .filter(
+                Condition::any()
+                    .add(streaming_job::Column::JobStatus.eq(JobStatus::Creating))
+                    .add(streaming_job::Column::RefreshIntervalSec.is_not_null()),
+            )
+            .into_tuple::<JobId>()
+            .all(&inner.db)
+            .await?;
+        let mut job_info: HashMap<_, _> = jobs
+            .into_iter()
+            .map(|job_id| {
+                (
+                    job_id,
+                    IndependentJobChangeLogInfo {
+                        job_id,
+                        state_table_ids: HashSet::new(),
+                        upstream_table_snapshot_epochs: HashMap::new(),
+                    },
+                )
+            })
+            .collect();
+        if !job_info.is_empty() {
+            let fragments = Fragment::find()
+                .filter(fragment::Column::JobId.is_in(job_info.keys().copied()))
+                .all(&inner.db)
+                .await?;
+            for fragment in fragments {
+                let info = job_info
+                    .get_mut(&fragment.job_id)
+                    .expect("job should exist");
+                info.state_table_ids
+                    .extend(fragment.state_table_ids.inner_ref().iter().copied());
+                let mut collection_error = None;
+                visit_stream_node_stream_scan(&fragment.stream_node.to_protobuf(), |stream_scan| {
+                    let scan_type = match StreamScanType::try_from(stream_scan.stream_scan_type) {
+                        Ok(scan_type) => scan_type,
+                        Err(err) => {
+                            collection_error = Some(anyhow::Error::new(err).context(format!(
+                                "invalid persisted stream scan type {} in job {} fragment {}",
+                                stream_scan.stream_scan_type, fragment.job_id, fragment.fragment_id
+                            )));
+                            return;
+                        }
+                    };
+                    if scan_type != StreamScanType::SnapshotBackfill {
+                        return;
+                    }
+                    match info
+                        .upstream_table_snapshot_epochs
+                        .entry(stream_scan.table_id)
+                    {
+                        std::collections::hash_map::Entry::Occupied(entry) => {
+                            if entry.get() != &stream_scan.snapshot_backfill_epoch {
+                                collection_error = Some(anyhow!(
+                                    "job {} has inconsistent snapshot epochs for upstream table {}",
+                                    fragment.job_id,
+                                    stream_scan.table_id
+                                ));
+                            }
+                        }
+                        std::collections::hash_map::Entry::Vacant(entry) => {
+                            entry.insert(stream_scan.snapshot_backfill_epoch);
+                        }
+                    }
+                });
+                if let Some(err) = collection_error {
+                    return Err(err.into());
+                }
+            }
+        }
+        let independent_jobs = job_info
+            .into_values()
+            .filter(|info| !info.upstream_table_snapshot_epochs.is_empty())
+            .collect();
+        Ok(TableChangeLogTruncateInfo {
+            subscription_retention_seconds,
+            independent_jobs,
+        })
+    }
+
     pub async fn get_pinned_snapshot_epochs(&self) -> MetaResult<HashMap<TableId, HashSet<u64>>> {
         // Hold the catalog read lock across both queries so a job cannot transition out of
         // `Creating` while its fragments are being inspected.
@@ -1434,21 +1560,21 @@ impl CatalogController {
         // 1. check version.
         streaming_job.verify_version_for_replace(&txn).await?;
         // 2. check concurrent replace.
-        let referring_cnt = ObjectDependency::find()
-            .join(
-                JoinType::InnerJoin,
-                object_dependency::Relation::Object1.def(),
-            )
-            .join(JoinType::InnerJoin, object::Relation::StreamingJob.def())
+        let referring_objects =
+            get_referring_objects(id.as_object_id(), streaming_job.object_type(), &txn).await?;
+        let referring_job_ids = referring_objects
+            .iter()
+            .map(|object| object.oid.as_job_id())
+            .collect_vec();
+        let non_created_referring_job_count = StreamingJobModel::find()
             .filter(
-                object_dependency::Column::Oid
-                    .eq(id)
-                    .and(object::Column::ObjType.eq(ObjectType::Table))
+                streaming_job::Column::JobId
+                    .is_in(referring_job_ids)
                     .and(streaming_job::Column::JobStatus.ne(JobStatus::Created)),
             )
             .count(&txn)
             .await?;
-        if referring_cnt != 0 {
+        if non_created_referring_job_count != 0 {
             return Err(MetaError::permission_denied(
                 "job is being altered or referenced by some creating jobs",
             ));
@@ -1751,7 +1877,7 @@ impl CatalogController {
                             });
                         }
                     }
-                    UserPrivilege::insert_many(new_privileges).exec(txn).await?;
+                    upsert_user_privileges(txn, new_privileges).await?;
 
                     updated_user_info = list_user_info_by_ids(
                         primary_table_privileges.into_iter().map(|p| p.user_id),
@@ -3506,7 +3632,10 @@ impl CatalogController {
                             {
                                 let mut new_sink_props = sink.properties.0.clone();
                                 new_sink_props.extend(alter_props.clone());
-                                SinkType::validate_alter_config(&new_sink_props)
+                                SinkType::validate_alter_config_change(
+                                    &new_sink_props,
+                                    &alter_props,
+                                )
                             },
                             |sink: &str| Err(SinkError::Config(anyhow!(
                                 "unsupported sink type {}",
@@ -3788,6 +3917,10 @@ impl CatalogController {
                         rate_limit = node.rate_limit;
                         node_name = Some("SINK");
                     }
+                    PbNodeBody::Dml(node) => {
+                        rate_limit = node.rate_limit;
+                        node_name = Some("DML");
+                    }
                     _ => {}
                 }
 
@@ -3822,7 +3955,7 @@ fn validate_sink_props(sink: &sink::Model, props: &BTreeMap<String, String>) -> 
                 {
                     let mut new_props = sink.properties.0.clone();
                     new_props.extend(props.clone());
-                    SinkType::validate_alter_config(&new_props)
+                    SinkType::validate_alter_config_change(&new_props, props)
                 },
                 |sink: &str| Err(SinkError::Config(anyhow!("unsupported sink type {}", sink)))
             )?

@@ -33,8 +33,7 @@ fn check_table_mismatch<'a>(
     schema_path: SchemaPath<'_>,
     table_name: &str,
 ) -> Result<&'a TableCatalog> {
-    let (table, schema_name) =
-        reader.get_created_table_by_name(db_name, schema_path, table_name)?;
+    let (table, schema_name) = reader.get_table_by_name(db_name, schema_path, table_name, true)?;
     if table.table_type != TableType::Table {
         return Err(
             ErrorCode::InvalidInputSyntax(format!("\"{table_name}\" is not a TABLE",)).into(),

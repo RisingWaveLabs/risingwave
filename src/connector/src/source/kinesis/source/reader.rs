@@ -24,6 +24,7 @@ use aws_sdk_kinesis::types::ShardIteratorType;
 use futures_async_stream::try_stream;
 use risingwave_common::bail;
 use risingwave_common::metrics::{LabelGuardedHistogram, LabelGuardedIntCounter};
+use risingwave_common::util::retry::exponential_backoff;
 use thiserror_ext::AsReport;
 
 use crate::error::ConnectorResult as Result;
@@ -378,7 +379,7 @@ impl KinesisSplitReader {
 
         self.shard_iter = Some(
             tokio_retry::Retry::spawn(
-                tokio_retry::strategy::ExponentialBackoff::from_millis(100).take(3),
+                exponential_backoff(Duration::from_millis(100), 2, Duration::MAX).take(3),
                 || {
                     get_shard_iter_inner(
                         &self.client,

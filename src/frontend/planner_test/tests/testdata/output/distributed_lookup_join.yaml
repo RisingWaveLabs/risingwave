@@ -69,3 +69,17 @@
       │ └─BatchScan { table: t1, columns: [t1.a, t1.b], distribution: SomeShard }
       └─BatchExchange { order: [], dist: HashShard(mv1.b) }
         └─BatchScan { table: mv1, columns: [mv1.a, mv1.b], distribution: Single }
+- id: fix https://github.com/risingwavelabs/risingwave/issues/26730
+  sql: |
+    create table t1 (a int);
+    create materialized view mv1 as select a from t1 order by a, a limit 1;
+    select t1.a from t1 join mv1 on t1.a = mv1.a;
+  batch_plan: |-
+    BatchExchange { order: [], dist: Single }
+    └─BatchLookupJoin { type: Inner, predicate: t1.a = mv1.a, output: [t1.a], lookup table: mv1 }
+      └─BatchExchange { order: [], dist: Single }
+        └─BatchScan { table: t1, columns: [t1.a], distribution: SomeShard }
+  batch_local_plan: |-
+    BatchLookupJoin { type: Inner, predicate: t1.a = mv1.a, output: [t1.a], lookup table: mv1 }
+    └─BatchExchange { order: [], dist: Single }
+      └─BatchScan { table: t1, columns: [t1.a], distribution: SomeShard }

@@ -20,19 +20,21 @@
 )]
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use iceberg::io::{
-    AZBLOB_ACCOUNT_KEY, AZBLOB_ACCOUNT_NAME, AZBLOB_ENDPOINT, FileIO, GCS_CREDENTIALS_JSON,
-    GCS_DISABLE_CONFIG_LOAD, S3_ACCESS_KEY_ID, S3_DISABLE_CONFIG_LOAD, S3_ENDPOINT,
-    S3_PATH_STYLE_ACCESS, S3_REGION, S3_SECRET_ACCESS_KEY,
+    AZBLOB_ACCOUNT_KEY, AZBLOB_ACCOUNT_NAME, AZBLOB_ENDPOINT, FileIO, FileIOBuilder,
+    GCS_CREDENTIALS_JSON, GCS_DISABLE_CONFIG_LOAD, S3_ACCESS_KEY_ID, S3_DISABLE_CONFIG_LOAD,
+    S3_ENDPOINT, S3_PATH_STYLE_ACCESS, S3_REGION, S3_SECRET_ACCESS_KEY,
 };
 use iceberg::spec::{TableMetadata, TableMetadataBuilder, TableProperties};
 use iceberg::table::Table;
 use iceberg::{
-    Catalog, Error, ErrorKind, Namespace, NamespaceIdent, Result, TableCommit, TableCreation,
-    TableIdent,
+    Catalog, Error, ErrorKind, Namespace, NamespaceIdent, Result, Runtime, TableCommit,
+    TableCreation, TableIdent,
 };
+use iceberg_storage_opendal::OpenDalStorageFactory;
 use thiserror_ext::AsReport;
 use typed_builder::TypedBuilder;
 
@@ -80,7 +82,7 @@ impl StorageCatalog {
     pub fn new(config: StorageCatalogConfig) -> Result<Self> {
         let (warehouse, file_io) = match config {
             StorageCatalogConfig::S3(config) => {
-                let mut file_io_builder = FileIO::from_path(&config.warehouse)?;
+                let mut file_io_builder = FileIOBuilder::new(Arc::new(OpenDalStorageFactory::s3()));
                 if let Some(access_key) = &config.access_key {
                     file_io_builder = file_io_builder.with_prop(S3_ACCESS_KEY_ID, access_key)
                 };
@@ -100,20 +102,22 @@ impl StorageCatalog {
                 let enable_config_load = config.enable_config_load.unwrap_or(false);
                 file_io_builder = file_io_builder
                     .with_prop(S3_DISABLE_CONFIG_LOAD, (!enable_config_load).to_string());
-                (config.warehouse, file_io_builder.build()?)
+                (config.warehouse, file_io_builder.build())
             }
             StorageCatalogConfig::Gcs(config) => {
-                let mut file_io_builder = FileIO::from_path(&config.warehouse)?;
+                let mut file_io_builder =
+                    FileIOBuilder::new(Arc::new(OpenDalStorageFactory::gcs()));
                 if let Some(credential) = &config.credential {
                     file_io_builder = file_io_builder.with_prop(GCS_CREDENTIALS_JSON, credential)
                 };
                 let enable_config_load = config.enable_config_load.unwrap_or(false);
                 file_io_builder = file_io_builder
                     .with_prop(GCS_DISABLE_CONFIG_LOAD, (!enable_config_load).to_string());
-                (config.warehouse, file_io_builder.build()?)
+                (config.warehouse, file_io_builder.build())
             }
             StorageCatalogConfig::Azblob(config) => {
-                let mut file_io_builder = FileIO::from_path(&config.warehouse)?;
+                let mut file_io_builder =
+                    FileIOBuilder::new(Arc::new(OpenDalStorageFactory::azblob()));
                 if let Some(account_name) = &config.account_name {
                     file_io_builder = file_io_builder.with_prop(AZBLOB_ACCOUNT_NAME, account_name)
                 };
@@ -123,7 +127,7 @@ impl StorageCatalog {
                 if let Some(endpoint) = &config.endpoint {
                     file_io_builder = file_io_builder.with_prop(AZBLOB_ENDPOINT, endpoint)
                 };
-                (config.warehouse, file_io_builder.build()?)
+                (config.warehouse, file_io_builder.build())
             }
         };
 
@@ -307,6 +311,7 @@ impl Catalog for StorageCatalog {
             .metadata(table_metadata.metadata)
             .identifier(table_ident)
             .file_io(self.file_io.clone())
+            .runtime(Runtime::try_current()?)
             .build()
     }
 
@@ -331,6 +336,7 @@ impl Catalog for StorageCatalog {
             .metadata(table_metadata)
             .identifier(table.clone())
             .file_io(self.file_io.clone())
+            .runtime(Runtime::try_current()?)
             // Only support readonly table for storage catalog now.
             .readonly(true)
             .build()
@@ -343,6 +349,10 @@ impl Catalog for StorageCatalog {
             .file_io()
             .delete_prefix(table.metadata().location())
             .await
+    }
+
+    async fn purge_table(&self, table: &TableIdent) -> iceberg::Result<()> {
+        self.drop_table(table).await
     }
 
     /// Check if a table exists in the catalog.

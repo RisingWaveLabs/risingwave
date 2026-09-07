@@ -42,6 +42,7 @@ use crate::controller::utils::{
     ensure_privileges_not_referred, ensure_user_id, extract_grant_obj_id,
     get_iceberg_related_object_ids, get_index_state_tables_by_table_id, get_internal_tables_by_id,
     get_object_owner, get_referring_privileges_cascade, get_user_privilege, list_user_info_by_ids,
+    upsert_user_privileges,
 };
 use crate::manager::{IGNORED_NOTIFICATION_VERSION, NotificationVersion};
 use crate::{MetaError, MetaResult};
@@ -326,26 +327,7 @@ impl CatalogController {
                 })
             })
             .collect_vec();
-        for privilege in user_privileges {
-            let mut on_conflict = OnConflict::columns([
-                user_privilege::Column::UserId,
-                user_privilege::Column::Oid,
-                user_privilege::Column::Action,
-                user_privilege::Column::GrantedBy,
-            ]);
-            if *privilege.with_grant_option.as_ref() {
-                on_conflict.update_column(user_privilege::Column::WithGrantOption);
-            } else {
-                // Workaround to support MYSQL for `DO NOTHING`.
-                on_conflict.update_column(user_privilege::Column::UserId);
-            }
-
-            UserPrivilege::insert(privilege)
-                .on_conflict(on_conflict)
-                .do_nothing()
-                .exec(&txn)
-                .await?;
-        }
+        upsert_user_privileges(&txn, user_privileges).await?;
 
         let user_infos = list_user_info_by_ids(user_ids, &txn).await?;
 

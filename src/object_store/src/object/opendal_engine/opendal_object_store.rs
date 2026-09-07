@@ -77,7 +77,7 @@ impl OpendalObjectStore {
     pub fn test_new_memory_engine() -> ObjectResult<Self> {
         // Create memory backend builder.
         let builder = Memory::default();
-        let op: Operator = Operator::new(builder)?.finish();
+        let op: Operator = Operator::new(builder)?;
 
         Ok(Self {
             op,
@@ -124,7 +124,7 @@ impl ObjectStore for OpendalObjectStore {
     }
 
     async fn streaming_upload(&self, path: &str) -> ObjectResult<Self::StreamingUploader> {
-        if self.op.info().native_capability().write_can_multi {
+        if self.op.info().capability().write_can_multi {
             Ok(OpendalStreamingUploader::Native(Box::new(
                 OpendalNativeStreamingUploader::new(
                     self.op.clone(),
@@ -374,7 +374,11 @@ impl OpendalNativeStreamingUploader {
     ) -> ObjectResult<Self> {
         let monitored_execute = OpendalStreamingUploaderExecute::new(metrics, media_type);
         let executor = Executor::with(monitored_execute);
-        op.update_executor(|_| executor);
+        // Start from the base context so existing layers are replayed exactly once by
+        // `with_context`. Using the composed context here would double-wrap resources such as
+        // the HTTP concurrency semaphore.
+        let ctx = op.base_context().with_executor(executor);
+        let op = op.with_context(ctx);
 
         let writer = op
             .clone()
@@ -549,13 +553,12 @@ mod tests {
     }
 
     #[tokio::test]
-    #[should_panic]
-    async fn test_memory_read_overflow() {
+    async fn test_memory_read_out_of_range_returns_error() {
         let block = Bytes::from("123456");
         let store = OpendalObjectStore::test_new_memory_engine().unwrap();
         store.upload("/abc", block).await.unwrap();
 
-        // Overflow.
+        // OpenDAL 0.58 reports an out-of-range read instead of panicking.
         store.read("/abc", 4..44).await.unwrap_err();
     }
 

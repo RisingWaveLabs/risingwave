@@ -68,7 +68,7 @@ pub async fn read_dv_positions_from_data_file(
     })?;
 
     let input_file = file_io.new_input(data_file.file_path())?;
-    let puffin_reader = PuffinReader::new(input_file);
+    let puffin_reader = PuffinReader::new(input_file).await?;
     let file_metadata = puffin_reader.file_metadata().await?;
     let blob_metadata = file_metadata
         .blobs()

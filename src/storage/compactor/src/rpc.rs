@@ -60,7 +60,7 @@ impl CompactorService for CompactorServiceImpl {
             }
             None => {
                 tracing::error!(
-                    "fail to send DispatchCompactionTaskRequest, sender has not been initialized."
+                    "failed to send DispatchCompactionTaskRequest: the sender has not been initialized"
                 );
             }
         }

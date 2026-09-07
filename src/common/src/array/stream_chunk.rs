@@ -13,9 +13,10 @@
 // limitations under the License.
 
 use std::fmt::Display;
+use std::marker::PhantomData;
 use std::mem::size_of;
 use std::ops::{Deref, DerefMut};
-use std::sync::{Arc, LazyLock};
+use std::sync::Arc;
 use std::{fmt, mem};
 
 use either::Either;
@@ -535,23 +536,13 @@ impl From<StreamChunkMut> for StreamChunk {
     }
 }
 
+/// A handle to one row of a [`StreamChunkMut`] that can update the row's op and
+/// visibility in place. It holds a raw pointer instead of `&mut` since multiple
+/// handles to the same chunk coexist (see [`StreamChunkMut::to_rows_mut`]).
 pub struct OpRowMutRef<'a> {
-    c: &'a mut StreamChunkMut,
+    c: *mut StreamChunkMut,
     i: usize,
-}
-
-// Act as a placeholder value when using in `ChangeBuffer`.
-impl Default for OpRowMutRef<'_> {
-    fn default() -> Self {
-        static mut DUMMY_CHUNK_MUT: LazyLock<StreamChunkMut> =
-            LazyLock::new(|| StreamChunk::default().into());
-
-        #[expect(clippy::deref_addrof)] // false positive
-        OpRowMutRef {
-            c: unsafe { &mut *(&raw mut DUMMY_CHUNK_MUT) },
-            i: 0,
-        }
-    }
+    _phantom: PhantomData<&'a mut StreamChunkMut>,
 }
 
 impl PartialEq for OpRowMutRef<'_> {
@@ -566,24 +557,31 @@ impl<'a> OpRowMutRef<'a> {
         self.i
     }
 
+    // SAFETY of derefs below: `self.c` is valid for `'a`, and each access reborrows
+    // a single disjoint field only.
+
     pub fn vis(&self) -> bool {
-        self.c.vis.is_set(self.i)
+        let vis = unsafe { &(*self.c).vis };
+        vis.is_set(self.i)
     }
 
     pub fn op(&self) -> Op {
-        self.c.ops.get(self.i)
+        let ops = unsafe { &(*self.c).ops };
+        ops.get(self.i)
     }
 
     pub fn set_vis(&mut self, val: bool) {
-        self.c.set_vis(self.i, val);
+        let vis = unsafe { &mut (*self.c).vis };
+        vis.set(self.i, val);
     }
 
     pub fn set_op(&mut self, val: Op) {
-        self.c.set_op(self.i, val);
+        let ops = unsafe { &mut (*self.c).ops };
+        ops.set(self.i, val);
     }
 
     pub fn row_ref(&self) -> RowRef<'_> {
-        RowRef::with_columns(self.c.columns(), self.i)
+        RowRef::with_columns(unsafe { &(*self.c).columns }, self.i)
     }
 
     /// return if the two row ref is in the same chunk
@@ -623,20 +621,37 @@ impl StreamChunkMut {
 
     /// get the mut reference of the stream chunk.
     pub fn to_rows_mut(&mut self) -> impl Iterator<Item = (RowRef<'_>, OpRowMutRef<'_>)> {
-        // SAFETY: `OpRowMutRef` can only mutate the visibility and ops, which is safe even
-        // when the columns are borrowed by `RowRef` at the same time.
-        unsafe {
-            (0..self.vis.len())
-                .filter(|i| self.vis.is_set(*i))
-                .map(|i| {
-                    let p = self as *const StreamChunkMut;
-                    let p = p as *mut StreamChunkMut;
-                    (
-                        RowRef::with_columns(self.columns(), i),
-                        OpRowMutRef { c: &mut *p, i },
-                    )
-                })
-        }
+        // SAFETY: the pointer is derived from `&mut self`, which stays exclusively
+        // borrowed by the returned iterator.
+        unsafe { Self::rows_mut_ptr(self) }
+    }
+
+    /// # Safety
+    ///
+    /// `p` must be derived from an exclusive reference valid for `'a`, and the chunk must
+    /// not be accessed in other ways while the iterator or any yielded item is alive.
+    unsafe fn rows_mut_ptr<'a>(
+        p: *mut Self,
+    ) -> impl Iterator<Item = (RowRef<'a>, OpRowMutRef<'a>)> {
+        let len = {
+            let vis = unsafe { &(*p).vis };
+            vis.len()
+        };
+        (0..len)
+            .filter(move |i| {
+                let vis = unsafe { &(*p).vis };
+                vis.is_set(*i)
+            })
+            .map(move |i| {
+                (
+                    RowRef::with_columns(unsafe { &(*p).columns }, i),
+                    OpRowMutRef {
+                        c: p,
+                        i,
+                        _phantom: PhantomData,
+                    },
+                )
+            })
     }
 }
 

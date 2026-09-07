@@ -192,6 +192,8 @@ pub static SOURCE_ALLOW_ALTER_ON_FLY_FIELDS: LazyLock<HashMap<String, HashSet<St
         std::any::type_name::<PubsubProperties>().to_owned(),
         [
             "pubsub.ack_deadline_seconds".to_owned(),
+            "pubsub.max_outstanding_messages".to_owned(),
+            "pubsub.max_outstanding_bytes".to_owned(),
         ].into_iter().collect(),
     ).unwrap();
     // PulsarProperties

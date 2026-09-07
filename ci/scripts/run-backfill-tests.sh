@@ -34,7 +34,7 @@ else
   RUNTIME_CLUSTER_PROFILE='ci-backfill-3cn-1fe-with-monitoring'
   MINIO_RATE_LIMIT_CLUSTER_PROFILE='ci-backfill-3cn-1fe-with-monitoring-and-minio-rate-limit'
 fi
-export RUST_LOG="info,risingwave_stream=info,risingwave_stream::executor::backfill=debug,risingwave_batch=info,risingwave_storage=info,risingwave_meta::barrier=debug,risingwave_stream::executor::stream_reader=warn" \
+export RUST_LOG="info,risingwave_stream=info,risingwave_batch=info,risingwave_storage=info,risingwave_stream::executor::stream_reader=warn" \
 
 run_sql_file() {
   psql -h localhost -p 4566 -d dev -U root -f "$@"

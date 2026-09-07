@@ -55,6 +55,10 @@ const ALLOW_EXPERIMENTAL_JSON_TYPE: &str = "allow_experimental_json_type";
 const INPUT_FORMAT_BINARY_READ_JSON_AS_STRING: &str = "input_format_binary_read_json_as_string";
 const OUTPUT_FORMAT_BINARY_WRITE_JSON_AS_STRING: &str = "output_format_binary_write_json_as_string";
 
+/// `ClickHouse` backs `Decimal(P, S)` with `Decimal256` once `P > 38`, which takes 32 bytes on the
+/// wire, while [`ClickHouseDecimal`] never writes more than 16.
+const MAX_ENCODABLE_DECIMAL_PRECISION: u8 = 38;
+
 #[serde_as]
 #[derive(Deserialize, Debug, Clone, WithOptions)]
 pub struct ClickHouseCommon {
@@ -482,7 +486,23 @@ impl ClickHouseSink {
             }
             risingwave_common::types::DataType::Float32 => Ok(ck_column.r#type.contains("Float32")),
             risingwave_common::types::DataType::Float64 => Ok(ck_column.r#type.contains("Float64")),
-            risingwave_common::types::DataType::Decimal => Ok(ck_column.r#type.contains("Decimal")),
+            risingwave_common::types::DataType::Decimal => {
+                match parse_decimal_accuracy(&ck_column.r#type)? {
+                    Some((precision, _)) if precision > MAX_ENCODABLE_DECIMAL_PRECISION => {
+                        Err(SinkError::ClickHouse(format!(
+                            "column {:?} has ClickHouse type `{}`: precision {} is backed by Decimal256, \
+                             but this sink can only encode decimals up to precision {}. Lower the column \
+                             precision (recreating the table if it is a key column), or leave the column \
+                             out of the sink.",
+                            ck_column.name,
+                            ck_column.r#type,
+                            precision,
+                            MAX_ENCODABLE_DECIMAL_PRECISION,
+                        )))
+                    }
+                    accuracy => Ok(accuracy.is_some()),
+                }
+            }
             risingwave_common::types::DataType::Date => Ok(ck_column.r#type.contains("Date32")),
             risingwave_common::types::DataType::Varchar => Ok(ck_column.r#type.contains("String")),
             risingwave_common::types::DataType::Time => Err(SinkError::ClickHouse(
@@ -651,10 +671,23 @@ impl ClickHouseSinkWriter {
                 .iter()
                 .map(Self::build_column_correct_map)
                 .collect();
-        let mut rw_fields_name_after_calibration = build_fields_name_type_from_schema(&schema)?
+        let sink_fields = build_fields_name_type_from_schema(&schema)?;
+
+        // The table may have been altered since `CREATE SINK` validated it, and an under-sized
+        // decimal encoding would desync every following column of the same RowBinary row. Only
+        // columns the writer encodes as decimals are held to the decimal rule.
+        let ck_columns: HashMap<&str, &SystemColumn> = clickhouse_column
             .iter()
-            .map(|(a, _)| a.clone())
-            .collect_vec();
+            .map(|c| (c.name.as_str(), c))
+            .collect();
+        for (name, data_type) in sink_fields.iter().filter(|(_, t)| contains_decimal(t)) {
+            if let Some(ck_column) = ck_columns.get(name.as_str()) {
+                ClickHouseSink::check_and_correct_column_type(data_type, ck_column)?;
+            }
+        }
+
+        let mut rw_fields_name_after_calibration =
+            sink_fields.iter().map(|(a, _)| a.clone()).collect_vec();
 
         if let Some(sign) = clickhouse_engine.get_sign_name() {
             rw_fields_name_after_calibration.push(sign);
@@ -699,38 +732,7 @@ impl ClickHouseSinkWriter {
         } else {
             0_u8
         };
-        let accuracy_decimal = if ck_column.r#type.contains("Decimal(") {
-            let decimal_all = ck_column
-                .r#type
-                .split("Decimal(")
-                .last()
-                .ok_or_else(|| SinkError::ClickHouse("must have last".to_owned()))?
-                .split(')')
-                .next()
-                .ok_or_else(|| SinkError::ClickHouse("must have next".to_owned()))?
-                .split(", ")
-                .collect_vec();
-            let length = decimal_all
-                .first()
-                .ok_or_else(|| SinkError::ClickHouse("must have next".to_owned()))?
-                .parse::<u8>()
-                .map_err(|e| SinkError::ClickHouse(e.to_report_string()))?;
-
-            if length > 38 {
-                return Err(SinkError::ClickHouse(
-                    "RW don't support Decimal256".to_owned(),
-                ));
-            }
-
-            let scale = decimal_all
-                .last()
-                .ok_or_else(|| SinkError::ClickHouse("must have next".to_owned()))?
-                .parse::<u8>()
-                .map_err(|e| SinkError::ClickHouse(e.to_report_string()))?;
-            (length, scale)
-        } else {
-            (0_u8, 0_u8)
-        };
+        let accuracy_decimal = parse_decimal_accuracy(&ck_column.r#type)?.unwrap_or((0, 0));
         Ok((
             ck_column.name.clone(),
             ClickHouseSchemaFeature {
@@ -831,6 +833,38 @@ struct SystemColumn {
     name: String,
     r#type: String,
     is_in_primary_key: u8,
+}
+
+/// Parse `(precision, scale)` out of a decimal type, or `None` if it is not a decimal.
+/// `system.columns` renders decimals canonically, so `Decimal128(10)` arrives as `Decimal(38, 10)`.
+fn parse_decimal_accuracy(ck_type: &str) -> Result<Option<(u8, u8)>> {
+    let Some((_, rest)) = ck_type.split_once("Decimal(") else {
+        return Ok(None);
+    };
+    let (args, _) = rest
+        .split_once(')')
+        .ok_or_else(|| SinkError::ClickHouse(format!("unterminated decimal type {ck_type:?}")))?;
+    let (precision, scale) = args
+        .split_once(',')
+        .ok_or_else(|| SinkError::ClickHouse(format!("decimal type {ck_type:?} has no scale")))?;
+    let parse = |field: &str| {
+        field.trim().parse::<u8>().map_err(|e| {
+            SinkError::ClickHouse(format!(
+                "cannot parse decimal type {:?}: {}",
+                ck_type,
+                e.to_report_string()
+            ))
+        })
+    };
+    Ok(Some((parse(precision)?, parse(scale)?)))
+}
+
+fn contains_decimal(data_type: &DataType) -> bool {
+    match data_type {
+        DataType::Decimal => true,
+        DataType::List(list) => contains_decimal(list.elem()),
+        _ => false,
+    }
 }
 
 #[derive(ClickHouseRow, Deserialize)]
@@ -1182,5 +1216,51 @@ pub fn build_fields_name_type_from_schema(schema: &Schema) -> Result<Vec<(String
 impl From<::clickhouse::error::Error> for SinkError {
     fn from(value: ::clickhouse::error::Error) -> Self {
         SinkError::ClickHouse(value.to_report_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn system_column(ck_type: &str) -> SystemColumn {
+        SystemColumn {
+            name: "amount".to_owned(),
+            r#type: ck_type.to_owned(),
+            is_in_primary_key: 0,
+        }
+    }
+
+    #[test]
+    fn test_parse_decimal_accuracy() {
+        let parse = |ck_type: &str| parse_decimal_accuracy(ck_type).unwrap();
+
+        assert_eq!(parse("Decimal(38, 10)"), Some((38, 10)));
+        assert_eq!(parse("Decimal(38,10)"), Some((38, 10)));
+        assert_eq!(parse("Nullable(Decimal(76, 4))"), Some((76, 4)));
+        assert_eq!(parse("DateTime64(3)"), None);
+
+        assert!(parse_decimal_accuracy("Decimal(38)").is_err());
+    }
+
+    #[test]
+    fn test_decimal_column_check() {
+        let check = |rw_type: &DataType, ck_type: &str| {
+            ClickHouseSink::check_and_correct_column_type(rw_type, &system_column(ck_type))
+        };
+        let decimal_list = DataType::list(DataType::Decimal);
+
+        check(&DataType::Decimal, "Nullable(Decimal(38, 10))").unwrap();
+        check(&decimal_list, "Array(Decimal(9, 2))").unwrap();
+        // Only columns encoded as decimals are held to the precision rule.
+        check(&DataType::Jsonb, "JSON(a Decimal(76, 4), b Decimal(9, 2))").unwrap();
+
+        check(&DataType::Decimal, "String").unwrap_err();
+        let err = check(&DataType::Decimal, "Decimal(76, 4)")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("amount"), "{err}");
+        assert!(err.contains("Decimal(76, 4)"), "{err}");
+        assert!(err.contains("precision 76"), "{err}");
     }
 }

@@ -809,6 +809,13 @@ pub fn bind_connector_props(
     Ok((with_properties, refresh_mode))
 }
 
+fn must_wait_cdc_offset_before_report(with_properties: &WithOptions) -> bool {
+    matches!(
+        with_properties.get_connector().as_deref(),
+        Some(MYSQL_CDC_CONNECTOR) | Some(SQL_SERVER_CDC_CONNECTOR)
+    )
+}
+
 /// When the schema can be inferred from external system (like schema registry),
 /// how to handle the regular columns (i.e., non-generated) defined in SQL?
 pub enum SqlColumnStrategy {
@@ -1182,6 +1189,15 @@ pub async fn handle_create_source(
         )));
     }
 
+    if overwrite_options.source_rate_limit == Some(0)
+        && must_wait_cdc_offset_before_report(&handler_args.with_options)
+    {
+        let connector = handler_args.with_options.get_connector().unwrap();
+        return Err(RwError::from(ErrorCode::InvalidParameterValue(format!(
+            "`source_rate_limit` cannot be 0 when creating a `{connector}` source because source creation must wait for the initial CDC offset."
+        ))));
+    }
+
     let format_encode = stmt.format_encode.into_v2_with_warning();
     let (with_properties, refresh_mode) =
         bind_connector_props(&handler_args, &format_encode, true)?;
@@ -1528,6 +1544,73 @@ pub mod tests {
             ]
         "#]]
         .assert_debug_eq(&columns);
+    }
+
+    #[tokio::test]
+    async fn test_reject_zero_source_rate_limit_when_cdc_must_wait_for_offset() {
+        let frontend = LocalFrontend::new(Default::default()).await;
+        let session = frontend.session_ref();
+
+        for (source_name, connector) in [
+            ("mysql_explicit_zero", "mysql-cdc"),
+            ("sqlserver_explicit_zero", "sqlserver-cdc"),
+        ] {
+            let err = frontend
+                .run_sql_with_session(
+                    session.clone(),
+                    format!(
+                        "CREATE SOURCE {source_name} WITH (connector = '{connector}', source_rate_limit = '0') FORMAT PLAIN ENCODE JSON"
+                    ),
+                )
+                .await
+                .unwrap_err();
+            let message = err.to_string();
+            assert!(
+                message.contains("source creation must wait for the initial CDC offset"),
+                "{message}"
+            );
+        }
+
+        frontend
+            .run_sql_with_session(session.clone(), "SET source_rate_limit TO 0;")
+            .await
+            .unwrap();
+
+        for (source_name, connector) in [
+            ("mysql_session_zero", "mysql-cdc"),
+            ("sqlserver_session_zero", "sqlserver-cdc"),
+        ] {
+            let err = frontend
+                .run_sql_with_session(
+                    session.clone(),
+                    format!(
+                        "CREATE SOURCE {source_name} WITH (connector = '{connector}') FORMAT PLAIN ENCODE JSON"
+                    ),
+                )
+                .await
+                .unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains("source creation must wait for the initial CDC offset"),
+                "{err}"
+            );
+        }
+
+        frontend
+            .run_sql_with_session(
+                session.clone(),
+                "CREATE SOURCE mysql_positive_override WITH (connector = 'mysql-cdc', source_rate_limit = '1') FORMAT PLAIN ENCODE JSON",
+            )
+            .await
+            .unwrap();
+
+        frontend
+            .run_sql_with_session(
+                session,
+                "CREATE SOURCE postgres_zero WITH (connector = 'postgres-cdc') FORMAT PLAIN ENCODE JSON",
+            )
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

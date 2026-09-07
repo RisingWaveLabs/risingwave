@@ -53,7 +53,7 @@ create table iceberg_batch_table ( primary key (id) ) with (
 db error: ERROR: Failed to run the query
 
 Caused by:
-  Invalid Parameter Value: `refresh_interval_sec` must be a positive integer and larger than 0, but got: abcdef (error: invalid digit found in string)
+  Invalid parameter value: `refresh_interval_sec` must be a positive integer and larger than 0, but got: abcdef (error: invalid digit found in string)
 
 
 statement error
@@ -73,7 +73,7 @@ create table iceberg_batch_table ( primary key (id) ) with (
 db error: ERROR: Failed to run the query
 
 Caused by:
-  Invalid Parameter Value: `refresh_interval_sec` must be larger than 0, but got: -10
+  Invalid parameter value: `refresh_interval_sec` must be larger than 0, but got: -10
 
 
 statement error
@@ -93,7 +93,7 @@ create table iceberg_batch_table ( primary key (id) ) with (
 db error: ERROR: Failed to run the query
 
 Caused by:
-  Invalid Parameter Value: `refresh_interval_sec` is not allowed when `refresh_mode` is not 'FULL_RELOAD'
+  Invalid parameter value: `refresh_interval_sec` is not allowed when `refresh_mode` is not 'FULL_RELOAD'
 
 
 statement ok

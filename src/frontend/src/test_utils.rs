@@ -1267,6 +1267,14 @@ impl FrontendMetaClient for MockFrontendMetaClient {
         Ok(Some(SystemParams::default().into()))
     }
 
+    async fn clear_file_cache(
+        &self,
+        _clear_meta_cache: bool,
+        _clear_data_cache: bool,
+    ) -> RpcResult<()> {
+        Ok(())
+    }
+
     async fn get_session_params(&self) -> RpcResult<SessionConfig> {
         Ok(Default::default())
     }

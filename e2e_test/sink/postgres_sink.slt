@@ -704,6 +704,116 @@ DROP TABLE rw_fk_parent;
 system ok
 PGDATABASE=sink_test psql -c "DROP TABLE pg_fk_child; DROP TABLE pg_fk_parent"
 
+################### Test batched writes: rows are buffered across chunks and flushed once max_batch_rows is reached
+
+statement ok
+DROP TABLE IF EXISTS rw_batch_table CASCADE;
+
+system ok
+PGDATABASE=sink_test psql -c "DROP TABLE IF EXISTS pg_batch_table"
+
+system ok
+PGDATABASE=sink_test psql -c "CREATE TABLE pg_batch_table (
+    id BIGINT PRIMARY KEY,
+    grp INTEGER,
+    ver INTEGER,
+    val BIGINT,
+    payload VARCHAR
+)"
+
+statement ok
+CREATE TABLE rw_batch_table (
+    id BIGINT PRIMARY KEY,
+    grp INTEGER,
+    ver INTEGER,
+    val BIGINT,
+    payload VARCHAR
+);
+
+statement ok
+CREATE SINK rw_batch_sink FROM rw_batch_table WITH (
+    connector='postgres',
+    host='$PGHOST',
+    port='$PGPORT',
+    user='$PGUSER',
+    password='$PGPASSWORD',
+    database='sink_test',
+    table='pg_batch_table',
+    type='upsert',
+    primary_key='id',
+    max_batch_rows='64',
+);
+
+# Every statement below feeds far more than 64 rows per epoch, so the batch-full flush runs repeatedly.
+
+statement ok
+INSERT INTO rw_batch_table SELECT x, x % 7, 1, x, 'v1-' || x FROM generate_series(1, 500) t(x);
+
+statement ok
+flush;
+
+# Updates emit U-/U+ pairs on the same key, so the in-batch dedup collapses them to one upsert per key.
+
+statement ok
+UPDATE rw_batch_table SET ver = 2, val = val + 1000, payload = 'v2-' || id WHERE id % 3 = 0;
+
+statement ok
+flush;
+
+statement ok
+UPDATE rw_batch_table SET ver = 3, val = val + 2000, payload = 'v3-' || id WHERE id <= 120;
+
+statement ok
+flush;
+
+statement ok
+DELETE FROM rw_batch_table WHERE id % 10 = 0;
+
+statement ok
+flush;
+
+# Bring part of the deleted key range back.
+
+statement ok
+INSERT INTO rw_batch_table SELECT x * 10, (x * 10) % 7, 4, x * 10, 'v4-' || (x * 10) FROM generate_series(1, 20) t(x);
+
+statement ok
+flush;
+
+query I retry 4 backoff 1s
+select * from postgres_query('$PGHOST', '$PGPORT', '$PGUSER', '${PGPASSWORD:postgres}', 'sink_test', 'select count(*), sum(val), sum(grp), sum(ver) from pg_batch_table;');
+----
+470 480600 1410 860
+
+query I
+select count(*), sum(val), sum(grp), sum(ver) from rw_batch_table;
+----
+470 480600 1410 860
+
+# Symmetric difference between RisingWave and the sink target must be empty.
+
+query I retry 4 backoff 1s
+select count(*) from (
+    (select id, grp, ver, val, payload from rw_batch_table
+     except
+     select id, grp, ver, val, payload from postgres_query('$PGHOST', '$PGPORT', '$PGUSER', '${PGPASSWORD:postgres}', 'sink_test', 'select id, grp, ver, val, payload from pg_batch_table;'))
+    union all
+    (select id, grp, ver, val, payload from postgres_query('$PGHOST', '$PGPORT', '$PGUSER', '${PGPASSWORD:postgres}', 'sink_test', 'select id, grp, ver, val, payload from pg_batch_table;')
+     except
+     select id, grp, ver, val, payload from rw_batch_table)
+) as diff;
+----
+0
+
+statement ok
+DROP SINK rw_batch_sink;
+
+statement ok
+DROP TABLE rw_batch_table;
+
+system ok
+PGDATABASE=sink_test psql -c "DROP TABLE pg_batch_table"
+
 ################### Drop DB
 
 system ok

@@ -59,27 +59,45 @@ impl ConfigService for ConfigServiceImpl {
     ) -> Result<Response<ResizeCacheResponse>, Status> {
         let req = request.into_inner();
 
-        if let Some(meta_cache) = &self.meta_cache
-            && req.meta_cache_capacity > 0
-        {
-            match meta_cache.memory().resize(req.meta_cache_capacity as _) {
-                Ok(_) => tracing::info!(
-                    "resize meta cache capacity to {:?}",
-                    req.meta_cache_capacity
-                ),
-                Err(e) => return Err(Status::internal(e.to_report_string())),
+        // A zero capacity means "do not resize" for backward compatibility. The clear flags
+        // independently trigger HybridCache::clear() and never change the configured capacity.
+        if let Some(meta_cache) = &self.meta_cache {
+            if req.clear_meta_cache {
+                meta_cache
+                    .clear()
+                    .await
+                    .map_err(|e| Status::internal(e.to_report_string()))?;
+                tracing::info!("clear meta file cache");
+            }
+
+            if req.meta_cache_capacity > 0 {
+                match meta_cache.memory().resize(req.meta_cache_capacity as _) {
+                    Ok(_) => tracing::info!(
+                        "resize meta cache capacity to {:?}",
+                        req.meta_cache_capacity
+                    ),
+                    Err(e) => return Err(Status::internal(e.to_report_string())),
+                }
             }
         }
 
-        if let Some(block_cache) = &self.block_cache
-            && req.data_cache_capacity > 0
-        {
-            match block_cache.memory().resize(req.data_cache_capacity as _) {
-                Ok(_) => tracing::info!(
-                    "resize data cache capacity to {:?}",
-                    req.data_cache_capacity
-                ),
-                Err(e) => return Err(Status::internal(e.to_report_string())),
+        if let Some(block_cache) = &self.block_cache {
+            if req.clear_data_cache {
+                block_cache
+                    .clear()
+                    .await
+                    .map_err(|e| Status::internal(e.to_report_string()))?;
+                tracing::info!("clear data file cache");
+            }
+
+            if req.data_cache_capacity > 0 {
+                match block_cache.memory().resize(req.data_cache_capacity as _) {
+                    Ok(_) => tracing::info!(
+                        "resize data cache capacity to {:?}",
+                        req.data_cache_capacity
+                    ),
+                    Err(e) => return Err(Status::internal(e.to_report_string())),
+                }
             }
         }
 

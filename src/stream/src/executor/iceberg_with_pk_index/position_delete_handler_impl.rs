@@ -263,7 +263,7 @@ impl PositionDeleteHandler for PositionDeleteHandlerImpl {
                 let table = load_table_at_least(&config, expected_snapshot).await?;
 
                 // 3. Derive per-table state + seed staging (shard-filtered).
-                let location_generator = DefaultLocationGenerator::new(table.metadata().clone())?;
+                let location_generator = DefaultLocationGenerator::new(table.metadata())?;
                 let uuid_suffix = Uuid::now_v7();
                 let puffin_file_name_generator = DefaultFileNameGenerator::new(
                     actor_id.to_string(),

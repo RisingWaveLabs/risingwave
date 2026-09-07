@@ -24,9 +24,10 @@ use std::time::Duration;
 use anyhow::{Result, anyhow, bail};
 use iceberg::table::Table;
 use iceberg::{Catalog, TableIdent};
+use risingwave_common::util::retry::exponential_backoff;
 use thiserror_ext::AsReport;
 use tokio_retry::RetryIf;
-use tokio_retry::strategy::{ExponentialBackoff, jitter};
+use tokio_retry::strategy::jitter;
 
 #[derive(Clone, Debug)]
 pub struct CommitRetryLogContext {
@@ -133,10 +134,10 @@ where
     F: Fn(Table) -> Fut + Send + Sync,
     Fut: Future<Output = Result<Out, CommitError>> + Send,
 {
-    let retry_strategy = ExponentialBackoff::from_millis(10)
-        .max_delay(Duration::from_secs(60))
-        .map(jitter)
-        .take(retry_num);
+    let retry_strategy =
+        exponential_backoff(Duration::from_millis(10), 10, Duration::from_secs(60))
+            .map(jitter)
+            .take(retry_num);
 
     RetryIf::spawn(
         retry_strategy,

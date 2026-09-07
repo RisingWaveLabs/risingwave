@@ -43,12 +43,12 @@ create table t1 (
 sleep 2s
 
 # Verify data (should have 3 columns)
-query I
+query I retry 30 backoff 1s
 select count(*) from t1;
 ----
 2
 
-query III
+query III retry 30 backoff 1s
 select id, username, email from t1 order by id;
 ----
 1 alice alice@example.com
@@ -114,12 +114,12 @@ create table t2 (
 sleep 2s
 
 # Verify data (should have 5 columns)
-query I
+query I retry 30 backoff 1s
 select count(*) from t2;
 ----
 2
 
-query IIIT
+query IIIT retry 30 backoff 1s
 select id, username, email, password_hash from t2 order by id;
 ----
 1 alice alice@example.com hash123
@@ -133,12 +133,12 @@ psql -c "
 
 sleep 2s
 
-query I
+query I retry 30 backoff 1s
 select count(*) from t2;
 ----
 3
 
-query III
+query III retry 30 backoff 1s
 select id, username, email from t2 where id = 3;
 ----
 3 charlie charlie@example.com

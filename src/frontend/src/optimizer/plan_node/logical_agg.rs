@@ -1342,10 +1342,17 @@ impl PredicatePushdown for LogicalAgg {
             return gen_filter_and_pushdown(self, predicate, Condition::true_cond(), ctx);
         }
 
-        // If the filter references agg_calls, we can not push it.
+        // If the filter references agg_calls, we can not push it. An impure predicate must also
+        // remain above the aggregation because pushing it down changes its evaluation cardinality
+        // from once per group to once per input row.
         let mut agg_call_columns = FixedBitSet::with_capacity(num_group_key + num_agg_calls);
         agg_call_columns.insert_range(num_group_key..num_group_key + num_agg_calls);
-        let (agg_call_pred, pushed_predicate) = predicate.split_disjoint(&agg_call_columns);
+        let [agg_call_pred, pushed_predicate] = predicate.group_by::<_, 2>(|expr| {
+            (expr.is_pure()
+                && expr
+                    .collect_input_refs(self.schema().len())
+                    .is_disjoint(&agg_call_columns)) as usize
+        });
 
         // convert the predicate to one that references the child of the agg
         let mut subst = Substitute {

@@ -83,7 +83,275 @@ select count(*) from rw_iceberg_snapshots where schema_name = 'public' and sourc
 ----
 2
 
-# COW compaction for partitioned tables must publish all partitions atomically.
+# COW defaults to Auto when compaction is licensed. With no delete files, Auto must still
+# select small data files, compact them, and publish the result to main.
+statement ok
+create table t_cow_auto_small_files(id int primary key, v int)
+with(
+    commit_checkpoint_interval = 1,
+    write_mode = 'copy-on-write',
+    enable_compaction = 'true',
+    compaction.trigger_snapshot_count = '3',
+    enable_snapshot_expiration = 'false'
+) engine = iceberg;
+
+statement ok
+alter sink __iceberg_sink_t_cow_auto_small_files set parallelism = 1;
+
+statement ok
+insert into t_cow_auto_small_files select id, id from generate_series(1, 10) as t(id);
+
+statement ok
+flush;
+
+query TI retry 20 backoff 1s
+select task_type, trigger_snapshot_count
+from rw_iceberg_compaction_schedules
+where sink_name = '__iceberg_sink_t_cow_auto_small_files';
+----
+auto 3
+
+statement ok
+insert into t_cow_auto_small_files select id, id from generate_series(11, 20) as t(id);
+
+statement ok
+flush;
+
+# Both input files are below the default 64 MiB threshold. No delete files exist, so only
+# Auto's small-file predicate can select them.
+query IT retry 20 backoff 1s
+select count(*), max(file_size_in_bytes) < 64 * 1024 * 1024
+from rw_iceberg_all_files
+where schema_name = 'public'
+and source_name = '__iceberg_source_t_cow_auto_small_files'
+and content = 0;
+----
+2 t
+
+query I
+select count(*) from rw_iceberg_all_files
+where schema_name = 'public'
+and source_name = '__iceberg_source_t_cow_auto_small_files'
+and content in (1, 2);
+----
+0
+
+statement ok
+insert into t_cow_auto_small_files select id, id from generate_series(21, 30) as t(id);
+
+statement ok
+flush;
+
+# Do not use VACUUM FULL: the third committed snapshot triggers the default Auto task.
+query I retry 30 backoff 1s
+select count(*) from rw_iceberg_files
+where schema_name = 'public'
+and source_name = '__iceberg_source_t_cow_auto_small_files'
+and content = 'Data';
+----
+1
+
+query II retry 30 backoff 1s
+select count(*), sum(id) from t_cow_auto_small_files;
+----
+30 465
+
+query I
+select count(*) from rw_iceberg_files
+where schema_name = 'public'
+and source_name = '__iceberg_source_t_cow_auto_small_files'
+and content in ('PositionDeletes', 'EqualityDeletes');
+----
+0
+
+statement ok
+DROP TABLE t_cow_auto_small_files;
+
+# COW compaction must keep data files that cannot match an equality delete.
+statement ok
+create table t_cow_incremental(id int primary key, v int)
+with(
+    commit_checkpoint_interval = 1,
+    write_mode = 'copy-on-write',
+    enable_snapshot_expiration = 'false'
+) engine = iceberg;
+
+statement ok
+alter sink __iceberg_sink_t_cow_incremental set parallelism = 1;
+
+statement ok
+insert into t_cow_incremental select id, id from generate_series(1, 10) as t(id);
+
+statement ok
+flush;
+
+sleep 5s
+
+statement ok
+insert into t_cow_incremental select id, id from generate_series(100, 110) as t(id);
+
+statement ok
+flush;
+
+sleep 5s
+
+# The initial publish has no delete-affected files and must preserve both writer files.
+statement ok
+VACUUM FULL t_cow_incremental;
+
+query I retry 10 backoff 1s
+select count(*) from rw_iceberg_files
+where schema_name = 'public'
+and source_name = '__iceberg_source_t_cow_incremental'
+and content = 'Data';
+----
+2
+
+let unaffected_file_path
+select file_path from rw_iceberg_files
+where schema_name = 'public'
+and source_name = '__iceberg_source_t_cow_incremental'
+and content = 'Data'
+and record_count = 11
+
+statement ok
+update t_cow_incremental set v = v + 1000 where id in (3, 4);
+
+statement ok
+flush;
+
+sleep 5s
+
+# Ensure this scenario exercises equality-delete pruning rather than position-delete targeting.
+query T retry 10 backoff 1s
+select count(*) > 0 from rw_iceberg_all_files
+where schema_name = 'public'
+and source_name = '__iceberg_source_t_cow_incremental'
+and content = 2
+and equality_ids is not null;
+----
+t
+
+statement ok
+VACUUM FULL t_cow_incremental;
+
+query II retry 10 backoff 1s
+select id, v from t_cow_incremental where id in (3, 4, 100) order by id;
+----
+3 1003
+4 1004
+100 100
+
+# The unaffected 11-row file keeps the same path instead of being rewritten.
+query I retry 10 backoff 1s
+select count(*) from rw_iceberg_files
+where schema_name = 'public'
+and source_name = '__iceberg_source_t_cow_incremental'
+and content = 'Data'
+and file_path = '${unaffected_file_path}';
+----
+1
+
+query I retry 10 backoff 1s
+select count(*) from rw_iceberg_files
+where schema_name = 'public'
+and source_name = '__iceberg_source_t_cow_incremental'
+and content = 'Data';
+----
+3
+
+query I retry 10 backoff 1s
+select count(*) from rw_iceberg_files
+where schema_name = 'public'
+and source_name = '__iceberg_source_t_cow_incremental'
+and content in ('PositionDeletes', 'EqualityDeletes');
+----
+0
+
+# Create a newer data file and then delete from it. The older clean file still has a low sequence,
+# but only the newer file is delete-affected in this round.
+statement ok
+insert into t_cow_incremental values (1000, 1000);
+
+statement ok
+flush;
+
+sleep 5s
+
+statement ok
+update t_cow_incremental set v = 2000 where id = 1000;
+
+statement ok
+flush;
+
+sleep 5s
+
+# The latest ingestion snapshot contains the previous and current equality delete files.
+query T retry 10 backoff 1s
+select summary->>'total-delete-files' = '2' from rw_iceberg_snapshots
+where schema_name = 'public'
+and source_name = '__iceberg_source_t_cow_incremental'
+order by sequence_number desc
+limit 1;
+----
+t
+
+let pre_cleanup_seq
+select max(sequence_number) from rw_iceberg_snapshots
+where schema_name = 'public'
+and source_name = '__iceberg_source_t_cow_incremental'
+
+statement ok
+VACUUM FULL t_cow_incremental;
+
+query II retry 10 backoff 1s
+select id, v from t_cow_incremental where id in (3, 1000) order by id;
+----
+3 1003
+1000 2000
+
+# The first snapshot after the writer commits is the ingestion-branch compaction commit.
+let cleanup_snapshot_id
+select snapshot_id from rw_iceberg_snapshots
+where schema_name = 'public'
+and source_name = '__iceberg_source_t_cow_incremental'
+and sequence_number > ${pre_cleanup_seq}
+order by sequence_number
+limit 1
+
+# The compaction commit uses the minimum sequence among delete-affected data files, so the older
+# equality delete is retired even though the untouched clean file has a lower sequence. Inspect the
+# manifest directly because the snapshot summary does not account for sequence-filtered deletes.
+query TI
+select content, deleted_files_count
+from "t_cow_incremental\$manifests"
+for system_version as of ${cleanup_snapshot_id}
+where deleted_files_count > 0
+order by content;
+----
+data 1
+deletes 1
+
+# The newest equality delete follows the existing strict sequence rule and remains live on the
+# ingestion branch.
+query I
+select count(*)
+from "t_cow_incremental\$files"
+for system_version as of ${cleanup_snapshot_id}
+where content = 'EqualityDeletes';
+----
+1
+
+query I retry 10 backoff 1s
+select count(*) from rw_iceberg_files
+where schema_name = 'public'
+and source_name = '__iceberg_source_t_cow_incremental'
+and content in ('PositionDeletes', 'EqualityDeletes');
+----
+0
+
+# Partitioned COW compaction must rewrite every delete-affected file while carrying clean files
+# to main unchanged. One checkpoint creates distinct equality-delete files for two partitions.
 statement ok
 create table t_cow_partitioned(p int, id int, v int, primary key(p, id))
 with(
@@ -94,10 +362,15 @@ with(
 ) engine = iceberg;
 
 statement ok
-insert into t_cow_partitioned values
-    (1, 1, 10), (1, 2, 20),
-    (2, 3, 30), (2, 4, 40),
-    (3, 5, 50), (3, 6, 60);
+alter sink __iceberg_sink_t_cow_partitioned set parallelism = 1;
+
+statement ok
+insert into t_cow_partitioned
+select 1, id, id from generate_series(1, 10) as t(id)
+union all
+select 2, id, id from generate_series(101, 111) as t(id)
+union all
+select 3, id, id from generate_series(201, 212) as t(id);
 
 statement ok
 flush;
@@ -107,18 +380,100 @@ sleep 5s
 statement ok
 VACUUM FULL t_cow_partitioned;
 
-query ??? rowsort retry 6 backoff 1s
-select p, id, v from t_cow_partitioned order by p, id;
+query I retry 10 backoff 1s
+select count(*) from rw_iceberg_files
+where schema_name = 'public'
+and source_name = '__iceberg_source_t_cow_partitioned'
+and content = 'Data';
 ----
-1 1 10
-1 2 20
-2 3 30
-2 4 40
-3 5 50
-3 6 60
+3
+
+let affected_partition_1_file_path
+select file_path from rw_iceberg_files
+where schema_name = 'public'
+and source_name = '__iceberg_source_t_cow_partitioned'
+and content = 'Data'
+and record_count = 10
+
+let affected_partition_2_file_path
+select file_path from rw_iceberg_files
+where schema_name = 'public'
+and source_name = '__iceberg_source_t_cow_partitioned'
+and content = 'Data'
+and record_count = 11
+
+let unaffected_partition_file_path
+select file_path from rw_iceberg_files
+where schema_name = 'public'
+and source_name = '__iceberg_source_t_cow_partitioned'
+and content = 'Data'
+and record_count = 12
+
+statement ok
+delete from t_cow_partitioned
+where (p = 1 and id in (3, 4)) or (p = 2 and id in (103, 104));
+
+statement ok
+flush;
+
+sleep 5s
+
+query T retry 10 backoff 1s
+select count(distinct file_path) >= 2 from rw_iceberg_all_files
+where schema_name = 'public'
+and source_name = '__iceberg_source_t_cow_partitioned'
+and content = 2
+and equality_ids is not null;
+----
+t
+
+statement ok
+VACUUM FULL t_cow_partitioned;
+
+query I retry 10 backoff 1s
+select count(*) from t_cow_partitioned;
+----
+29
+
+query I
+select count(*) from t_cow_partitioned
+where (p = 1 and id in (3, 4)) or (p = 2 and id in (103, 104));
+----
+0
+
+# Both affected files were replaced.
+query I retry 10 backoff 1s
+select count(*) from rw_iceberg_files
+where schema_name = 'public'
+and source_name = '__iceberg_source_t_cow_partitioned'
+and content = 'Data'
+and file_path in ('${affected_partition_1_file_path}', '${affected_partition_2_file_path}');
+----
+0
+
+# The clean partition keeps its original data file.
+query I retry 10 backoff 1s
+select count(*) from rw_iceberg_files
+where schema_name = 'public'
+and source_name = '__iceberg_source_t_cow_partitioned'
+and content = 'Data'
+and file_path = '${unaffected_partition_file_path}';
+----
+1
+
+query I retry 10 backoff 1s
+select count(*) from rw_iceberg_files
+where schema_name = 'public'
+and source_name = '__iceberg_source_t_cow_partitioned'
+and content in ('PositionDeletes', 'EqualityDeletes');
+----
+0
 
 statement ok
 DROP TABLE t_cow_partitioned;
+
+statement ok
+DROP TABLE t_cow_incremental;
 
 statement ok
 DROP TABLE t_cow;

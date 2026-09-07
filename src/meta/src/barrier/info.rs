@@ -794,16 +794,12 @@ impl InflightDatabaseInfo {
         self.jobs[&job_id].subscribers.keys().copied()
     }
 
-    pub fn max_subscription_retention(&self) -> impl Iterator<Item = (TableId, u64)> + '_ {
+    pub fn subscribed_tables(&self) -> impl Iterator<Item = TableId> + '_ {
         self.jobs.iter().filter_map(|(job_id, info)| {
             info.subscribers
                 .values()
-                .filter_map(|subscriber| match subscriber {
-                    SubscriberType::Subscription(retention) => Some(*retention),
-                    SubscriberType::SnapshotBackfill => None,
-                })
-                .max()
-                .map(|max_subscription| (job_id.as_mv_table_id(), max_subscription))
+                .any(|subscriber| matches!(subscriber, SubscriberType::Subscription(_)))
+                .then_some(job_id.as_mv_table_id())
         })
     }
 

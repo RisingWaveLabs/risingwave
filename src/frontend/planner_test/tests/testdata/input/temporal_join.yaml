@@ -183,3 +183,11 @@
     select id1, a1, id2, v1 from stream left join version FOR SYSTEM_TIME AS OF PROCTIME() on id1 = id2;
   expected_outputs:
     - stream_plan
+- name: temporal join on an MV with a duplicated order key
+  sql: |
+    create table stream (a int, b int) APPEND ONLY;
+    create table version (a int, b int);
+    create materialized view v_mv as select a, b from version order by a, a limit 1;
+    select stream.a, stream.b from stream join v_mv FOR SYSTEM_TIME AS OF PROCTIME() on stream.a = v_mv.a;
+  expected_outputs:
+    - stream_plan

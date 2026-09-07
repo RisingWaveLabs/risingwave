@@ -5,21 +5,40 @@ on:
     types: [opened]
 
 permissions:
+  contents: write
   issues: write
+  pull-requests: write
 
 jobs:
   label-community-contributor:
-    # External collaborators are included; only organization members and owners are excluded.
+    # The public event payload can hide private organization membership, so the step below also
+    # checks whether the author is a repository collaborator with the authenticated workflow token.
     if: >-
       github.event.pull_request.user.type == 'User' &&
-      github.event.pull_request.author_association != 'MEMBER' &&
-      github.event.pull_request.author_association != 'OWNER'
+      contains(
+        fromJSON('["NONE", "CONTRIBUTOR", "FIRST_TIMER", "FIRST_TIME_CONTRIBUTOR"]'),
+        github.event.pull_request.author_association
+      )
     runs-on: ubuntu-latest
     steps:
       - name: Add community label
         uses: actions/github-script@v9
         with:
           script: |
+            const author = context.payload.pull_request.user.login;
+            try {
+              await github.rest.repos.checkCollaborator({
+                ...context.repo,
+                username: author,
+              });
+              core.info(`Skipping ${author}, who is a repository collaborator.`);
+              return;
+            } catch (error) {
+              if (error.status !== 404) {
+                throw error;
+              }
+            }
+
             const label = {
               name: "community",
               color: "0e8a16",

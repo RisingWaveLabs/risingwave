@@ -737,7 +737,11 @@ impl SinkMetaClient {
                 {
                     Ok(_) => {}
                     Err(e) => {
-                        tracing::warn!(error = %e.as_report(), %sink_id, "Failed to add sink fail event to event log.");
+                        tracing::warn!(
+                            error = %e.as_report(),
+                            %sink_id,
+                            "failed to add the sink failure event to the event log",
+                        );
                     }
                 }
             }
@@ -829,6 +833,17 @@ pub trait Sink: TryFrom<SinkParam, Error = SinkError> {
 
     fn support_schema_change() -> bool {
         false
+    }
+
+    /// Validates an `ALTER SINK` transition and the resulting configuration.
+    ///
+    /// `config` contains the merged sink properties, while `alter_props` contains only the
+    /// properties specified by the current statement.
+    fn validate_alter_config_change(
+        config: &BTreeMap<String, String>,
+        _alter_props: &BTreeMap<String, String>,
+    ) -> Result<()> {
+        Self::validate_alter_config(config)
     }
 
     fn validate_alter_config(_config: &BTreeMap<String, String>) -> Result<()> {

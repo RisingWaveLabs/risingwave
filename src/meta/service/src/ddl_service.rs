@@ -1417,6 +1417,15 @@ impl DdlService for DdlServiceImpl {
                 let original_column_names: HashSet<String> =
                     HashSet::from_iter(original_column_types.keys().cloned());
 
+                let cdc_table_type =
+                    PbCdcTableType::try_from(table.cdc_table_type.unwrap_or_default())
+                        .unwrap_or(PbCdcTableType::Unspecified);
+                let table_change = normalize_cdc_auto_schema_change_column_names(
+                    table_change.clone(),
+                    cdc_table_type,
+                    &original_columns_by_name,
+                );
+
                 let collect_new_columns = |table_change: &TableSchemaChange| {
                     let mut new_columns: HashSet<(String, DataType)> =
                         HashSet::from_iter(table_change.columns.iter().filter_map(|col| {
@@ -1452,17 +1461,15 @@ impl DdlService for DdlServiceImpl {
                 let table_change =
                     if original_column_names != new_column_names && is_add_or_drop_by_name {
                         normalize_cdc_auto_schema_change_existing_column_types(
-                            table_change.clone(),
-                            PbCdcTableType::try_from(table.cdc_table_type.unwrap_or_default())
-                                .unwrap_or(PbCdcTableType::Unspecified),
+                            table_change,
+                            cdc_table_type,
                             &original_columns_by_name,
                         )
                     } else {
-                        // Keep the raw schema change for non-add/drop-only cases, such as a
-                        // mixed add-and-drop change. Existing validation below should see the
-                        // original change and reject unsupported schema changes without masking
-                        // them through type normalization.
-                        table_change.clone()
+                        // Keep the schema change without type normalization for non-add/drop-only
+                        // cases, such as a mixed add-and-drop change. Existing validation below
+                        // should reject unsupported schema changes without masking them.
+                        table_change
                     };
 
                 let original_columns: HashSet<(String, DataType)> = HashSet::from_iter(
@@ -2033,6 +2040,50 @@ fn cdc_auto_schema_change_comparable_column(column: &ColumnCatalog) -> Option<(S
     }
 }
 
+fn normalize_cdc_auto_schema_change_column_names(
+    mut table_change: TableSchemaChange,
+    cdc_table_type: PbCdcTableType,
+    original_columns_by_name: &HashMap<String, ColumnCatalog>,
+) -> TableSchemaChange {
+    if cdc_table_type != PbCdcTableType::Mysql {
+        return table_change;
+    }
+
+    // MySQL column names are case-insensitive, while RisingWave catalog names may preserve
+    // explicitly quoted spelling. Reuse that spelling for existing columns and apply the same
+    // lowercase convention as MySQL snapshot discovery only to genuinely new columns.
+    let mut original_names_by_lowercase = HashMap::<String, Option<String>>::new();
+    for original_name in original_columns_by_name.keys() {
+        original_names_by_lowercase
+            .entry(original_name.to_lowercase())
+            .and_modify(|name| *name = None)
+            .or_insert_with(|| Some(original_name.clone()));
+    }
+
+    for column in &mut table_change.columns {
+        let mut column_catalog = ColumnCatalog::from(column.clone());
+        if column_catalog.is_generated() || column_catalog.is_hidden() {
+            continue;
+        }
+
+        let incoming_name = &column_catalog.column_desc.name;
+        let lowercase_name = incoming_name.to_lowercase();
+        let normalized_name = if original_columns_by_name.contains_key(incoming_name) {
+            incoming_name.clone()
+        } else {
+            original_names_by_lowercase
+                .get(&lowercase_name)
+                .and_then(|name| name.clone())
+                .unwrap_or(lowercase_name)
+        };
+
+        column_catalog.column_desc.name = normalized_name;
+        *column = column_catalog.to_protobuf();
+    }
+
+    table_change
+}
+
 fn normalize_cdc_auto_schema_change_existing_column_types(
     mut table_change: TableSchemaChange,
     cdc_table_type: PbCdcTableType,
@@ -2144,6 +2195,89 @@ mod tests {
         assert_eq!(columns["id"], DataType::Int64);
         assert_eq!(columns["v"], DataType::Varchar);
         assert_eq!(columns["note"], DataType::Varchar);
+    }
+
+    #[test]
+    fn test_mysql_cdc_auto_schema_change_normalizes_column_names() {
+        let original_columns_by_name = HashMap::from([
+            (
+                "Id".to_owned(),
+                ColumnCatalog::visible(ColumnDesc::named(
+                    "Id",
+                    ColumnId::placeholder(),
+                    DataType::Int64,
+                )),
+            ),
+            (
+                "Details".to_owned(),
+                ColumnCatalog::visible(ColumnDesc::named(
+                    "Details",
+                    ColumnId::placeholder(),
+                    DataType::Varchar,
+                )),
+            ),
+        ]);
+        let table_change = pb_table_change(vec![
+            pb_column("ID", DataType::Int32),
+            pb_column("details", DataType::Varchar),
+            pb_column("NewCol", DataType::Varchar),
+        ]);
+
+        let normalized = normalize_cdc_auto_schema_change_column_names(
+            table_change,
+            PbCdcTableType::Mysql,
+            &original_columns_by_name,
+        );
+        let normalized = normalize_cdc_auto_schema_change_existing_column_types(
+            normalized,
+            PbCdcTableType::Mysql,
+            &original_columns_by_name,
+        );
+        let columns = normalized
+            .columns
+            .into_iter()
+            .map(ColumnCatalog::from)
+            .map(|column| (column.column_desc.name, column.column_desc.data_type))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            columns,
+            vec![
+                ("Id".to_owned(), DataType::Int64),
+                ("Details".to_owned(), DataType::Varchar),
+                ("newcol".to_owned(), DataType::Varchar),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_non_mysql_cdc_auto_schema_change_preserves_column_names() {
+        let original_columns_by_name = HashMap::from([(
+            "Id".to_owned(),
+            ColumnCatalog::visible(ColumnDesc::named(
+                "Id",
+                ColumnId::placeholder(),
+                DataType::Int64,
+            )),
+        )]);
+        let table_change = pb_table_change(vec![
+            pb_column("ID", DataType::Int64),
+            pb_column("NewCol", DataType::Varchar),
+        ]);
+
+        let normalized = normalize_cdc_auto_schema_change_column_names(
+            table_change,
+            PbCdcTableType::Postgres,
+            &original_columns_by_name,
+        );
+        let column_names = normalized
+            .columns
+            .into_iter()
+            .map(ColumnCatalog::from)
+            .map(|column| column.column_desc.name)
+            .collect::<Vec<_>>();
+
+        assert_eq!(column_names, vec!["ID".to_owned(), "NewCol".to_owned()]);
     }
 
     #[test]

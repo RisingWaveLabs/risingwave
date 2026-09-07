@@ -21,7 +21,7 @@ use futures::{FutureExt, Stream, StreamExt};
 use futures_async_stream::try_stream;
 use google_cloud_pubsub::subscriber::SubscriberConfig;
 use google_cloud_pubsub::subscription::{MessageStream, SubscribeConfig, Subscription};
-use risingwave_common::{bail, ensure};
+use risingwave_common::ensure;
 
 use super::TaggedReceivedMessage;
 use crate::error::{ConnectorError, ConnectorResult as Result};
@@ -32,7 +32,6 @@ use crate::source::{
     SplitReader, into_chunk_stream,
 };
 
-const DEFAULT_ACK_DEADLINE_SECONDS: i32 = 60;
 const MAX_BATCH_SIZE: usize = 1024;
 
 /// Wrapper around [`MessageStream`] that calls [`MessageStream::dispose()`] on drop
@@ -72,7 +71,7 @@ impl Stream for DisposableMessageStream {
 
 pub struct PubsubSplitReader {
     subscription: Subscription,
-    ack_deadline_seconds: i32,
+    subscriber_config: SubscriberConfig,
 
     split_id: SplitId,
     parser_config: ParserConfig,
@@ -81,11 +80,7 @@ pub struct PubsubSplitReader {
 
 impl PubsubSplitReader {
     fn build_subscribe_config(&self) -> SubscribeConfig {
-        let subscriber_config = SubscriberConfig {
-            stream_ack_deadline_seconds: self.ack_deadline_seconds,
-            ..Default::default()
-        };
-        SubscribeConfig::default().with_subscriber_config(subscriber_config)
+        SubscribeConfig::default().with_subscriber_config(self.subscriber_config.clone())
     }
 
     #[try_stream(ok = Vec<SourceMessage>, error = ConnectorError)]
@@ -146,19 +141,12 @@ impl SplitReader for PubsubSplitReader {
         );
         let split = splits.into_iter().next().unwrap();
 
-        let ack_deadline_seconds = properties
-            .ack_deadline_seconds
-            .unwrap_or(DEFAULT_ACK_DEADLINE_SECONDS);
-
-        if !(10..=600).contains(&ack_deadline_seconds) {
-            bail!("pubsub.ack_deadline_seconds must be between 10 and 600");
-        }
-
+        let subscriber_config = properties.subscriber_config()?;
         let subscription = properties.subscription_client().await?;
 
         Ok(Self {
             subscription,
-            ack_deadline_seconds,
+            subscriber_config,
             split_id: split.id(),
             parser_config,
             source_ctx,

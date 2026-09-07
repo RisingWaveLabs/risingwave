@@ -318,8 +318,9 @@ async fn collect_input_dvs(
     let file_io = table.file_io();
     let mut map: HashMap<String, DeleteVector> = HashMap::new();
 
-    let manifest_list = snapshot
-        .load_manifest_list(file_io, table.metadata())
+    let manifest_list = table
+        .object_cache()
+        .get_manifest_list(snapshot, &table.metadata_ref())
         .await?;
 
     for manifest_file in manifest_list.entries() {
@@ -491,7 +492,7 @@ async fn write_conflict_delete_files(
         return Ok(None);
     }
 
-    let location_generator = DefaultLocationGenerator::new(table.metadata().clone())?;
+    let location_generator = DefaultLocationGenerator::new(table.metadata())?;
     // A fresh uuid per resolve keeps file names unique across the vnode-aligned resolver actors.
     let uuid_suffix = Uuid::now_v7();
     let puffin_file_name_generator = DefaultFileNameGenerator::new(

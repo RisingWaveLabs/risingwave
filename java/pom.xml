@@ -68,8 +68,11 @@
         <log4j.version>2.25.4</log4j.version>
         <slf4j.version>2.0.17</slf4j.version>
         <debezium.version>3.2.4.Final</debezium.version>
+        <bouncycastle.version>1.84</bouncycastle.version>
         <jackson.version>2.22.1</jackson.version>
         <hadoop.version>3.4.1</hadoop.version>
+        <!-- Iceberg's HiveCatalog is compiled against Hive 2.3.x. -->
+        <hive.version>2.3.10</hive.version>
         <testcontainers.version>1.21.3</testcontainers.version>
         <aws.version>2.32.19</aws.version>
         <jetty.version>12.0.35</jetty.version>
@@ -349,11 +352,10 @@
                 <artifactId>kms</artifactId>
                 <version>${aws.version}</version>
             </dependency>
-            <!-- bumped from 4.1.0 to pick up upstream bug fixes -->
             <dependency>
                 <groupId>org.apache.hive</groupId>
                 <artifactId>hive-metastore</artifactId>
-                <version>4.2.0</version>
+                <version>${hive.version}</version>
             </dependency>
             <!-- Enforce jetty version to avoid security vulnerabilities -->
             <dependency>

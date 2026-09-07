@@ -123,6 +123,22 @@
         └─StreamLocalityProvider { locality_columns: [t.a] }
           └─StreamExchange { dist: HashShard(t.a) }
             └─StreamTableScan { table: t, columns: [t.a, t.b, t.c, t._row_id], stream_scan_type: SnapshotBackfill, stream_key: [t._row_id], pk: [_row_id], dist: UpstreamHashShard(t._row_id) }
+- name: dedup provides locality on its dedup columns, so no extra locality provider is needed for the downstream agg.
+  sql: |
+    set enable_locality_backfill = true;
+    set locality_backfill_mode = always;
+    create table t(a int, b int, c int) append only;
+    select count(*) from (select distinct on(a, b) * from t) group by a;
+  stream_plan: |-
+    StreamMaterialize { columns: [count, t.a(hidden)], stream_key: [t.a], pk_columns: [t.a], pk_conflict: NoCheck }
+    └─StreamProject { exprs: [count, t.a] }
+      └─StreamHashAgg [append_only] { group_key: [t.a], aggs: [count] }
+        └─StreamExchange { dist: HashShard(t.a) }
+          └─StreamAppendOnlyDedup { dedup_cols: [t.a, t.b] }
+            └─StreamExchange { dist: HashShard(t.a, t.b) }
+              └─StreamLocalityProvider { locality_columns: [t.a, t.b] }
+                └─StreamExchange { dist: HashShard(t.a, t.b) }
+                  └─StreamTableScan { table: t, columns: [t.a, t.b, t._row_id], stream_scan_type: SnapshotBackfill, stream_key: [t._row_id], pk: [_row_id], dist: UpstreamHashShard(t._row_id) }
 - sql: |
     set enable_locality_backfill = true;
     set locality_backfill_mode = always;

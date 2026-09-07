@@ -1007,7 +1007,8 @@ impl<C> GlobalBarrierWorker<C> {
 mod retry_strategy {
     use std::time::Duration;
 
-    use tokio_retry::strategy::{ExponentialBackoff, jitter};
+    use risingwave_common::util::retry::exponential_backoff;
+    use tokio_retry::strategy::jitter;
 
     // Retry base interval in milliseconds.
     const RECOVERY_RETRY_BASE_INTERVAL: u64 = 20;
@@ -1044,9 +1045,12 @@ mod retry_strategy {
     /// Initialize a retry strategy for operation in recovery.
     #[inline(always)]
     pub(crate) fn get_retry_strategy() -> impl Iterator<Item = Duration> + Send + 'static {
-        ExponentialBackoff::from_millis(RECOVERY_RETRY_BASE_INTERVAL)
-            .max_delay(RECOVERY_RETRY_MAX_INTERVAL)
-            .map(jitter)
+        exponential_backoff(
+            Duration::from_millis(RECOVERY_RETRY_BASE_INTERVAL),
+            RECOVERY_RETRY_BASE_INTERVAL,
+            RECOVERY_RETRY_MAX_INTERVAL,
+        )
+        .map(jitter)
     }
 
     #[define_opaque(RetryBackoffStrategy)]

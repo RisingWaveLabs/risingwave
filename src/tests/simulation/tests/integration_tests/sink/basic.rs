@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use itertools::Itertools;
-use tokio::time::sleep;
+use tokio::time::{sleep, timeout};
 
 use crate::sink::utils::*;
 use crate::{assert_eq_with_err_returned as assert_eq, assert_with_err_returned as assert};
@@ -100,6 +100,52 @@ async fn basic_test_inner(is_decouple: bool, test_type: TestSinkType) -> Result<
 
     assert_eq!(0, test_sink.parallelism_counter.load(Relaxed));
     test_sink.store.check_simple_result(&test_source.id_list)?;
+    assert!(test_sink.store.checkpoint_count() > 0);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_coordinated_sink_with_singleton_input() -> Result<()> {
+    let mut cluster = start_sink_test_cluster().await?;
+
+    let source_parallelism = 2;
+    let test_sink = SimulationTestSink::register_new(TestSinkType::SinglePhaseCoordinatedSink);
+    let test_source = SimulationTestSource::register_new(source_parallelism, 0..10, 1.0, 20);
+
+    let mut session = cluster.start_session();
+    session.run("set streaming_parallelism = 2").await?;
+    session.run("set sink_decouple = true").await?;
+    session.run(CREATE_SOURCE).await?;
+    session
+        .run(
+            "create sink test_sink as \
+             select id, name from test_source limit 10 \
+             with (connector = 'test', type = 'append-only', force_append_only = 'true')",
+        )
+        .await?;
+
+    timeout(
+        Duration::from_secs(30),
+        test_sink.wait_initial_parallelism(1),
+    )
+    .await??;
+    timeout(Duration::from_secs(30), test_sink.store.wait_for_count(10)).await??;
+
+    let result = session.run("select * from rw_sink_decouple").await?;
+    let [_, is_sink_decouple, vnode_count] =
+        TryInto::<[&str; 3]>::try_into(result.split_whitespace().collect_vec()).unwrap();
+    assert_eq!(is_sink_decouple, "t");
+    assert_eq!(vnode_count, "1");
+
+    session.run(DROP_SINK).await?;
+    session.run(DROP_SOURCE).await?;
+
+    assert_eq!(
+        source_parallelism,
+        test_source.create_stream_count.load(Relaxed)
+    );
+    assert_eq!(0, test_sink.parallelism_counter.load(Relaxed));
     assert!(test_sink.store.checkpoint_count() > 0);
 
     Ok(())

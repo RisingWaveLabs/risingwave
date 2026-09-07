@@ -1,0 +1,58 @@
+statement ok
+SET RW_IMPLICIT_FLUSH TO true;
+
+statement ok
+create table wide_t (id int primary key, col_a int, col_b int) on conflict do update if not null;
+
+statement ok
+create table l (id int primary key, col_a int);
+
+statement ok
+create table r (rid int primary key, id int);
+
+statement ok
+create sink sink_a into wide_t (id, col_a) as
+select l.id, l.col_a from l join r on l.id = r.id;
+
+statement ok
+insert into l values (1, 10);
+
+statement ok
+insert into r values (1, 1), (2, 99);
+
+statement ok
+insert into wide_t (id, col_b) values (1, 100);
+
+query III
+select id, col_a, col_b from wide_t order by id;
+----
+1 10 100
+
+# The join row of `id = 1` moves to another stream key within one barrier. It must be applied
+# as an update to `wide_t`, keeping `col_b`.
+statement ok
+update r set id = case rid when 1 then 99 else 1 end;
+
+query III
+select id, col_a, col_b from wide_t order by id;
+----
+1 10 100
+
+statement ok
+delete from l where id = 1;
+
+query III
+select id, col_a, col_b from wide_t order by id;
+----
+
+statement ok
+drop sink sink_a;
+
+statement ok
+drop table wide_t;
+
+statement ok
+drop table l;
+
+statement ok
+drop table r;

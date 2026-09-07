@@ -17,6 +17,7 @@ use std::time::Duration;
 
 use risingwave_common::monitor::EndpointExt;
 use risingwave_common::util::addr::HostAddr;
+use risingwave_common::util::retry::exponential_backoff;
 use risingwave_pb::configured_monitor_service_client;
 use risingwave_pb::hummock::hummock_manager_service_client::HummockManagerServiceClient;
 use risingwave_pb::hummock::{
@@ -28,7 +29,7 @@ use risingwave_pb::meta::{GetSystemParamsRequest, GetSystemParamsResponse};
 use risingwave_pb::monitor_service::monitor_service_client::MonitorServiceClient;
 use risingwave_pb::monitor_service::{StackTraceRequest, StackTraceResponse};
 use tokio::sync::RwLock;
-use tokio_retry::strategy::{ExponentialBackoff, jitter};
+use tokio_retry::strategy::jitter;
 use tonic::transport::{Channel, Endpoint};
 
 use crate::error::{Result, RpcError};
@@ -160,10 +161,13 @@ impl GrpcCompactorProxyClient {
 
     #[inline(always)]
     fn get_retry_strategy() -> impl Iterator<Item = Duration> {
-        ExponentialBackoff::from_millis(DEFAULT_RETRY_INTERVAL)
-            .max_delay(DEFAULT_RETRY_MAX_DELAY)
-            .take(DEFAULT_RETRY_MAX_ATTEMPTS)
-            .map(jitter)
+        exponential_backoff(
+            Duration::from_millis(DEFAULT_RETRY_INTERVAL),
+            DEFAULT_RETRY_INTERVAL,
+            DEFAULT_RETRY_MAX_DELAY,
+        )
+        .take(DEFAULT_RETRY_MAX_ATTEMPTS)
+        .map(jitter)
     }
 
     #[inline(always)]

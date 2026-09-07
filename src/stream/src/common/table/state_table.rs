@@ -323,14 +323,14 @@ fn consistent_old_value_op(
             let first = match row_serde.deserialize(first) {
                 Ok(rows) => rows,
                 Err(e) => {
-                    error!(error = %e.as_report(), value = ?first, "fail to deserialize serialized value");
+                    error!(error = %e.as_report(), value = ?first, "failed to deserialize the serialized value");
                     return false;
                 }
             };
             let second = match row_serde.deserialize(second) {
                 Ok(rows) => rows,
                 Err(e) => {
-                    error!(error = %e.as_report(), value = ?second, "fail to deserialize serialized value");
+                    error!(error = %e.as_report(), value = ?second, "failed to deserialize the serialized value");
                     return false;
                 }
             };

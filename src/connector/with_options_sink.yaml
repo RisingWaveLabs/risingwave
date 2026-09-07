@@ -455,7 +455,11 @@ HttpConfig:
   fields:
   - name: url
     field_type: String
-    comments: The endpoint URL to POST data to.
+    comments: The endpoint URL to send data to.
+    required: false
+  - name: method
+    field_type: String
+    comments: HTTP request method. Supported values are `POST` and `PUT`. Defaults to `POST`.
     required: false
   - name: content_type
     field_type: String
@@ -825,7 +829,7 @@ IcebergConfig:
     field_type: CompactionType
     comments: |-
       Compaction type: `auto`, `full`, `small-files`, or `files-with-delete`
-      If not set, will default to `full`
+      If not set, defaults to `auto` when Iceberg compaction is licensed, otherwise `full`
     required: false
     default: Default::default
     allow_alter_on_fly: true
@@ -1463,6 +1467,60 @@ OpenSearchConfig:
     field_type: String
     required: false
     default: '"upsert" . to_owned ()'
+PostgresConfig:
+  fields:
+  - name: host
+    field_type: String
+    required: true
+  - name: port
+    field_type: u16
+    required: true
+  - name: user
+    field_type: String
+    required: true
+  - name: password
+    field_type: String
+    required: true
+  - name: database
+    field_type: String
+    required: true
+  - name: table
+    field_type: String
+    required: true
+  - name: schema
+    field_type: String
+    required: false
+    default: '"public" . to_owned ()'
+  - name: ssl_mode
+    field_type: SslMode
+    required: false
+    default: Default::default
+  - name: ssl.root.cert
+    field_type: String
+    required: false
+  - name: max_batch_rows
+    field_type: usize
+    required: false
+    default: '1024'
+  - name: r#type
+    field_type: String
+    required: true
+  - name: tcp.keepalive.enable
+    field_type: bool
+    required: false
+    default: Default::default
+  - name: tcp.keepalive.idle
+    field_type: u32
+    required: false
+    default: 10 * 60
+  - name: tcp.keepalive.interval
+    field_type: u32
+    required: false
+    default: '10'
+  - name: tcp.keepalive.count
+    field_type: u32
+    required: false
+    default: '3'
 PulsarConfig:
   fields:
   - name: properties.retry.max

@@ -19,7 +19,6 @@ package com.risingwave.connector.source.core;
 import com.risingwave.connector.api.source.SourceHandler;
 import com.risingwave.connector.api.source.SourceTypeE;
 import com.risingwave.connector.source.common.DbzConnectorConfig;
-import java.util.HashMap;
 import java.util.Map;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -34,17 +33,9 @@ public abstract class SourceHandlerFactory {
             Map<String, String> userProps,
             boolean snapshotDone,
             boolean isCdcSourceJob) {
-        // userProps extracted from grpc request, underlying implementation is UnmodifiableMap
-        Map<String, String> mutableUserProps = new HashMap<>(userProps);
-        mutableUserProps.put("source.id", Long.toString(sourceId));
         var config =
                 new DbzConnectorConfig(
-                        source,
-                        sourceId,
-                        startOffset,
-                        mutableUserProps,
-                        snapshotDone,
-                        isCdcSourceJob);
+                        source, sourceId, startOffset, userProps, snapshotDone, isCdcSourceJob);
         return new DbzSourceHandler(config);
     }
 }

@@ -24,7 +24,8 @@ mod tests {
     use risingwave_pb::common::{HostAddress, WorkerNode, WorkerType, worker_node};
     use risingwave_pb::meta::SubscribeType;
     use risingwave_pb::meta::table_fragments::fragment::PbFragmentDistributionType;
-    use risingwave_pb::stream_plan::PbStreamNode;
+    use risingwave_pb::stream_plan::stream_node::PbNodeBody;
+    use risingwave_pb::stream_plan::{PbStreamNode, StreamScanNode, StreamScanType};
     use tokio::sync::{mpsc, oneshot};
 
     use crate::barrier::Command;
@@ -322,6 +323,368 @@ mod tests {
         let db = &mgr.inner.read().await.db;
         assert!(Object::find_by_id(table_job_id).one(db).await?.is_none());
         assert!(Object::find_by_id(sink_job_id).one(db).await?.is_none());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_create_multiple_sinks_into_same_table_and_drop_table() -> MetaResult<()> {
+        let mgr = CatalogController::new(MetaSrvEnv::for_test().await).await?;
+        let inner = mgr.inner.write().await;
+        let txn = inner.db.begin().await?;
+        let (_, Some(target_table_id), _) =
+            insert_test_streaming_job(&txn, "mvt", true, None).await?
+        else {
+            unreachable!()
+        };
+        let (mv1_id, Some(_), _) = insert_test_streaming_job(&txn, "mv1", true, None).await? else {
+            unreachable!()
+        };
+        let (mv2_id, Some(_), _) = insert_test_streaming_job(&txn, "mv2", true, None).await? else {
+            unreachable!()
+        };
+        txn.commit().await?;
+        drop(inner);
+
+        let mut sink_ids = Vec::new();
+        let test_sink_tuples = [("s1", mv1_id), ("s2", mv2_id)];
+
+        fn assert_incoming_sink_drop_error<T>(error: &MetaError, test_sink_tuples: &[(&str, T)]) {
+            let message = error.to_string();
+
+            assert!(
+                message.contains("sink") && message.contains("depends on it"),
+                "expected an incoming-sink dependency error, got: {message}"
+            );
+
+            assert!(
+                test_sink_tuples
+                    .iter()
+                    .all(|(sink_name, _)| message.contains(*sink_name)),
+                "expected the error to mention all incoming sinks, got: {message}"
+            );
+        }
+
+        for (name, source) in test_sink_tuples {
+            let mut job = crate::manager::StreamingJob::Sink(
+                PbSink {
+                    name: name.to_owned(),
+                    database_id: TEST_DATABASE_ID,
+                    schema_id: TEST_SCHEMA_ID,
+                    owner: TEST_OWNER_ID as _,
+                    target_table: Some(target_table_id),
+                    sink_type: PbSinkType::AppendOnly as i32,
+                    ..Default::default()
+                },
+                None,
+            );
+            // Use create_job_catalog to trigger construct_sink_cycle_check_query for regression
+            // testing purpose to ensure no circular issue causing infinite recursion when
+            // cte_referencing
+            tokio::time::timeout(
+                std::time::Duration::from_secs(3),
+                mgr.create_job_catalog(
+                    &mut job,
+                    &crate::model::StreamContext::default(),
+                    &None,
+                    1,
+                    HashSet::from([source.as_object_id()]),
+                    risingwave_pb::ddl_service::streaming_job_resource_type::ResourceType::Regular(
+                        true,
+                    ),
+                    &None,
+                    None,
+                    None,
+                    None,
+                    None,
+                ),
+            )
+            .await
+            .expect("creating a second sink into the same table should not hang")?;
+            sink_ids.push(job.id().as_object_id());
+        }
+        let owned_sink_name = "owned_sink_without_iceberg_prefix";
+        let mut owned_sink = crate::manager::StreamingJob::Sink(
+            PbSink {
+                name: owned_sink_name.to_owned(),
+                database_id: TEST_DATABASE_ID,
+                schema_id: TEST_SCHEMA_ID,
+                owner: TEST_OWNER_ID as _,
+                target_table: Some(target_table_id),
+                sink_type: PbSinkType::AppendOnly as i32,
+                ..Default::default()
+            },
+            Some(target_table_id),
+        );
+        mgr.create_job_catalog(
+            &mut owned_sink,
+            &crate::model::StreamContext::default(),
+            &None,
+            1,
+            HashSet::from([mv1_id.as_object_id()]),
+            risingwave_pb::ddl_service::streaming_job_resource_type::ResourceType::Regular(true),
+            &None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await?;
+        let owned_sink_id = owned_sink.id().as_object_id();
+        sink_ids.push(owned_sink_id);
+
+        // Ensure the test sinks were created
+        assert_eq!(sink_ids.len(), test_sink_tuples.len() + 1);
+
+        let inner = mgr.inner.read().await;
+        for sink_id in &sink_ids {
+            streaming_job::ActiveModel {
+                job_id: Set(sink_id.as_job_id()),
+                job_status: Set(JobStatus::Created),
+                ..Default::default()
+            }
+            .update(&inner.db)
+            .await?;
+        }
+        // Ensure no object_dependency created for (target_table, sink) which could cause circular
+        // issue
+        let object_dependency_count = ObjectDependency::find()
+            .filter(object_dependency::Column::Oid.eq(target_table_id.as_object_id()))
+            .filter(object_dependency::Column::UsedBy.is_in(sink_ids.clone()))
+            .count(&inner.db)
+            .await?;
+        assert_eq!(object_dependency_count, 0);
+        assert_eq!(
+            Object::find_by_id(owned_sink_id)
+                .one(&inner.db)
+                .await?
+                .unwrap()
+                .belong_to_oid,
+            Some(target_table_id.as_object_id())
+        );
+        drop(inner);
+
+        let error = mgr
+            .drop_object(ObjectType::Table, target_table_id, DropMode::Restrict)
+            .await
+            .expect_err("RESTRICT drop should fail for a table with incoming sinks");
+        assert_incoming_sink_drop_error(&error, &test_sink_tuples);
+        assert!(
+            !error.to_string().contains(owned_sink_name),
+            "an owned incoming sink should not prevent a RESTRICT drop"
+        );
+        mgr.drop_object(ObjectType::Table, target_table_id, DropMode::Cascade)
+            .await
+            .expect("CASCADE drop should succeed");
+
+        let inner = mgr.inner.read().await;
+        let db = &inner.db;
+        // Check that the cascade drop successfully dropped
+        assert!(Object::find_by_id(target_table_id).one(db).await?.is_none());
+        assert_eq!(
+            Object::find()
+                .filter(object::Column::Oid.is_in(sink_ids))
+                .count(db)
+                .await?,
+            0
+        );
+        // Sanity checks that sources were not dropped
+        assert!(Object::find_by_id(mv1_id).one(db).await?.is_some());
+        assert!(Object::find_by_id(mv2_id).one(db).await?.is_some());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_replace_upstream_object_rejects_creating_incoming_sink() -> MetaResult<()> {
+        fn assert_replace_concurrency_error(error: &MetaError) {
+            let message = error.to_string();
+            // Ensures the replacement failed because a referring streaming job is still creating.
+            assert!(
+                message.contains("referenced by some creating jobs"),
+                "expected a replace concurrency error, got: {message}"
+            );
+        }
+
+        let mgr = CatalogController::new(MetaSrvEnv::for_test().await).await?;
+        let inner = mgr.inner.write().await;
+        let txn = inner.db.begin().await?;
+        let (target_mv_id, Some(target_mv_table_id), _) =
+            insert_test_streaming_job(&txn, "target_mv", true, None).await?
+        else {
+            unreachable!()
+        };
+        let (source_mv_id, Some(_), _) =
+            insert_test_streaming_job(&txn, "source_mv", true, None).await?
+        else {
+            unreachable!()
+        };
+        txn.commit().await?;
+        drop(inner);
+
+        let mut sink = crate::manager::StreamingJob::Sink(
+            PbSink {
+                name: "creating_sink".to_owned(),
+                database_id: TEST_DATABASE_ID,
+                schema_id: TEST_SCHEMA_ID,
+                owner: TEST_OWNER_ID as _,
+                target_table: Some(target_mv_table_id),
+                sink_type: PbSinkType::AppendOnly as i32,
+                ..Default::default()
+            },
+            None,
+        );
+        let creating_sink = mgr
+            .create_job_catalog(
+                &mut sink,
+                &crate::model::StreamContext::default(),
+                &None,
+                1,
+                HashSet::from([source_mv_id.as_object_id()]),
+                risingwave_pb::ddl_service::streaming_job_resource_type::ResourceType::Regular(
+                    true,
+                ),
+                &None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await?;
+        // Ensures the incoming sink is still creating, which should block replacement.
+        assert_ne!(creating_sink.job_status, JobStatus::Created);
+
+        let replacement = crate::manager::StreamingJob::MaterializedView(PbTable {
+            id: target_mv_table_id,
+            name: "target_mv".to_owned(),
+            database_id: TEST_DATABASE_ID,
+            schema_id: TEST_SCHEMA_ID,
+            owner: TEST_OWNER_ID as _,
+            ..Default::default()
+        });
+        // Ensures the replacement targets the upstream MV that the creating sink depends on.
+        assert_eq!(replacement.id(), target_mv_id);
+
+        // Ensures replacement rejects the upstream MV while its referring sink is creating.
+        let error = mgr
+            .create_job_catalog_for_replace(&replacement, None, None, None)
+            .await
+            .expect_err("replacement should reject a creating incoming sink");
+        // Ensures the rejection error reports the expected concurrency reason.
+        assert_replace_concurrency_error(&error);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_replace_upstream_object_with_created_incoming_sink() -> MetaResult<()> {
+        let mgr = CatalogController::new(MetaSrvEnv::for_test().await).await?;
+        let inner = mgr.inner.write().await;
+        let txn = inner.db.begin().await?;
+        let (_, Some(target_table_id), _) =
+            insert_test_streaming_job(&txn, "target_table", true, None).await?
+        else {
+            unreachable!()
+        };
+        let (source_mv_id, Some(source_mv_table_id), _) =
+            insert_test_streaming_job(&txn, "source_mv", true, None).await?
+        else {
+            unreachable!()
+        };
+        txn.commit().await?;
+        drop(inner);
+
+        let mut sink = crate::manager::StreamingJob::Sink(
+            PbSink {
+                name: "created_sink".to_owned(),
+                database_id: TEST_DATABASE_ID,
+                schema_id: TEST_SCHEMA_ID,
+                owner: TEST_OWNER_ID as _,
+                target_table: Some(target_table_id),
+                sink_type: PbSinkType::AppendOnly as i32,
+                ..Default::default()
+            },
+            None,
+        );
+        let creating_sink = mgr
+            .create_job_catalog(
+                &mut sink,
+                &crate::model::StreamContext::default(),
+                &None,
+                1,
+                HashSet::from([source_mv_id.as_object_id()]),
+                risingwave_pb::ddl_service::streaming_job_resource_type::ResourceType::Regular(
+                    true,
+                ),
+                &None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await?;
+        // Ensures the incoming sink starts as a creating job before the test marks it created.
+        assert_ne!(creating_sink.job_status, JobStatus::Created);
+
+        let sink_id = sink.id();
+        let inner = mgr.inner.read().await;
+        streaming_job::ActiveModel {
+            job_id: Set(sink_id),
+            job_status: Set(JobStatus::Created),
+            ..Default::default()
+        }
+        .update(&inner.db)
+        .await?;
+        let sink_model = risingwave_meta_model::prelude::StreamingJob::find_by_id(sink_id)
+            .one(&inner.db)
+            .await?
+            .expect("sink should exist");
+        // Ensures the persisted sink row is the sink created by this test.
+        assert_eq!(sink_model.job_id, sink_id);
+        // Ensures a fully created incoming sink does not block upstream MV replacement.
+        assert_eq!(sink_model.job_status, JobStatus::Created);
+        drop(inner);
+
+        let replacement = crate::manager::StreamingJob::MaterializedView(PbTable {
+            id: source_mv_table_id,
+            name: "source_mv".to_owned(),
+            database_id: TEST_DATABASE_ID,
+            schema_id: TEST_SCHEMA_ID,
+            owner: TEST_OWNER_ID as _,
+            ..Default::default()
+        });
+        // Ensures the replacement targets the upstream MV that the created sink depends on.
+        assert_eq!(replacement.id(), source_mv_id);
+
+        let tmp_model = mgr
+            .create_job_catalog_for_replace(&replacement, None, None, None)
+            .await?;
+
+        // Ensures replacement creates a distinct temporary job instead of reusing the original MV id.
+        assert_ne!(tmp_model.job_id, source_mv_id);
+        // Ensures the temporary replacement job is created but not finished yet.
+        assert_eq!(tmp_model.job_status, JobStatus::Initial);
+
+        let inner = mgr.inner.read().await;
+        let db = &inner.db;
+        // Ensures the created sink still depends on the upstream MV being replaced.
+        assert_eq!(
+            ObjectDependency::find()
+                .filter(object_dependency::Column::Oid.eq(source_mv_id.as_object_id()))
+                .filter(object_dependency::Column::UsedBy.eq(sink_id.as_object_id()))
+                .count(db)
+                .await?,
+            1
+        );
+        // Ensures replacement records the temporary job as a dependent of the original MV.
+        assert_eq!(
+            ObjectDependency::find()
+                .filter(object_dependency::Column::Oid.eq(source_mv_id.as_object_id()))
+                .filter(object_dependency::Column::UsedBy.eq(tmp_model.job_id.as_object_id()))
+                .count(db)
+                .await?,
+            1
+        );
 
         Ok(())
     }
@@ -2295,6 +2658,97 @@ mod tests {
                 .one(db)
                 .await?
                 .is_none()
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_get_table_change_log_truncate_info() -> MetaResult<()> {
+        let mgr = CatalogController::new(MetaSrvEnv::for_test().await).await?;
+        let pb_view = PbView {
+            schema_id: TEST_SCHEMA_ID,
+            database_id: TEST_DATABASE_ID,
+            name: "change_log_upstream".to_owned(),
+            owner: TEST_OWNER_ID as _,
+            sql: "CREATE VIEW change_log_upstream AS SELECT 1".to_owned(),
+            ..Default::default()
+        };
+        mgr.create_view(pb_view, HashSet::new()).await?;
+        let upstream_table_id: TableId = View::find()
+            .select_only()
+            .column(view::Column::ViewId)
+            .filter(view::Column::Name.eq("change_log_upstream"))
+            .into_tuple::<ViewId>()
+            .one(&mgr.inner.read().await.db)
+            .await?
+            .unwrap()
+            .as_object_id()
+            .as_table_id();
+        let mut subscription = PbSubscription {
+            name: "change_log_subscription".to_owned(),
+            definition: "CREATE SUBSCRIPTION change_log_subscription FROM change_log_upstream"
+                .to_owned(),
+            retention_seconds: 123,
+            database_id: TEST_DATABASE_ID,
+            schema_id: TEST_SCHEMA_ID,
+            dependent_table_id: upstream_table_id,
+            owner: TEST_OWNER_ID as _,
+            subscription_state: SubscriptionState::Created as _,
+            ..Default::default()
+        };
+        mgr.create_subscription_catalog(&mut subscription).await?;
+
+        let inner = mgr.inner.write().await;
+        let txn = inner.db.begin().await?;
+        let (job_id, _, state_table_id) =
+            insert_test_streaming_job(&txn, "snapshot_job", true, None).await?;
+        let mut job = streaming_job::Entity::find_by_id(job_id)
+            .one(&txn)
+            .await?
+            .unwrap()
+            .into_active_model();
+        job.job_status = Set(JobStatus::Creating);
+        job.update(&txn).await?;
+        fragment::ActiveModel {
+            fragment_id: Set(FragmentId::new(100)),
+            job_id: Set(job_id),
+            fragment_type_mask: Set(FragmentTypeFlag::SnapshotBackfillStreamScan as i32),
+            distribution_type: Set(fragment::DistributionType::Hash),
+            stream_node: Set(StreamNode::from(&PbStreamNode {
+                node_body: Some(PbNodeBody::StreamScan(Box::new(StreamScanNode {
+                    table_id: upstream_table_id,
+                    stream_scan_type: StreamScanType::SnapshotBackfill as i32,
+                    snapshot_backfill_epoch: None,
+                    ..Default::default()
+                }))),
+                ..Default::default()
+            })),
+            state_table_ids: Set(vec![state_table_id].into()),
+            upstream_fragment_id: Set(I32Array::default()),
+            vnode_count: Set(1),
+            parallelism: Set(None),
+        }
+        .insert(&txn)
+        .await?;
+        txn.commit().await?;
+        drop(inner);
+
+        let truncate_info = mgr.get_table_change_log_truncate_info().await?;
+        assert_eq!(
+            truncate_info.subscription_retention_seconds,
+            HashMap::from([(upstream_table_id, 123)])
+        );
+        assert_eq!(truncate_info.independent_jobs.len(), 1);
+        let independent_job = &truncate_info.independent_jobs[0];
+        assert_eq!(independent_job.job_id, job_id);
+        assert_eq!(
+            independent_job.state_table_ids,
+            HashSet::from([state_table_id])
+        );
+        assert_eq!(
+            independent_job.upstream_table_snapshot_epochs,
+            HashMap::from([(upstream_table_id, None)])
         );
 
         Ok(())

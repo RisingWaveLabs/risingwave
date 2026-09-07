@@ -23,11 +23,6 @@ use risingwave_pb::secret::PbSecretRef;
 use risingwave_pb::stream_plan::PbSinkDesc;
 
 use super::{SinkCatalog, SinkFormatDesc, SinkId, SinkType};
-use crate::sink::CONNECTOR_TYPE_KEY;
-use crate::sink::file_sink::azblob::AZBLOB_SINK;
-use crate::sink::file_sink::fs::FS_SINK;
-use crate::sink::file_sink::s3::S3_SINK;
-use crate::sink::file_sink::webhdfs::WEBHDFS_SINK;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SinkDesc {
@@ -154,17 +149,5 @@ impl SinkDesc {
             extra_partition_col_idx: self.extra_partition_col_idx.map(|idx| idx as u64),
             secret_refs: self.secret_refs.clone(),
         }
-    }
-
-    pub fn is_file_sink(&self) -> bool {
-        self.properties
-            .get(CONNECTOR_TYPE_KEY)
-            .map(|s| {
-                s.eq_ignore_ascii_case(FS_SINK)
-                    || s.eq_ignore_ascii_case(AZBLOB_SINK)
-                    || s.eq_ignore_ascii_case(S3_SINK)
-                    || s.eq_ignore_ascii_case(WEBHDFS_SINK)
-            })
-            .unwrap_or(false)
     }
 }

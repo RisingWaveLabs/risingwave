@@ -67,6 +67,7 @@ pub(crate) mod checkpoint;
 mod commit_epoch;
 mod compaction;
 pub mod sequence;
+mod table_change_log;
 pub mod table_write_throughput_statistic;
 pub mod time_travel;
 mod timer_task;
@@ -491,7 +492,7 @@ impl HummockManager {
         } else {
             let default_compaction_config = self
                 .compaction_group_manager
-                .read()
+                .read_with_process_name("load_meta_store_state")
                 .await
                 .default_compaction_config();
             let checkpoint_version = HummockVersion::create_init_version(default_compaction_config);
@@ -651,7 +652,10 @@ impl HummockManager {
         &self,
         table_id: TableId,
     ) -> MetaResult<(u64, UnboundedReceiver<u64>)> {
-        let version = self.versioning.read().await;
+        let version = self
+            .versioning
+            .read_with_process_name("subscribe_table_committed_epoch")
+            .await;
         if let Some(epoch) = version.current_version.table_committed_epoch(table_id) {
             let (tx, rx) = unbounded_channel();
             self.table_committed_epoch_notifiers
@@ -662,7 +666,7 @@ impl HummockManager {
                 .push(tx);
             Ok((epoch, rx))
         } else {
-            Err(anyhow!("table {} not exist", table_id).into())
+            Err(anyhow!("table {} does not exist", table_id).into())
         }
     }
 }

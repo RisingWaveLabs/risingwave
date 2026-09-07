@@ -307,7 +307,10 @@ impl MqttSinkWriter {
                             continue;
                         }
                         err => {
-                            tracing::error!("Failed to poll mqtt eventloop: {}", err.as_report());
+                            tracing::error!(
+                                "failed to poll the MQTT event loop: {}",
+                                err.as_report()
+                            );
                             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                         }
                     },
@@ -373,7 +376,7 @@ impl MqttSinkPayloadWriter {
             ) {
                 Some(s) => s,
                 None => {
-                    tracing::error!("topic field not found in row, skipping: {:?}", row);
+                    tracing::error!("topic field not found in row; skipping row: {:?}", row);
                     return Ok(());
                 }
             };

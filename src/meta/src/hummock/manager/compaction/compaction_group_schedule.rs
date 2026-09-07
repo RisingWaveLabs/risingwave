@@ -716,7 +716,7 @@ impl HummockManager {
             // Inherit config from parent group
             let config = self
                 .compaction_group_manager
-                .read()
+                .read_with_process_name("split_compaction_group_impl")
                 .await
                 .try_get_compaction_group_config(parent_group_id)
                 .ok_or_else(|| {
@@ -878,7 +878,10 @@ impl HummockManager {
         }
 
         let parent_table_ids = {
-            let versioning_guard = self.versioning.read().await;
+            let versioning_guard = self
+                .versioning
+                .read_with_process_name("move_state_tables_to_dedicated_compaction_group")
+                .await;
             versioning_guard
                 .current_version
                 .state_table_info
@@ -1642,18 +1645,20 @@ impl GroupMergeValidator {
 
         {
             // Avoid merge when the group is in emergency state
-            let versioning_guard = versioning.read().await;
+            let versioning_guard = versioning
+                .read_with_process_name("validate_group_merge")
+                .await;
             let levels = &versioning_guard.current_version.levels;
             if !levels.contains_key(&group.group_id) {
                 return Err(Error::CompactionGroup(format!(
-                    "Cannot merge group {} not exist",
+                    "cannot merge compaction group {} because it does not exist",
                     group.group_id
                 )));
             }
 
             if !levels.contains_key(&next_group.group_id) {
                 return Err(Error::CompactionGroup(format!(
-                    "Cannot merge next group {} not exist",
+                    "cannot merge next compaction group {} because it does not exist",
                     next_group.group_id
                 )));
             }

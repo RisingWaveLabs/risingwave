@@ -59,6 +59,14 @@
     select distinct on(a) * from t ;
   expected_outputs:
     - stream_plan
+- name: dedup provides locality on its dedup columns, so no extra locality provider is needed for the downstream agg.
+  sql: |
+    set enable_locality_backfill = true;
+    set locality_backfill_mode = always;
+    create table t(a int, b int, c int) append only;
+    select count(*) from (select distinct on(a, b) * from t) group by a;
+  expected_outputs:
+    - stream_plan
 - sql: |
     set enable_locality_backfill = true;
     set locality_backfill_mode = always;

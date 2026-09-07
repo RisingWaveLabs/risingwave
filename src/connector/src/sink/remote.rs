@@ -262,12 +262,12 @@ async fn validate_remote_sink(param: &SinkParam, sink_name: &str) -> ConnectorRe
 
             validate_sink_response.error.map_or_else(
                 || Ok(()), // If there is no error message, return Ok here.
-                |err| bail!("sink cannot pass validation: {}", err.error_message),
+                |err| bail!("sink validation failed: {}", err.error_message),
             )
         })
     })
     .await
-    .context("JoinHandle returns error")??;
+    .context("join handle returned an error")??;
 
     Ok(())
 }

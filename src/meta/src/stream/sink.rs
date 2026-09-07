@@ -16,6 +16,7 @@ use anyhow::Context;
 use risingwave_common::catalog::ColumnCatalog;
 use risingwave_connector::dispatch_sink;
 use risingwave_connector::sink::catalog::SinkCatalog;
+use risingwave_connector::sink::iceberg::ICEBERG_SINK;
 use risingwave_connector::sink::trivial::BLACKHOLE_SINK;
 use risingwave_connector::sink::{CONNECTOR_TYPE_KEY, Sink, SinkParam, build_sink};
 use risingwave_pb::catalog::PbSink;
@@ -38,22 +39,24 @@ pub async fn validate_sink(prost_sink_catalog: &PbSink) -> MetaResult<()> {
     )
 }
 
-/// Returns the first column whose type contains VARIANT (nested included). No sink connector can
-/// encode variant values yet, so callers reject such columns at creation time.
+/// Returns the first column whose type contains VARIANT (nested included). Callers use this to
+/// reject connectors that cannot encode variant values.
 pub fn first_variant_column(columns: &[ColumnCatalog]) -> Option<&ColumnCatalog> {
     columns
         .iter()
         .find(|column| column.data_type().contains_variant())
 }
 
-/// Reject sinks that carry VARIANT columns at creation time.
+/// Reject sinks that carry VARIANT columns at creation time unless their connector supports it.
 fn reject_variant_sink(sink_catalog: &SinkCatalog) -> MetaResult<()> {
-    // Sinks into tables and blackhole sinks do not serialize values with an external encoder.
+    // Sinks into tables and blackhole sinks do not serialize values with an external encoder;
+    // Iceberg uses the standard Parquet Variant physical layout.
     if sink_catalog.target_table.is_some() {
         return Ok(());
     }
     if let Some(connector) = sink_catalog.properties.get(CONNECTOR_TYPE_KEY)
-        && connector.eq_ignore_ascii_case(BLACKHOLE_SINK)
+        && (connector.eq_ignore_ascii_case(BLACKHOLE_SINK)
+            || connector.eq_ignore_ascii_case(ICEBERG_SINK))
     {
         return Ok(());
     }

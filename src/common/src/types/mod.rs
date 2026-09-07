@@ -253,7 +253,7 @@ impl TryFrom<DataTypeName> for DataType {
             | DataTypeName::List
             | DataTypeName::Map
             | DataTypeName::Vector => Err(
-                "Functions returning parameterized types can not be inferred. Please use `FunctionCall::new_unchecked`.",
+                "Functions returning parameterized types cannot be inferred. Please use `FunctionCall::new_unchecked`.",
             ),
         }
     }

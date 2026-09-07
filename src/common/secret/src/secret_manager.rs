@@ -92,7 +92,7 @@ impl LocalSecretManager {
         if secret_guard.insert(secret_id, secret).is_none() {
             tracing::error!(
                 secret_id = %secret_id,
-                "updating a secret but it does not exist, adding it"
+                "updating a secret that does not exist; adding it instead"
             );
         }
         self.remove_secret_file_if_exist(&secret_id);

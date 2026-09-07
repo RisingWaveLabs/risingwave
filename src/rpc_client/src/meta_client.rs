@@ -45,6 +45,7 @@ use risingwave_common::util::meta_addr::MetaAddressStrategy;
 use risingwave_common::util::resource_util::cpu::total_cpu_available;
 use risingwave_common::util::resource_util::hostname;
 use risingwave_common::util::resource_util::memory::system_memory_available_bytes;
+use risingwave_common::util::retry::exponential_backoff;
 use risingwave_common::util::version::current_rw_version;
 use risingwave_error::bail;
 use risingwave_error::tonic::ErrorIsFromTonicServerImpl;
@@ -122,7 +123,7 @@ use tokio::sync::oneshot::Sender;
 use tokio::sync::{RwLock, mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::{self};
-use tokio_retry::strategy::{ExponentialBackoff, jitter};
+use tokio_retry::strategy::jitter;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tonic::transport::Endpoint;
 use tonic::{Code, Request, Streaming};
@@ -1676,6 +1677,20 @@ impl MetaClient {
         Ok(resp.params.map(SystemParamsReader::from))
     }
 
+    pub async fn clear_file_cache(
+        &self,
+        clear_meta_cache: bool,
+        clear_data_cache: bool,
+    ) -> Result<()> {
+        self.inner
+            .clear_file_cache(ClearFileCacheRequest {
+                clear_meta_cache,
+                clear_data_cache,
+            })
+            .await?;
+        Ok(())
+    }
+
     pub async fn get_session_params(&self) -> Result<String> {
         let req = GetSessionParamsRequest {};
         let resp = self.inner.get_session_params(req).await?;
@@ -2659,9 +2674,12 @@ impl GrpcMetaClient {
         high_bound: Duration,
         exceed: bool,
     ) -> impl Iterator<Item = Duration> {
-        let iter = ExponentialBackoff::from_millis(Self::INIT_RETRY_BASE_INTERVAL_MS)
-            .max_delay(Duration::from_millis(Self::INIT_RETRY_MAX_INTERVAL_MS))
-            .map(jitter);
+        let iter = exponential_backoff(
+            Duration::from_millis(Self::INIT_RETRY_BASE_INTERVAL_MS),
+            Self::INIT_RETRY_BASE_INTERVAL_MS,
+            Duration::from_millis(Self::INIT_RETRY_MAX_INTERVAL_MS),
+        )
+        .map(jitter);
 
         let mut sum = Duration::default();
 
@@ -2816,6 +2834,7 @@ macro_rules! for_all_meta_rpc {
             ,{ telemetry_client, get_telemetry_info, GetTelemetryInfoRequest, TelemetryInfoResponse}
             ,{ system_params_client, get_system_params, GetSystemParamsRequest, GetSystemParamsResponse }
             ,{ system_params_client, set_system_param, SetSystemParamRequest, SetSystemParamResponse }
+            ,{ system_params_client, clear_file_cache, ClearFileCacheRequest, ClearFileCacheResponse }
             ,{ session_params_client, get_session_params, GetSessionParamsRequest, GetSessionParamsResponse }
             ,{ session_params_client, set_session_param, SetSessionParamRequest, SetSessionParamResponse }
             ,{ serving_client, get_serving_vnode_mappings, GetServingVnodeMappingsRequest, GetServingVnodeMappingsResponse }

@@ -1,1 +1,1 @@
-arrow_udf==0.3.1
+arrow_udf==0.3.2

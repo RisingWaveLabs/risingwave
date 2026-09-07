@@ -45,3 +45,11 @@
     select * from t1 join mv1 on t1.b = mv1.b;
   expected_outputs:
     - batch_plan
+- id: fix https://github.com/risingwavelabs/risingwave/issues/26730
+  sql: |
+    create table t1 (a int);
+    create materialized view mv1 as select a from t1 order by a, a limit 1;
+    select t1.a from t1 join mv1 on t1.a = mv1.a;
+  expected_outputs:
+    - batch_plan
+    - batch_local_plan

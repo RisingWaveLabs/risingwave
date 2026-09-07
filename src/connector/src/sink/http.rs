@@ -37,8 +37,11 @@ const HTTP_SINK_URL_COLUMN: &str = "url";
 
 #[derive(Clone, Debug, Deserialize, WithOptions)]
 pub struct HttpConfig {
-    /// The endpoint URL to POST data to.
+    /// The endpoint URL to send data to.
     pub url: Option<String>,
+
+    /// HTTP request method. Supported values are `POST` and `PUT`. Defaults to `POST`.
+    pub method: Option<String>,
 
     /// Content-Type header value. Defaults to `text/plain` for `varchar` and `application/json`
     /// for `jsonb`.
@@ -96,6 +99,7 @@ fn validate_http_sink(
     ignore_delete: bool,
     schema: &Schema,
     url: Option<&str>,
+    method: Option<&str>,
     content_type: Option<&str>,
     headers: &BTreeMap<String, String>,
     unknown_fields: std::collections::HashMap<String, String>,
@@ -105,6 +109,17 @@ fn validate_http_sink(
             "HTTP sink only supports append-only mode"
         )));
     }
+
+    let method = match method {
+        None => reqwest::Method::POST,
+        Some(method) if method.eq_ignore_ascii_case("POST") => reqwest::Method::POST,
+        Some(method) if method.eq_ignore_ascii_case("PUT") => reqwest::Method::PUT,
+        Some(method) => {
+            return Err(SinkError::Config(anyhow!(
+                "HTTP sink method must be POST or PUT, got '{method}'"
+            )));
+        }
+    };
 
     let fields = schema.fields();
     let (payload_index, url, payload_type) = if fields.len() == 1 {
@@ -208,6 +223,7 @@ fn validate_http_sink(
 
     Ok(HttpSink {
         url,
+        method,
         payload_index,
         header_map,
         unknown_fields,
@@ -217,6 +233,7 @@ fn validate_http_sink(
 #[derive(Clone, Debug)]
 pub struct HttpSink {
     url: HttpUrl,
+    method: reqwest::Method,
     payload_index: usize,
     header_map: HeaderMap,
     unknown_fields: std::collections::HashMap<String, String>,
@@ -244,6 +261,7 @@ impl TryFrom<SinkParam> for HttpSink {
             param.ignore_delete,
             &schema,
             config.url.as_deref(),
+            config.method.as_deref(),
             config.content_type.as_deref(),
             &headers,
             config.unknown_fields,
@@ -267,6 +285,7 @@ impl Sink for HttpSink {
     async fn new_log_sinker(&self, _writer_param: SinkWriterParam) -> Result<Self::LogSinker> {
         Ok(HttpSinkWriter::new(
             self.url.clone(),
+            self.method.clone(),
             self.payload_index,
             self.header_map.clone(),
         )?
@@ -277,11 +296,17 @@ impl Sink for HttpSink {
 pub struct HttpSinkWriter {
     client: reqwest::Client,
     url: HttpUrl,
+    method: reqwest::Method,
     payload_index: usize,
 }
 
 impl HttpSinkWriter {
-    fn new(url: HttpUrl, payload_index: usize, header_map: HeaderMap) -> Result<Self> {
+    fn new(
+        url: HttpUrl,
+        method: reqwest::Method,
+        payload_index: usize,
+        header_map: HeaderMap,
+    ) -> Result<Self> {
         let client = reqwest::Client::builder()
             .default_headers(header_map)
             .build()
@@ -291,6 +316,7 @@ impl HttpSinkWriter {
         Ok(Self {
             client,
             url,
+            method,
             payload_index,
         })
     }
@@ -430,7 +456,7 @@ impl AsyncTruncateSinkWriter for HttpSinkWriter {
 
             let resp = self
                 .client
-                .post(url)
+                .request(self.method.clone(), url)
                 .body(payload)
                 .send()
                 .await

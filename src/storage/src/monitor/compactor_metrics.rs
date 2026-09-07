@@ -51,6 +51,8 @@ pub struct CompactorMetrics {
     pub compaction_event_consumed_latency: Histogram,
     pub compaction_event_loop_iteration_latency: Histogram,
     pub sstable_block_size: Histogram,
+    pub iceberg_compaction_memory_budget_bytes: IntGauge,
+    pub iceberg_compaction_running_memory_reservation_bytes: IntGauge,
 }
 
 pub static GLOBAL_COMPACTOR_METRICS: LazyLock<CompactorMetrics> =
@@ -260,6 +262,19 @@ impl CompactorMetrics {
 
         let sstable_block_size = register_histogram_with_registry!(opts, registry).unwrap();
 
+        let iceberg_compaction_memory_budget_bytes = register_int_gauge_with_registry!(
+            "storage_iceberg_compaction_memory_budget_bytes",
+            "Heap admission budget for running Iceberg compaction plans on this compactor node",
+            registry
+        )
+        .unwrap();
+        let iceberg_compaction_running_memory_reservation_bytes =
+            register_int_gauge_with_registry!(
+                "storage_iceberg_compaction_running_memory_reservation_bytes",
+                "Estimated heap peak reservations of currently running Iceberg compaction plans",
+                registry
+            )
+            .unwrap();
         Self {
             compaction_upload_sst_counts,
             compact_fast_runner_bytes,
@@ -287,6 +302,8 @@ impl CompactorMetrics {
             compaction_event_consumed_latency,
             compaction_event_loop_iteration_latency,
             sstable_block_size,
+            iceberg_compaction_memory_budget_bytes,
+            iceberg_compaction_running_memory_reservation_bytes,
         }
     }
 

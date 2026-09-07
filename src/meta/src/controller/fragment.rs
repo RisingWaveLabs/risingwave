@@ -1752,7 +1752,7 @@ impl CatalogController {
             })?;
 
         if fragment_relation != DispatcherType::NoShuffle {
-            return Err(anyhow!("expect NoShuffle but get {:?}", fragment_relation).into());
+            return Err(anyhow!("expected NoShuffle but got {:?}", fragment_relation).into());
         }
 
         let load_fragment_distribution_type = |txn, fragment_id: FragmentId| async move {

@@ -20,12 +20,17 @@ import com.mongodb.ConnectionString;
 import com.risingwave.connector.api.source.SourceTypeE;
 import com.risingwave.connector.cdc.debezium.internal.ConfigurableOffsetBackingStore;
 import com.risingwave.connector.cdc.debezium.internal.OpendalSchemaHistory;
+import io.debezium.connector.mongodb.MongoDbConnectorConfig;
 import java.io.IOException;
 import java.io.StringReader;
 import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
+import java.util.LinkedHashSet;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Properties;
+import java.util.Set;
+import java.util.regex.Pattern;
 import org.apache.commons.io.IOUtils;
 import org.apache.commons.text.StringSubstitutor;
 import org.slf4j.Logger;
@@ -84,6 +89,18 @@ public class DbzConnectorConfig {
     public static class MongoDb {
         public static final String MONGO_URL = "mongodb.url";
         public static final String MONGO_COLLECTION_NAME = "collection.name";
+
+        private static final String DATABASE_GROUP = "database";
+        private static final Pattern LITERAL_COLLECTION_LIST_PATTERN =
+                Pattern.compile(
+                        "(?:\\A|[ ]*,[ ]*)"
+                                + "(?<database>[A-Za-z_][A-Za-z0-9_-]*)\\."
+                                + "(?<collection>[A-Za-z_][A-Za-z0-9_-]*)");
+        private static final Set<String> RAW_FILTER_OPTIONS_DISABLING_INFERENCE =
+                Set.of(
+                        DBZ_PROPERTY_PREFIX + MongoDbConnectorConfig.DATABASE_INCLUDE_LIST.name(),
+                        DBZ_PROPERTY_PREFIX + MongoDbConnectorConfig.DATABASE_EXCLUDE_LIST.name(),
+                        DBZ_PROPERTY_PREFIX + MongoDbConnectorConfig.FILTERS_MATCH_MODE.name());
     }
 
     private static Map<String, String> extractDebeziumProperties(
@@ -134,7 +151,9 @@ public class DbzConnectorConfig {
             boolean snapshotDone,
             boolean isCdcSourceJob) {
 
-        StringSubstitutor substitutor = new StringSubstitutor(userProps);
+        var substitutionProps = new HashMap<>(userProps);
+        substitutionProps.put("source.id", Long.toString(sourceId));
+        StringSubstitutor substitutor = new StringSubstitutor(substitutionProps);
         var dbzProps = initiateDbConfig(DBZ_CONFIG_FILE, substitutor);
         var isCdcBackfill =
                 null != userProps.get(SNAPSHOT_MODE_KEY)
@@ -291,6 +310,27 @@ public class DbzConnectorConfig {
 
             var mongodbUrl = userProps.get(MongoDb.MONGO_URL);
             var collection = userProps.get(MongoDb.MONGO_COLLECTION_NAME);
+            var hasRawFilterOverride =
+                    MongoDb.RAW_FILTER_OPTIONS_DISABLING_INFERENCE.stream()
+                            .anyMatch(userProps::containsKey);
+            if (!hasRawFilterOverride) {
+                inferMongoDatabaseList(collection)
+                        .ifPresent(
+                                databaseList -> {
+                                    mongodbProps.setProperty(
+                                            MongoDbConnectorConfig.DATABASE_INCLUDE_LIST.name(),
+                                            databaseList);
+                                    mongodbProps.setProperty(
+                                            MongoDbConnectorConfig.FILTERS_MATCH_MODE.name(),
+                                            MongoDbConnectorConfig.FiltersMatchMode.LITERAL
+                                                    .getValue());
+                                    LOG.info(
+                                            "Inferred MongoDB database include list '{}' and literal filter match mode from collection list '{}'",
+                                            databaseList,
+                                            collection);
+                                });
+            }
+
             var connectionStr = new ConnectionString(mongodbUrl);
             var connectorName =
                     String.format(
@@ -356,6 +396,28 @@ public class DbzConnectorConfig {
         this.resolvedDbzProps = dbzProps;
         this.isBackfillSource = isCdcBackfill;
         this.waitStreamingStartTimeout = waitStreamingStartTimeout;
+    }
+
+    private static Optional<String> inferMongoDatabaseList(String collectionList) {
+        if (collectionList == null) {
+            return Optional.empty();
+        }
+
+        var matcher = MongoDb.LITERAL_COLLECTION_LIST_PATTERN.matcher(collectionList);
+        var databases = new LinkedHashSet<String>();
+        var matchedUntil = 0;
+        while (matcher.find()) {
+            if (matcher.start() != matchedUntil) {
+                return Optional.empty();
+            }
+            databases.add(matcher.group(MongoDb.DATABASE_GROUP));
+            matchedUntil = matcher.end();
+        }
+
+        if (databases.isEmpty() || matchedUntil != collectionList.length()) {
+            return Optional.empty();
+        }
+        return Optional.of(String.join(",", databases));
     }
 
     private Properties initiateDbConfig(String fileName, StringSubstitutor substitutor) {

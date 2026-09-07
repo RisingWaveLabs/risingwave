@@ -533,6 +533,7 @@ steps:
       - docker-compose#v5.5.0: *docker-compose
       - ./ci/plugins/upload-failure-logs
     timeout_in_minutes: 70
+    parallelism: 6
     retry: *auto-retry
 
   - label: "integration test (madsim) - backfill"

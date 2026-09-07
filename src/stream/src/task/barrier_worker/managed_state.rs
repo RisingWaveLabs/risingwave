@@ -442,7 +442,7 @@ pub(crate) struct ResetPartialGraphOutput {
 }
 
 pub(in crate::task) enum PartialGraphStatus {
-    ReceivedExchangeRequest(Vec<(UpDownActorIds, TakeReceiverRequest)>),
+    ReceivedExchangeRequest(Vec<(String, UpDownActorIds, TakeReceiverRequest)>),
     Running(PartialGraphState),
     Suspended(SuspendedPartialGraphState),
     Resetting,
@@ -454,7 +454,7 @@ impl PartialGraphStatus {
     pub(crate) async fn abort(&mut self) {
         match self {
             PartialGraphStatus::ReceivedExchangeRequest(pending_requests) => {
-                for (_, request) in pending_requests.drain(..) {
+                for (_, _, request) in pending_requests.drain(..) {
                     if let TakeReceiverRequest::Remote { result_sender, .. } = request {
                         let _ = result_sender.send(Err(anyhow!("partial graph aborted").into()));
                     }
@@ -525,7 +525,7 @@ impl PartialGraphStatus {
     ) -> BoxFuture<'static, ResetPartialGraphOutput> {
         match replace(self, PartialGraphStatus::Resetting) {
             PartialGraphStatus::ReceivedExchangeRequest(pending_requests) => {
-                for (_, request) in pending_requests {
+                for (_, _, request) in pending_requests {
                     if let TakeReceiverRequest::Remote { result_sender, .. } = request {
                         let _ = result_sender.send(Err(anyhow!("partial graph reset").into()));
                     }
@@ -589,6 +589,7 @@ pub(super) enum ManagedBarrierStateEvent {
         actor_id: ActorId,
         upstream_actor_id: ActorId,
         upstream_partial_graph_id: PartialGraphId,
+        term_id: String,
         tx: permit::Sender,
     },
 }
@@ -971,12 +972,14 @@ impl PartialGraphState {
                     actor_id,
                     upstream_actor_id,
                     upstream_partial_graph_id,
+                    term_id,
                     tx,
                 } => {
                     return Poll::Ready(ManagedBarrierStateEvent::RegisterLocalUpstreamOutput {
                         actor_id,
                         upstream_actor_id,
                         upstream_partial_graph_id,
+                        term_id,
                         tx,
                     });
                 }

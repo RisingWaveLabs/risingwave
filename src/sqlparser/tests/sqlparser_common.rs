@@ -3900,6 +3900,22 @@ fn parse_begin() {
 }
 
 #[test]
+fn parse_alter_system_clear_file_cache() {
+    one_statement_parses_to(
+        "ALTER SYSTEM CLEAR FILE CACHE META",
+        "ALTER SYSTEM CLEAR FILE CACHE META",
+    );
+    one_statement_parses_to(
+        "ALTER SYSTEM CLEAR FILE CACHE DATA",
+        "ALTER SYSTEM CLEAR FILE CACHE DATA",
+    );
+    one_statement_parses_to(
+        "ALTER SYSTEM CLEAR FILE CACHE ALL",
+        "ALTER SYSTEM CLEAR FILE CACHE ALL",
+    );
+}
+
+#[test]
 fn parse_set_transaction() {
     // SET TRANSACTION shares transaction mode parsing code with START
     // TRANSACTION, so no need to duplicate the tests here. We just do a quick

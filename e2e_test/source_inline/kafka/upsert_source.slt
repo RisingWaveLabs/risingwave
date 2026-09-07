@@ -136,7 +136,7 @@ SELECT * FROM filtered_students_mv;
 9 Jacob Anderson 20
 
 statement ok
-DROP TABLE students;
+DROP TABLE students CASCADE;
 
 statement ok
 DROP MATERIALIZED VIEW filtered_students_mv;

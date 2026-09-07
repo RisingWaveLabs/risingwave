@@ -463,8 +463,9 @@ mod write_chunk_future {
     use futures::{FutureExt, StreamExt, TryFuture, TryStreamExt, stream};
     use itertools::Itertools;
     use maplit::hashmap;
+    use risingwave_common::util::retry::exponential_backoff;
     use tokio::time::sleep;
-    use tokio_retry::strategy::{ExponentialBackoff, jitter};
+    use tokio_retry::strategy::jitter;
 
     use super::{DynamoDbRequest, SinkError};
 
@@ -547,11 +548,11 @@ mod write_chunk_future {
                     async move {
                         let mut req_items = req_items;
                         let mut retry_count = 0;
-                        let mut retry_backoff = ExponentialBackoff::from_millis(
-                            batch_write_retry_backoff_ms,
+                        let mut retry_backoff = exponential_backoff(
+                            Duration::from_millis(batch_write_retry_backoff_ms),
+                            2,
+                            Duration::from_millis(MAX_BATCH_WRITE_RETRY_DELAY_MS),
                         )
-                        .factor(2)
-                        .max_delay(Duration::from_millis(MAX_BATCH_WRITE_RETRY_DELAY_MS))
                         .map(jitter)
                         .take(batch_write_retry_times);
 

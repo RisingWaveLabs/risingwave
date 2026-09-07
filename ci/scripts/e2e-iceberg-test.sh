@@ -29,6 +29,11 @@ mkdir ./connector-node
 tar xf ./risingwave-connector.tar.gz -C ./connector-node
 export CONNECTOR_LIBS_PATH="./connector-node/libs"
 
+echo "--- Testing multi-batch Iceberg compaction rounds"
+risedev ci-start ci-iceberg-compaction-round
+risedev slt './e2e_test/iceberg/compaction_round.slt'
+risedev ci-kill
+
 echo "--- starting risingwave cluster"
 PGPASSWORD='post\tgres' psql -h db -p 5432 -U postgres -c "DROP DATABASE IF EXISTS metadata;" -c "CREATE DATABASE metadata;"
 risedev ci-start ci-iceberg-test

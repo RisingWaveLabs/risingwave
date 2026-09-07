@@ -50,7 +50,9 @@ impl CatalogController {
         }
 
         let mut removed_objects = match drop_mode {
-            DropMode::Cascade => get_referring_objects_cascade(object_id, &txn).await?,
+            DropMode::Cascade => {
+                get_referring_objects_cascade(object_id, object_type, &txn).await?
+            }
             DropMode::Restrict => match object_type {
                 ObjectType::Database => unreachable!("database always be dropped in cascade mode"),
                 ObjectType::Schema => {
@@ -58,8 +60,12 @@ impl CatalogController {
                     Default::default()
                 }
                 ObjectType::Table => {
-                    check_object_refer_for_drop(object_type, object_id, &txn).await?;
-                    let objects = get_referring_objects(object_id, &txn).await?;
+                    let objects = validate_restrict_drop_and_collect_owned_objects(
+                        object_type,
+                        object_id,
+                        &txn,
+                    )
+                    .await?;
                     for obj in objects.iter().filter(|object| {
                         object.obj_type == ObjectType::Source || object.obj_type == ObjectType::Sink
                     }) {
@@ -71,12 +77,18 @@ impl CatalogController {
                         "only index and iceberg sink could be dropped in restrict mode"
                     );
                     for obj in &objects {
-                        check_object_refer_for_drop(obj.obj_type, obj.oid, &txn).await?;
+                        validate_restrict_drop_and_collect_owned_objects(
+                            obj.obj_type,
+                            obj.oid,
+                            &txn,
+                        )
+                        .await?;
                     }
                     objects
                 }
                 object_type @ (ObjectType::Source | ObjectType::Sink) => {
-                    check_object_refer_for_drop(object_type, object_id, &txn).await?;
+                    validate_restrict_drop_and_collect_owned_objects(object_type, object_id, &txn)
+                        .await?;
                     report_drop_object(object_type, object_id, &txn).await;
                     vec![]
                 }
@@ -87,7 +99,8 @@ impl CatalogController {
                 | ObjectType::Connection
                 | ObjectType::Subscription
                 | ObjectType::Secret => {
-                    check_object_refer_for_drop(object_type, object_id, &txn).await?;
+                    validate_restrict_drop_and_collect_owned_objects(object_type, object_id, &txn)
+                        .await?;
                     vec![]
                 }
             },
@@ -96,41 +109,6 @@ impl CatalogController {
         removed_objects.push(obj);
         let mut removed_object_ids: HashSet<_> =
             removed_objects.iter().map(|obj| obj.oid).collect();
-
-        // TODO: record dependency info in object_dependency table for sink into table.
-        // Special handling for 'sink into table'.
-        let incoming_sink_ids: Vec<SinkId> = Sink::find()
-            .select_only()
-            .column(sink::Column::SinkId)
-            .filter(sink::Column::TargetTable.is_in(removed_object_ids.clone()))
-            .into_tuple()
-            .all(&txn)
-            .await?;
-        if !incoming_sink_ids.is_empty() {
-            if self.env.opts.protect_drop_table_with_incoming_sink {
-                let sink_names: Vec<String> = Sink::find()
-                    .select_only()
-                    .column(sink::Column::Name)
-                    .filter(sink::Column::SinkId.is_in(incoming_sink_ids.clone()))
-                    .into_tuple()
-                    .all(&txn)
-                    .await?;
-
-                return Err(MetaError::permission_denied(format!(
-                    "Table used by incoming sinks: {:?}, please drop them manually",
-                    sink_names
-                )));
-            }
-
-            let removed_sink_objs: Vec<PartialObject> = Object::find()
-                .filter(object::Column::Oid.is_in(incoming_sink_ids))
-                .into_partial_model()
-                .all(&txn)
-                .await?;
-
-            removed_object_ids.extend(removed_sink_objs.iter().map(|obj| obj.oid));
-            removed_objects.extend(removed_sink_objs);
-        }
 
         for obj in &removed_objects {
             if obj.obj_type == ObjectType::Sink {
@@ -225,7 +203,7 @@ impl CatalogController {
                     info!("dropping creating sink job, it will be cancelled");
                 } else {
                     return Err(MetaError::permission_denied(format!(
-                        "can not drop {creating} creating streaming job, please cancel them firstly"
+                        "cannot drop {creating} streaming job(s) that are still being created; please cancel them first"
                     )));
                 }
             }

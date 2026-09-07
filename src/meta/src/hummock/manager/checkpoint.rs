@@ -427,8 +427,14 @@ impl HummockManager {
             }
             if cfg!(test) && new_checkpoint_id == old_checkpoint_id {
                 drop(versioning_guard);
-                let versioning = self.versioning.read().await;
-                let context_info = self.context_info.read().await;
+                let versioning = self
+                    .versioning
+                    .read_with_process_name("version_checkpoint_build")
+                    .await;
+                let context_info = self
+                    .context_info
+                    .read_with_process_name("version_checkpoint_build")
+                    .await;
                 let min_pinned_version_id = context_info.min_pinned_version_id();
                 let stale_object_stats = gc_stale_object_stats(
                     &versioning.checkpoint.stale_objects,
@@ -542,7 +548,11 @@ impl HummockManager {
                     .collect(),
             });
         }
-        let min_pinned_version_id = self.context_info.read().await.min_pinned_version_id();
+        let min_pinned_version_id = self
+            .context_info
+            .read_with_process_name("version_checkpoint_build")
+            .await
+            .min_pinned_version_id();
         let may_delete_object = stale_objects
             .iter()
             .filter_map(|(version_id, object_ids)| {
@@ -569,7 +579,11 @@ impl HummockManager {
                 archive.version.as_ref().unwrap().id
             );
         }
-        let min_pinned_version_id = self.context_info.read().await.min_pinned_version_id();
+        let min_pinned_version_id = self
+            .context_info
+            .read_with_process_name("version_checkpoint_build")
+            .await
+            .min_pinned_version_id();
         let stale_object_stats =
             gc_stale_object_stats(&new_checkpoint.stale_objects, min_pinned_version_id);
         // 3. hold write lock briefly and update in memory state
@@ -614,7 +628,10 @@ impl HummockManager {
     }
 
     pub async fn get_checkpoint_version(&self) -> Arc<HummockVersion> {
-        let versioning_guard = self.versioning.read().await;
+        let versioning_guard = self
+            .versioning
+            .read_with_process_name("get_checkpoint_version")
+            .await;
         versioning_guard.checkpoint.version.clone()
     }
 }

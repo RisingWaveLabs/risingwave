@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::ops::Div;
 use std::sync::{Arc, LazyLock};
 
@@ -21,7 +20,7 @@ use arrow_array::ArrayRef;
 use arrow_array::cast::AsArray;
 use arrow_schema::extension::ExtensionType;
 use num_traits::abs;
-use parquet_variant_compute::{VariantArray, VariantType};
+use parquet_variant_compute::{VariantArray as ParquetVariantArray, VariantType};
 use risingwave_common_log::LogSuppressor;
 use thiserror_ext::AsReport;
 
@@ -31,7 +30,7 @@ pub use super::arrow_58::{
 };
 use crate::array::{
     Array, ArrayBuilder, ArrayError, ArrayImpl, DataChunk, DataType, DecimalArray, IntervalArray,
-    VariantArrayBuilder,
+    VariantArray as RwVariantArray, VariantArrayBuilder,
 };
 use crate::types::{Scalar, StructType, VariantVal};
 
@@ -141,8 +140,6 @@ impl ToArrow for IcebergArrowConvert {
             DataType::Serial => self.serial_type_to_arrow(),
             DataType::Decimal => return Ok(self.decimal_type_to_arrow(name)),
             DataType::Jsonb => self.varchar_type_to_arrow(),
-            // Schema-only mapping: converting variant arrays to Arrow (the write path)
-            // is still unsupported.
             DataType::Variant => return Ok(variant_arrow_field(name)),
             DataType::Struct(fields) => self.struct_type_to_arrow(fields)?,
             DataType::List(list) => self.list_type_to_arrow(list)?,
@@ -225,6 +222,28 @@ impl ToArrow for IcebergArrowConvert {
     ) -> Result<arrow_array::ArrayRef, ArrayError> {
         Ok(Arc::new(arrow_array::StringArray::from(array)))
     }
+
+    fn variant_to_arrow(
+        &self,
+        array: &RwVariantArray,
+    ) -> Result<arrow_array::ArrayRef, ArrayError> {
+        // For a SQL NULL row the children's bytes are ignored by the parent null bitmap,
+        // so `raw_iter`'s valid variant-null placeholder keeps both child arrays non-null
+        // without a special branch per row.
+        let metadata = Arc::new(arrow_array::BinaryArray::from_iter_values(
+            array.raw_iter().map(|variant| variant.metadata()),
+        )) as ArrayRef;
+        let value = Arc::new(arrow_array::BinaryArray::from_iter_values(
+            array.raw_iter().map(|variant| variant.value()),
+        )) as ArrayRef;
+        let nulls = (!array.null_bitmap().all()).then(|| array.null_bitmap().into());
+
+        Ok(Arc::new(arrow_array::StructArray::new(
+            variant_arrow_fields(),
+            vec![metadata, value],
+            nulls,
+        )))
+    }
 }
 
 impl FromArrow for IcebergArrowConvert {
@@ -257,7 +276,16 @@ impl FromArrow for IcebergArrowConvert {
 /// The Arrow field layout of an unshredded variant column, tagged with the
 /// `arrow.parquet.variant` extension.
 fn variant_arrow_field(name: &str) -> arrow_schema::Field {
-    let fields = [
+    arrow_schema::Field::new(
+        name,
+        arrow_schema::DataType::Struct(variant_arrow_fields()),
+        true,
+    )
+    .with_extension_type(VariantType)
+}
+
+fn variant_arrow_fields() -> arrow_schema::Fields {
+    [
         Arc::new(arrow_schema::Field::new(
             "metadata",
             arrow_schema::DataType::Binary,
@@ -269,13 +297,12 @@ fn variant_arrow_field(name: &str) -> arrow_schema::Field {
             false,
         )),
     ]
-    .into();
-    arrow_schema::Field::new(name, arrow_schema::DataType::Struct(fields), true)
-        .with_extension_type(VariantType)
+    .into()
 }
 
 fn variant_array_to_variant(array: &arrow_array::ArrayRef) -> Result<ArrayImpl, ArrayError> {
-    let variant_array = VariantArray::try_new(array.as_ref()).map_err(ArrayError::from_arrow)?;
+    let variant_array =
+        ParquetVariantArray::try_new(array.as_ref()).map_err(ArrayError::from_arrow)?;
     // The shredded encoding cannot be reconstructed yet, and decoding only metadata/value
     // would yield silently partial objects, so the whole column reads as NULL.
     if variant_array.typed_value_field().is_some() {
@@ -417,7 +444,9 @@ impl IcebergCreateTableArrowConvert {
         *self.next_field_id.borrow_mut() += 1;
         let field_id = *self.next_field_id.borrow();
 
-        let mut metadata = HashMap::new();
+        // Preserve extension metadata such as `arrow.parquet.variant` while adding the
+        // Iceberg field id required by `arrow_schema_to_schema`.
+        let mut metadata = arrow_field.metadata().clone();
         // for iceberg-rust
         metadata.insert("PARQUET:field_id".to_owned(), field_id.to_string());
         arrow_field.set_metadata(metadata);
@@ -481,11 +510,10 @@ impl ToArrow for IcebergCreateTableArrowConvert {
             DataType::Serial => self.serial_type_to_arrow(),
             DataType::Decimal => return Ok(self.decimal_type_to_arrow(name)),
             DataType::Jsonb => self.varchar_type_to_arrow(),
-            // TODO: support creating Iceberg tables with VARIANT columns.
             DataType::Variant => {
-                return Err(ArrayError::to_arrow(
-                    "VARIANT is not supported for Iceberg table creation yet",
-                ));
+                let mut arrow_field = variant_arrow_field(name);
+                self.add_field_id(&mut arrow_field);
+                return Ok(arrow_field);
             }
             DataType::Struct(fields) => self.struct_type_to_arrow(fields)?,
             DataType::List(list) => self.list_type_to_arrow(list)?,

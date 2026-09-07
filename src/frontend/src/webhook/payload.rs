@@ -87,7 +87,7 @@ fn json_properties_from_headers(headers: &HeaderMap) -> Result<JsonProperties> {
     let encode = header_value(headers, WEBHOOK_ENCODE_HEADER)?.unwrap_or_else(|| "json".into());
     if !encode.eq_ignore_ascii_case("json") {
         return Err(err(
-            anyhow!("unsupported webhook payload encode `{encode}`"),
+            anyhow!("unsupported webhook payload encoding `{encode}`"),
             StatusCode::BAD_REQUEST,
         ));
     }
@@ -120,7 +120,7 @@ fn parse_timestamp_handling(
         Some("milli") => Ok(Some(TimestampHandling::Milli)),
         Some("guess_number_unit") => Ok(Some(TimestampHandling::GuessNumberUnit)),
         Some(value) => Err(err(
-            anyhow!("unrecognized `{key}` value `{value}`"),
+            anyhow!("unrecognized value `{value}` for `{key}`"),
             StatusCode::BAD_REQUEST,
         )),
         None => Ok(None),
@@ -148,7 +148,7 @@ fn parse_time_handling(headers: &HeaderMap, key: &'static str) -> Result<Option<
         Some("milli") => Ok(Some(TimeHandling::Milli)),
         Some("micro") => Ok(Some(TimeHandling::Micro)),
         Some(value) => Err(err(
-            anyhow!("unrecognized `{key}` value `{value}`"),
+            anyhow!("unrecognized value `{value}` for `{key}`"),
             StatusCode::BAD_REQUEST,
         )),
         None => Ok(None),
@@ -163,7 +163,7 @@ fn parse_bigint_unsigned_handling(
         Some("long") => Ok(Some(BigintUnsignedHandlingMode::Long)),
         Some("precise") => Ok(Some(BigintUnsignedHandlingMode::Precise)),
         Some(value) => Err(err(
-            anyhow!("unrecognized `{key}` value `{value}`"),
+            anyhow!("unrecognized value `{value}` for `{key}`"),
             StatusCode::BAD_REQUEST,
         )),
         None => Ok(None),
@@ -175,7 +175,7 @@ fn parse_bool_header(headers: &HeaderMap, key: &'static str) -> Result<Option<bo
         Some("true") => Ok(Some(true)),
         Some("false") => Ok(Some(false)),
         Some(value) => Err(err(
-            anyhow!("unrecognized `{key}` value `{value}`"),
+            anyhow!("unrecognized value `{value}` for `{key}`"),
             StatusCode::BAD_REQUEST,
         )),
         None => Ok(None),

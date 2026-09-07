@@ -18,14 +18,15 @@ use either::Either;
 use pgwire::pg_response::{PgResponse, StatementType};
 use risingwave_common::util::iter_util::ZipEqFast;
 use risingwave_pb::catalog::PbView;
-use risingwave_sqlparser::ast::{Ident, ObjectName, Query, Statement};
+use risingwave_sqlparser::ast::{Ident, ObjectName, Query};
 
 use super::RwPgResponse;
-use crate::binder::Binder;
+use crate::binder::{Binder, BoundStatement};
 use crate::error::Result;
 use crate::handler::HandlerArgs;
 use crate::handler::util::reject_internal_table_dependencies;
-use crate::optimizer::OptimizerContext;
+use crate::optimizer::{OptimizerContext, RelationCollectorVisitor};
+use crate::planner::Planner;
 
 pub async fn handle_create_view(
     handler_args: HandlerArgs,
@@ -50,20 +51,22 @@ pub async fn handle_create_view(
         return Ok(resp);
     }
 
-    // plan the query to validate it and resolve dependencies
+    // Bind and plan the query to validate it and resolve its schema and dependencies. The batch
+    // plan is only used for validation and dependency collection. It is neither stored nor
+    // executed, so creating a logical view does not depend on the selected batch execution engine.
     let (dependent_relations, dependent_secrets, schema) = {
+        let mut binder = Binder::new_for_batch(&session);
+        let bound_query = binder.bind_query(&query)?;
+        let dependent_relations = binder.included_relations().clone();
+        let dependent_secrets = binder.included_secrets().clone();
+
         let context = OptimizerContext::from_handler_args(handler_args);
-        let super::query::RwBatchQueryPlanResult {
-            schema,
-            dependent_relations,
-            dependent_secrets,
-            ..
-        } = super::query::gen_batch_plan_by_statement(
-            &session,
-            context.into(),
-            Statement::Query(Box::new(query.clone())),
-        )?
-        .unwrap_rw()?;
+        let logical = Planner::new_for_batch_dql(context.into())
+            .plan(BoundStatement::Query(bound_query.into()))?;
+        let schema = logical.schema();
+        let batch_plan = logical.gen_batch_plan()?;
+        let dependent_relations =
+            RelationCollectorVisitor::collect_with(dependent_relations, batch_plan.plan);
 
         reject_internal_table_dependencies(&session, &dependent_relations, "CREATE VIEW")?;
 

@@ -31,7 +31,7 @@ use tracing::warn;
 
 use super::group_split::split_sst_with_table_ids;
 use super::{StateTableId, group_split};
-use crate::change_log::{ChangeLogDeltaCommon, TableChangeLogCommon};
+use crate::change_log::{EpochNewChangeLogCommon, TableChangeLogCommon};
 use crate::compact_task::is_compaction_task_expired;
 use crate::compaction_group::StaticCompactionGroupId;
 use crate::key_range::KeyRangeCommon;
@@ -745,10 +745,9 @@ impl HummockVersionCommon<SstableInfo> {
 
     pub fn apply_change_log_delta<T: Clone>(
         table_change_log: &mut HashMap<TableId, TableChangeLogCommon<T>>,
-        change_log_delta: &HashMap<TableId, ChangeLogDeltaCommon<T>>,
+        change_log_delta: &HashMap<TableId, EpochNewChangeLogCommon<T>>,
     ) {
-        for (table_id, change_log_delta) in change_log_delta {
-            let new_change_log = &change_log_delta.new_log;
+        for (table_id, new_change_log) in change_log_delta {
             match table_change_log.entry(*table_id) {
                 Entry::Occupied(entry) => {
                     let change_log = entry.into_mut();
@@ -759,19 +758,12 @@ impl HummockVersionCommon<SstableInfo> {
                 }
             };
         }
-
-        // truncate the remaining table change log
-        for (table_id, change_log_delta) in change_log_delta {
-            if let Some(change_log) = table_change_log.get_mut(table_id) {
-                change_log.truncate(change_log_delta.truncate_epoch);
-            }
-        }
     }
 
     /// Returns the log deltas required to truncate the entire change log for a table.
     pub fn collect_gc_change_log_delta<'a, T: Clone>(
         current_change_log_table_ids: impl Iterator<Item = &'a TableId>,
-        change_log_delta: &HashMap<TableId, ChangeLogDeltaCommon<T>>,
+        change_log_delta: &HashMap<TableId, EpochNewChangeLogCommon<T>>,
         removed_table_ids: &HashSet<TableId>,
         state_table_info_delta: &HashMap<TableId, StateTableInfoDelta>,
         changed_table_info: &HashMap<TableId, Option<StateTableInfo>>,

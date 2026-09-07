@@ -18,6 +18,7 @@ use std::ops::Deref;
 use fixedbitset::FixedBitSet;
 use itertools::{EitherOrBoth, Itertools};
 use pretty_xmlish::{Pretty, XmlNode};
+use risingwave_common::catalog::ColumnId;
 use risingwave_expr::bail;
 use risingwave_pb::expr::expr_node::PbType;
 use risingwave_pb::plan_common::{AsOfJoinDesc, JoinType, PbAsOfJoinInequalityType};
@@ -348,6 +349,33 @@ impl LogicalJoin {
         Self::gen_batch_lookup_join(logical_scan, predicate, logical_join, self.is_asof_join())
     }
 
+    /// Decides the lookup prefix, as a reordering of the eq keys, by matching the lookup
+    /// table's order-key columns. The executor binds eq keys to the order key positionally,
+    /// so a repeated order-key column (e.g. an MV with `ORDER BY a, a`) ends the prefix.
+    fn lookup_prefix_reorder_idx(
+        predicate: &EqJoinPredicate,
+        output_column_ids: &[ColumnId],
+        order_col_ids: &[ColumnId],
+    ) -> Vec<usize> {
+        let mut reorder_idx = Vec::with_capacity(order_col_ids.len());
+        for order_col_id in order_col_ids {
+            let mut found = false;
+            for (i, eq_idx) in predicate.right_eq_indexes().into_iter().enumerate() {
+                if *order_col_id == output_column_ids[eq_idx] {
+                    if !reorder_idx.contains(&i) {
+                        reorder_idx.push(i);
+                        found = true;
+                    }
+                    break;
+                }
+            }
+            if !found {
+                break;
+            }
+        }
+        reorder_idx
+    }
+
     pub fn gen_batch_lookup_join(
         logical_scan: &LogicalScan,
         predicate: EqJoinPredicate,
@@ -391,20 +419,8 @@ impl LogicalJoin {
             .map_or(1, |pos| pos + 1);
 
         // Reorder the join equal predicate to match the order key.
-        let mut reorder_idx = Vec::with_capacity(shortest_prefix_len);
-        for order_col_id in order_col_ids {
-            let mut found = false;
-            for (i, eq_idx) in predicate.right_eq_indexes().into_iter().enumerate() {
-                if order_col_id == output_column_ids[eq_idx] {
-                    reorder_idx.push(i);
-                    found = true;
-                    break;
-                }
-            }
-            if !found {
-                break;
-            }
-        }
+        let reorder_idx =
+            Self::lookup_prefix_reorder_idx(&predicate, &output_column_ids, &order_col_ids);
         if reorder_idx.len() < shortest_prefix_len {
             return Ok(None);
         }
@@ -1269,20 +1285,8 @@ impl LogicalJoin {
             .map_or(0, |pos| pos + 1);
 
         // Reorder the join equal predicate to match the order key.
-        let mut reorder_idx = Vec::with_capacity(shortest_prefix_len);
-        for order_col_id in order_col_ids {
-            let mut found = false;
-            for (i, eq_idx) in predicate.right_eq_indexes().into_iter().enumerate() {
-                if order_col_id == output_column_ids[eq_idx] {
-                    reorder_idx.push(i);
-                    found = true;
-                    break;
-                }
-            }
-            if !found {
-                break;
-            }
-        }
+        let reorder_idx =
+            Self::lookup_prefix_reorder_idx(&predicate, &output_column_ids, &order_col_ids);
         if reorder_idx.len() < shortest_prefix_len {
             return Err(RwError::from(ErrorCode::NotSupported(
                 "Temporal join requires the equivalence join condition includes the key columns that form the distribution key of the lookup table".into(),

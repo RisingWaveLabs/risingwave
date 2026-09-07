@@ -672,3 +672,38 @@
     └─StreamProject { exprs: [events.event_id, vector_info, events.time] }
       └─StreamVectorIndexLookupJoin { top_n: 3, distance_type: L2Sqr, index_name: "i", vector: events.embedding, lookup_output: [("items.id", Int32), ("name", Varchar)], include_distance: true, as_of: ProcessTime }
         └─StreamTableScan { table: events, columns: [events.event_id, events.time, events.embedding], stream_scan_type: SnapshotBackfill, stream_key: [events.event_id], pk: [event_id], dist: UpstreamHashShard(events.event_id) }
+- id: correlated_lookup_join_over_shared_cte
+  before:
+  - create_correlated_tables_with_column_value_index
+  sql: |
+    with cte as (select id, name, embedding from items where id > 0)
+    select e.event_id,
+           array(select row(name)
+                 from (select name from cte order by e.embedding <-> cte.embedding limit 3)) as related_info,
+           c2.name
+    from events e join cte c2 on c2.id = e.event_id;
+  batch_plan: |-
+    BatchExchange { order: [], dist: Single }
+    └─BatchHashJoin { type: LeftOuter, predicate: events.embedding IS NOT DISTINCT FROM events.embedding, output: [events.event_id, $expr3, items.name] }
+      ├─BatchExchange { order: [], dist: HashShard(events.embedding) }
+      │ └─BatchLookupJoin { type: Inner, predicate: events.event_id = items.id AND (items.id > 0:Int32), output: [events.event_id, events.embedding, items.name], lookup table: items }
+      │   └─BatchExchange { order: [], dist: UpstreamHashShard(events.event_id) }
+      │     └─BatchScan { table: events, columns: [events.event_id, events.embedding], distribution: UpstreamHashShard(events.event_id) }
+      └─BatchProject { exprs: [events.embedding, Coalesce(array_agg($expr2) filter(IsNotNull(1:Int32)), ARRAY[]:List(Struct(Varchar))) as $expr3] }
+        └─BatchHashAgg { group_key: [events.embedding], aggs: [array_agg($expr2) filter(IsNotNull(1:Int32))] }
+          └─BatchHashJoin { type: LeftOuter, predicate: events.embedding IS NOT DISTINCT FROM events.embedding, output: [events.embedding, $expr2, 1:Int32] }
+            ├─BatchHashAgg { group_key: [events.embedding], aggs: [] }
+            │ └─BatchExchange { order: [], dist: HashShard(events.embedding) }
+            │   └─BatchScan { table: events, columns: [events.embedding], distribution: SomeShard }
+            └─BatchProject { exprs: [events.embedding, Row(items.name) as $expr2, 1:Int32] }
+              └─BatchGroupTopN { order: [$expr1 ASC], limit: 3, offset: 0, group_key: [events.embedding] }
+                └─BatchExchange { order: [], dist: HashShard(events.embedding) }
+                  └─BatchProject { exprs: [events.embedding, items.name, L2Distance(events.embedding, items.embedding) as $expr1] }
+                    └─BatchNestedLoopJoin { type: Inner, predicate: true, output: all }
+                      ├─BatchExchange { order: [], dist: Single }
+                      │ └─BatchHashAgg { group_key: [events.embedding], aggs: [] }
+                      │   └─BatchExchange { order: [], dist: HashShard(events.embedding) }
+                      │     └─BatchScan { table: events, columns: [events.embedding], distribution: SomeShard }
+                      └─BatchExchange { order: [], dist: Single }
+                        └─BatchScan { table: items, columns: [items.name, items.embedding], scan_ranges: [items.id > Int32(0)], distribution: SomeShard }
+  stream_error: LogicalVectorSearchLookupJoin should use proper vector index in streaming job

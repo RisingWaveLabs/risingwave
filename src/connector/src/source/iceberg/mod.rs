@@ -170,6 +170,23 @@ impl IcebergFileScanTask {
         let first_task = self.tasks().first()?;
         first_task.predicate.as_ref()
     }
+
+    fn strip_non_serializable_planning_context(&mut self) {
+        let tasks = match self {
+            IcebergFileScanTask::Data(tasks)
+            | IcebergFileScanTask::EqualityDelete(tasks)
+            | IcebergFileScanTask::PositionDelete(tasks) => tasks,
+        };
+
+        for task in tasks {
+            // These fields are deliberately not serializable in Iceberg. The previous
+            // Iceberg dependency skipped them during serde, so retain that split format.
+            task.partition = None;
+            task.partition_spec = None;
+            task.name_mapping = None;
+            task.unified_partition_type = None;
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -211,7 +228,9 @@ impl SplitMetaData for IcebergSplit {
     }
 
     fn encode_to_json(&self) -> JsonbVal {
-        serde_json::to_value(self.clone())
+        let mut split = self.clone();
+        split.task.strip_non_serializable_planning_context();
+        serde_json::to_value(split)
             .expect("iceberg split serialization should not fail")
             .into()
     }
@@ -366,13 +385,12 @@ impl IcebergSplitEnumerator {
 
             // Collect delete files for separate scan types, but keep task.deletes intact
             for delete_file in &task.deletes {
-                let delete_file = delete_file.as_ref().clone();
-                match delete_file.data_file_content {
+                match delete_file.file_type {
                     iceberg::spec::DataContentType::Data => {
                         bail!("Data file should not in task deletes");
                     }
                     iceberg::spec::DataContentType::EqualityDeletes => {
-                        if equality_delete_files_set.insert(delete_file.data_file_path.clone()) {
+                        if equality_delete_files_set.insert(delete_file.file_path.clone()) {
                             if equality_delete_ids.is_none() {
                                 equality_delete_ids = delete_file.equality_ids.clone();
                             } else if equality_delete_ids != delete_file.equality_ids {
@@ -380,29 +398,20 @@ impl IcebergSplitEnumerator {
                                     "The schema of iceberg equality delete file must be consistent"
                                 );
                             }
-                            equality_delete_files.push(delete_file);
+                            equality_delete_files.push(delete_file.to_file_scan_task(&task));
                         }
                     }
                     iceberg::spec::DataContentType::PositionDeletes => {
-                        if position_delete_files_set.insert(delete_file.data_file_path.clone()) {
-                            position_delete_files.push(delete_file);
+                        if position_delete_files_set.insert(delete_file.file_path.clone()) {
+                            position_delete_files.push(delete_file.to_file_scan_task(&task));
                         }
                     }
                 }
             }
 
-            match task.data_file_content {
-                iceberg::spec::DataContentType::Data => {
-                    // Keep the original task with its deletes field intact
-                    data_files.push(task);
-                }
-                iceberg::spec::DataContentType::EqualityDeletes => {
-                    bail!("Equality delete files should not be in the data files");
-                }
-                iceberg::spec::DataContentType::PositionDeletes => {
-                    bail!("Position delete files should not be in the data files");
-                }
-            }
+            // Top-level scan tasks always represent data files. Keep their delete
+            // descriptors intact so the SDK reader can apply them when requested.
+            data_files.push(task);
         }
         let schema = table_schema.clone();
         let equality_delete_columns = equality_delete_ids
@@ -499,7 +508,7 @@ pub async fn scan_task_to_chunk_with_deletes(
     let file_scan_stream = tokio_stream::once(Ok(data_file_scan_task.clone()));
 
     let mut record_batch_stream: iceberg::scan::ArrowRecordBatchStream =
-        reader.read(Box::pin(file_scan_stream))?;
+        reader.read(Box::pin(file_scan_stream))?.stream();
 
     // The reader rejects a file with shredded variant columns before yielding any batch.
     // Retry without the variant columns; NULL columns are spliced back in below.
@@ -528,7 +537,9 @@ pub async fn scan_task_to_chunk_with_deletes(
                     .with_batch_size(chunk_size)
                     .with_row_group_filtering_enabled(true)
                     .build();
-                reader.read(Box::pin(tokio_stream::once(Ok(reduced_task))))?
+                reader
+                    .read(Box::pin(tokio_stream::once(Ok(reduced_task))))?
+                    .stream()
             }
             first => Box::pin(futures::stream::iter(first).chain(record_batch_stream)),
         };
@@ -669,8 +680,8 @@ mod tests {
 
     use iceberg::scan::FileScanTask;
     use iceberg::spec::{
-        DataContentType, FormatVersion, MAIN_BRANCH, NestedField, Operation, PrimitiveType, Schema,
-        Snapshot, SortOrder, Summary, TableMetadataBuilder, Type, UnboundPartitionSpec,
+        FormatVersion, MAIN_BRANCH, NestedField, Operation, PrimitiveType, Schema, Snapshot,
+        SortOrder, Struct, Summary, TableMetadataBuilder, Type, UnboundPartitionSpec,
     };
 
     use super::*;
@@ -781,22 +792,44 @@ mod tests {
             length,
             start: 0,
             record_count: Some(0),
+            first_row_id: None,
+            data_sequence_number: None,
             data_file_path: format!("test_{}.parquet", id),
-            referenced_data_file: None,
-            data_file_content: DataContentType::Data,
             data_file_format: iceberg::spec::DataFileFormat::Parquet,
             schema: Arc::new(Schema::builder().build().unwrap()),
             project_field_ids: vec![],
             predicate: None,
             deletes: vec![],
             sequence_number: 0,
-            equality_ids: None,
+            file_sequence_number: Some(0),
             file_size_in_bytes: 0,
             partition: None,
             partition_spec: None,
             name_mapping: None,
+            unified_partition_type: None,
             case_sensitive: true,
+            key_metadata: None,
         }
+    }
+
+    #[test]
+    fn test_split_serialization_strips_iceberg_planning_context() {
+        let mut task = create_file_scan_task(100, 1);
+        task.partition = Some(Struct::empty());
+        task.partition_spec = Some(Arc::new(iceberg::spec::PartitionSpec::unpartition_spec()));
+
+        let split = IcebergSplit {
+            split_id: 1,
+            task: IcebergFileScanTask::Data(vec![task]),
+            limit: None,
+        };
+        let restored = IcebergSplit::restore_from_json(split.encode_to_json()).unwrap();
+        let task = &restored.task.tasks()[0];
+
+        assert!(task.partition.is_none());
+        assert!(task.partition_spec.is_none());
+        assert!(task.name_mapping.is_none());
+        assert!(task.unified_partition_type.is_none());
     }
 
     #[test]

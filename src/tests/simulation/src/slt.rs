@@ -600,7 +600,7 @@ pub async fn run_slt_task(cluster: Arc<Cluster>, glob: &str, opts: Opts) {
                                     // otherwise it means that the catalog is not yet populated to fe.
                                     && !e.contains("gRPC request to meta service failed")
                                     && e.contains("exists")
-                                    && !e.contains("under creation")
+                                    && !e.contains("still being created")
                                     && e.contains("Catalog error") =>
                             {
                                 break;

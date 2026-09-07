@@ -44,7 +44,7 @@ pub(crate) mod state;
 pub mod test_utils;
 mod writer;
 
-pub(crate) use reader::{REWIND_BACKOFF_FACTOR, REWIND_BASE_DELAY, REWIND_MAX_DELAY};
+pub(crate) use reader::{REWIND_BACKOFF_MULTIPLIER, REWIND_INITIAL_DELAY, REWIND_MAX_DELAY};
 use risingwave_common::hash::{VirtualNode, VnodeBitmapExt};
 use risingwave_common::row::ArrayVec;
 use risingwave_common::types::{DataType, Datum};

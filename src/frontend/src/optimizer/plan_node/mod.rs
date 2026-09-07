@@ -27,7 +27,7 @@
 //! - all field should be valued in construction, so the properties' derivation should be finished
 //!   in the `new()` function.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
 use std::hash::Hash;
 use std::marker::PhantomData;
@@ -56,7 +56,7 @@ use super::property::{
 };
 use crate::error::{ErrorCode, Result};
 use crate::optimizer::property::StreamKind;
-use crate::optimizer::{ExpressionSimplifyRewriter, PlanVisitor};
+use crate::optimizer::{PlanVisitor, ShareId};
 use crate::session::current::notice_to_user;
 use crate::utils::{PrettySerde, build_graph_from_pretty};
 
@@ -76,18 +76,28 @@ pub trait ConventionMarker: 'static + Sized + Clone + Debug + Eq + PartialEq + H
 pub trait ShareNode<C: ConventionMarker>:
     AnyPlanNodeMeta<C> + PlanTreeNodeUnary<C> + 'static
 {
+    fn share_id(&self) -> ShareId;
     fn new_share(share: generic::Share<PlanRef<C>>) -> PlanRef<C>;
-    fn replace_input(&self, plan: PlanRef<C>);
+    fn replace_input(&self, plan: PlanRef<C>) -> PlanRef<C>;
+    fn fork_with_input(&self, plan: PlanRef<C>) -> PlanRef<C>;
 }
 
 pub struct NoShareNode<C: ConventionMarker>(!, PhantomData<C>);
 
 impl<C: ConventionMarker> ShareNode<C> for NoShareNode<C> {
+    fn share_id(&self) -> ShareId {
+        unreachable!()
+    }
+
     fn new_share(_plan: generic::Share<PlanRef<C>>) -> PlanRef<C> {
         unreachable!()
     }
 
-    fn replace_input(&self, _plan: PlanRef<C>) {
+    fn replace_input(&self, _plan: PlanRef<C>) -> PlanRef<C> {
+        unreachable!()
+    }
+
+    fn fork_with_input(&self, _plan: PlanRef<C>) -> PlanRef<C> {
         unreachable!()
     }
 }
@@ -369,11 +379,37 @@ pub trait VisitPlan: Visit<LogicalPlanRef> {
 
 impl<C: ConventionMarker> PlanRef<C> {
     pub fn rewrite_exprs_recursive(&self, r: &mut impl ExprRewriter) -> PlanRef<C> {
+        self.rewrite_exprs_recursive_inner(r, &mut HashMap::new())
+    }
+
+    fn rewrite_exprs_recursive_inner(
+        &self,
+        r: &mut impl ExprRewriter,
+        rewritten_shares: &mut HashMap<ShareId, PlanRef<C>>,
+    ) -> PlanRef<C> {
+        if let Some(share) = self.as_share_node() {
+            let share_id = share.share_id();
+            if let Some(rewritten) = rewritten_shares.get(&share_id) {
+                return rewritten.clone();
+            }
+
+            let rewritten = self.rewrite_exprs(r);
+            let rewritten_share = rewritten
+                .as_share_node()
+                .expect("rewriting expressions must preserve a share node");
+            let input = rewritten_share
+                .input()
+                .rewrite_exprs_recursive_inner(r, rewritten_shares);
+            let rewritten = rewritten_share.replace_input(input);
+            rewritten_shares.insert(share_id, rewritten.clone());
+            return rewritten;
+        }
+
         let new = self.rewrite_exprs(r);
         let inputs: Vec<PlanRef<C>> = new
             .inputs()
             .iter()
-            .map(|plan_ref| plan_ref.rewrite_exprs_recursive(r))
+            .map(|plan_ref| plan_ref.rewrite_exprs_recursive_inner(r, rewritten_shares))
             .collect();
         new.clone_root_with_inputs(&inputs[..])
     }
@@ -385,10 +421,25 @@ pub(crate) trait VisitExprsRecursive {
 
 impl<C: ConventionMarker> VisitExprsRecursive for PlanRef<C> {
     fn visit_exprs_recursive(&self, r: &mut impl ExprVisitor) {
+        self.visit_exprs_recursive_inner(r, &mut HashSet::new());
+    }
+}
+
+impl<C: ConventionMarker> PlanRef<C> {
+    fn visit_exprs_recursive_inner(
+        &self,
+        r: &mut impl ExprVisitor,
+        visited_shares: &mut HashSet<ShareId>,
+    ) {
+        if let Some(share) = self.as_share_node()
+            && !visited_shares.insert(share.share_id())
+        {
+            return;
+        }
         self.visit_exprs(r);
         self.inputs()
             .iter()
-            .for_each(|plan_ref| plan_ref.visit_exprs_recursive(r));
+            .for_each(|plan_ref| plan_ref.visit_exprs_recursive_inner(r, visited_shares));
     }
 }
 
@@ -410,84 +461,45 @@ impl LogicalPlanRef {
         ctx: &mut ColumnPruningContext,
     ) -> LogicalPlanRef {
         if let Some(logical_share) = self.as_logical_share() {
-            // Check the share cache first. If cache exists, it means this is the second round of
-            // column pruning.
-            if let Some((new_share, merge_required_cols)) = ctx.get_share_cache(self.id()) {
-                // Piggyback share remove if its has only one parent.
-                if ctx.get_parent_num(logical_share) == 1 {
-                    let input: LogicalPlanRef = logical_share.input();
-                    return input.prune_col(required_cols, ctx);
-                }
-
-                // If it is the first visit, recursively call `prune_col` for its input and
-                // replace it.
-                if ctx.visit_share_at_first_round(self.id()) {
-                    let new_logical_share: &LogicalShare = new_share
-                        .as_logical_share()
-                        .expect("must be share operator");
-                    let new_share_input = new_logical_share.input().prune_col(
-                        &(0..new_logical_share.base.schema().len()).collect_vec(),
-                        ctx,
-                    );
-                    new_logical_share.replace_input(new_share_input);
-                }
-
-                // Calculate the new required columns based on the new share.
-                let new_required_cols: Vec<usize> = required_cols
-                    .iter()
-                    .map(|col| merge_required_cols.iter().position(|x| x == col).unwrap())
-                    .collect_vec();
-                let mapping = ColIndexMapping::with_remaining_columns(
-                    &new_required_cols,
-                    new_share.schema().len(),
-                );
-                return LogicalProject::with_mapping(new_share, mapping).into();
+            // A single-parent share is not a DAG boundary and can be removed immediately.
+            if ctx.get_parent_num(logical_share) == 1 {
+                return logical_share.input().prune_col(required_cols, ctx);
             }
 
-            // `LogicalShare` can't clone, so we implement column pruning for `LogicalShare`
-            // here.
-            // Basically, we need to wait for all parents of `LogicalShare` to prune columns before
-            // we merge the required columns and prune.
-            let parent_has_pushed = ctx.add_required_cols(self.id(), required_cols.into());
-            if parent_has_pushed == ctx.get_parent_num(logical_share) {
-                let merge_require_cols = ctx
-                    .take_required_cols(self.id())
-                    .expect("must have required columns")
-                    .into_iter()
-                    .flat_map(|x| x.into_iter())
-                    .sorted()
-                    .dedup()
-                    .collect_vec();
-                let input: LogicalPlanRef = logical_share.input();
-                let input = input.prune_col(&merge_require_cols, ctx);
+            if ctx.is_collecting() {
+                if let Some(merged_required_cols) =
+                    ctx.add_required_cols(logical_share, required_cols.to_vec())
+                {
+                    // Continue collection below the share only after every parent has
+                    // contributed its requirement. Rewriting happens in the next phase.
+                    let _ = logical_share.input().prune_col(&merged_required_cols, ctx);
+                }
 
-                // Cache the new share operator for the second round.
-                let new_logical_share = LogicalShare::create(input.clone());
-                ctx.add_share_cache(self.id(), new_logical_share, merge_require_cols.clone());
-
-                let exprs = logical_share
-                    .base
-                    .schema()
-                    .fields
+                let mapping =
+                    ColIndexMapping::with_remaining_columns(required_cols, self.schema().len());
+                LogicalProject::with_mapping(self.clone(), mapping).into()
+            } else {
+                ctx.ensure_share_rebuilt(logical_share);
+                let share_mapping = ctx.share_mapping(logical_share);
+                let new_required_cols = required_cols
                     .iter()
-                    .enumerate()
-                    .map(|(i, field)| {
-                        if let Some(pos) = merge_require_cols.iter().position(|x| *x == i) {
-                            ExprImpl::InputRef(Box::new(InputRef::new(
-                                pos,
-                                field.data_type.clone(),
-                            )))
-                        } else {
-                            ExprImpl::Literal(Box::new(Literal::new(None, field.data_type.clone())))
-                        }
+                    .map(|&column| {
+                        share_mapping.try_map(column).unwrap_or_else(|| {
+                            panic!(
+                                "column {column} is absent from the collected mapping for share {:?}",
+                                logical_share.share_id()
+                            )
+                        })
                     })
                     .collect_vec();
-                let project = LogicalProject::create(input, exprs);
-                logical_share.replace_input(project);
+                let refreshed_share: LogicalPlanRef =
+                    LogicalShare::from_share_id(self.ctx(), logical_share.share_id()).into();
+                let mapping = ColIndexMapping::with_remaining_columns(
+                    &new_required_cols,
+                    refreshed_share.schema().len(),
+                );
+                LogicalProject::with_mapping(refreshed_share, mapping).into()
             }
-            let mapping =
-                ColIndexMapping::with_remaining_columns(required_cols, self.schema().len());
-            LogicalProject::with_mapping(self.clone(), mapping).into()
         } else {
             // Dispatch to dyn PlanNode instead of PlanRef.
             let dyn_t = self.deref();
@@ -501,62 +513,27 @@ impl LogicalPlanRef {
         ctx: &mut PredicatePushdownContext,
     ) -> LogicalPlanRef {
         if let Some(logical_share) = self.as_logical_share() {
-            // Piggyback share remove if its has only one parent.
+            // A single-parent share is not a DAG boundary and can be removed immediately.
             if ctx.get_parent_num(logical_share) == 1 {
-                let input: LogicalPlanRef = logical_share.input();
-                return input.predicate_pushdown(predicate, ctx);
+                return logical_share.input().predicate_pushdown(predicate, ctx);
             }
 
-            // `LogicalShare` can't clone, so we implement predicate pushdown for `LogicalShare`
-            // here.
-            // Basically, we need to wait for all parents of `LogicalShare` to push down the
-            // predicate before we merge the predicates and pushdown.
-            let parent_has_pushed = ctx.add_predicate(self.id(), predicate.clone());
-            if parent_has_pushed == ctx.get_parent_num(logical_share) {
-                let merge_predicate = ctx
-                    .take_predicate(self.id())
-                    .expect("must have predicate")
-                    .into_iter()
-                    .map(|mut c| Condition {
-                        conjunctions: c
-                            .conjunctions
-                            .extract_if(.., |e| {
-                                // If predicates contain now, impure or correlated input ref, don't push through share operator.
-                                // The predicate with now() function is regarded as a temporal filter predicate, which will be transformed to a temporal filter operator and can not do the OR operation with other predicates.
-                                let mut finder = ExprCorrelatedIdFinder::default();
-                                finder.visit_expr(e);
-                                e.count_nows() == 0
-                                    && e.is_pure()
-                                    && !finder.has_correlated_input_ref()
-                            })
-                            .collect(),
-                    })
-                    .reduce(|a, b| a.or(b))
-                    .unwrap();
-
-                // rewrite the *entire* predicate for `LogicalShare`
-                // before pushing down to whatever plan node(s)
-                // ps: the reason here contains a "special" optimization
-                // rather than directly apply explicit rule in stream or
-                // batch plan optimization, is because predicate push down
-                // will *instantly* push down all predicates, and rule(s)
-                // can not be applied in the middle.
-                // thus we need some on-the-fly (in the middle) rewrite
-                // technique to help with this kind of optimization.
-                let mut expr_rewriter = ExpressionSimplifyRewriter {};
-                let mut new_predicate = Condition::true_cond();
-
-                for c in merge_predicate.conjunctions {
-                    let c = Condition::with_expr(expr_rewriter.rewrite_cond(c));
-                    // rebuild the conjunctions
-                    new_predicate = new_predicate.and(c);
+            if ctx.is_collecting() {
+                if let Some(merged_predicate) = ctx.add_predicate(logical_share, predicate.clone())
+                {
+                    // Continue collection below the share only after every parent has
+                    // contributed. Rewriting happens in the next phase.
+                    let _ = logical_share
+                        .input()
+                        .predicate_pushdown(merged_predicate, ctx);
                 }
-
-                let input: LogicalPlanRef = logical_share.input();
-                let input = input.predicate_pushdown(new_predicate, ctx);
-                logical_share.replace_input(input);
+                LogicalFilter::create(self.clone(), predicate)
+            } else {
+                ctx.ensure_share_rebuilt(logical_share);
+                let refreshed_share: LogicalPlanRef =
+                    LogicalShare::from_share_id(self.ctx(), logical_share.share_id()).into();
+                LogicalFilter::create(refreshed_share, predicate)
             }
-            LogicalFilter::create(self.clone(), predicate)
         } else {
             // Dispatch to dyn PlanNode instead of PlanRef.
             let dyn_t = self.deref();
@@ -603,7 +580,11 @@ impl LogicalPlanRef {
 
 impl ColPrunable for LogicalPlanRef {
     fn prune_col(&self, required_cols: &[usize], ctx: &mut ColumnPruningContext) -> LogicalPlanRef {
-        let res = self.prune_col_inner(required_cols, ctx);
+        let res = if ctx.is_running() {
+            self.prune_col_inner(required_cols, ctx)
+        } else {
+            ctx.run(self.clone(), required_cols)
+        };
         #[cfg(debug_assertions)]
         super::heuristic_optimizer::HeuristicOptimizer::check_equivalent_plan(
             "column pruning",
@@ -623,7 +604,11 @@ impl PredicatePushdown for LogicalPlanRef {
         #[cfg(debug_assertions)]
         let predicate_clone = predicate.clone();
 
-        let res = self.predicate_pushdown_inner(predicate, ctx);
+        let res = if ctx.is_running() {
+            self.predicate_pushdown_inner(predicate, ctx)
+        } else {
+            ctx.run(self.clone(), predicate)
+        };
 
         #[cfg(debug_assertions)]
         super::heuristic_optimizer::HeuristicOptimizer::check_equivalent_plan(
@@ -640,9 +625,7 @@ impl<C: ConventionMarker> PlanRef<C> {
     pub fn clone_root_with_inputs(&self, inputs: &[PlanRef<C>]) -> PlanRef<C> {
         if let Some(share) = self.as_share_node() {
             assert_eq!(inputs.len(), 1);
-            // We can't clone `LogicalShare`, but only can replace input instead.
-            share.replace_input(inputs[0].clone());
-            self.clone()
+            share.replace_input(inputs[0].clone())
         } else {
             // Dispatch to dyn PlanNode instead of PlanRef.
             let dyn_t = self.deref();
@@ -1275,13 +1258,11 @@ pub use stream_vector_index_lookup_join::StreamVectorIndexLookupJoin;
 pub use stream_vector_index_write::StreamVectorIndexWrite;
 pub use stream_watermark_filter::StreamWatermarkFilter;
 
-use crate::expr::{ExprImpl, ExprRewriter, ExprVisitor, InputRef, Literal};
+use crate::expr::{ExprRewriter, ExprVisitor, Literal};
 use crate::optimizer::optimizer_context::OptimizerContextRef;
 use crate::optimizer::plan_node::expr_visitable::ExprVisitable;
 use crate::optimizer::plan_rewriter::PlanCloner;
-use crate::optimizer::plan_visitor::{
-    DefaultBehavior, DefaultValue, ExprCorrelatedIdFinder, LogicalPlanVisitor,
-};
+use crate::optimizer::plan_visitor::{DefaultBehavior, DefaultValue, LogicalPlanVisitor};
 use crate::scheduler::SchedulerResult;
 use crate::stream_fragmenter::BuildFragmentGraphState;
 use crate::utils::{ColIndexMapping, Condition, DynEq, DynHash, Endo, Layer, Visit};

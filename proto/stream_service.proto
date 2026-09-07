@@ -147,13 +147,16 @@ message BarrierCompleteResponse {
 
 message StreamingControlStreamRequest {
   message InitRequest {
-    string term_id = 1;
+    reserved 1;
+    reserved "term_id";
   }
 
   message CreatePartialGraphRequest {
     uint64 partial_graph_id = 1;
     reserved 2;
     reserved "database_id";
+    // Identifies the database recovery incarnation of this partial graph.
+    string term_id = 3;
   }
 
   message RemovePartialGraphRequest {

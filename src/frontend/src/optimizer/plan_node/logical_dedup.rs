@@ -89,6 +89,24 @@ impl PredicatePushdown for LogicalDedup {
 }
 
 impl ToStream for LogicalDedup {
+    fn try_better_locality(&self, columns: &[usize]) -> Option<PlanRef> {
+        if columns.is_empty() {
+            return None;
+        }
+
+        // Dedup stores rows with dedup columns as the primary key in its internal state
+        // table, so it can directly satisfy locality requests on a prefix of its dedup columns.
+        let dedup_cols = self.dedup_cols();
+        if columns.len() > dedup_cols.len() || columns != &dedup_cols[..columns.len()] {
+            return None;
+        }
+
+        // Similar to agg/topn, return the current plan directly instead of asking input for
+        // better locality first. The locality can be provided by the current Dedup itself
+        // after `to_stream`, while its input does not have it yet during logical rewrite.
+        Some(self.clone_with_input(self.input()).into())
+    }
+
     fn logical_rewrite_for_stream(
         &self,
         ctx: &mut RewriteStreamContext,

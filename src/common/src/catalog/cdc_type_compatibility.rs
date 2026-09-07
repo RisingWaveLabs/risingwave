@@ -150,6 +150,9 @@ fn postgres_source_column_type_compatible(
     // DATA_TYPE, such as ARRAY or USER-DEFINED, and is lowercased by the public entry point. For
     // auto schema change, meta only has the already-mapped RW type, so callers pass synthetic
     // candidates below that intentionally reuse these normalized validation tokens.
+    // Keep these compatibility rules aligned with `pg_type_to_rw_type` in
+    // `src/connector/src/source/cdc/external/postgres.rs`, which chooses the canonical RW type
+    // during schema discovery and schema changes.
     match postgres_type {
         "boolean" => rw_type == PbTypeName::Boolean,
         "bit" => char_max_length.is_none_or(|length| length == 1) && rw_type == PbTypeName::Boolean,
@@ -169,7 +172,7 @@ fn postgres_source_column_type_compatible(
             rw_type == PbTypeName::Time
         }
         "interval" => rw_type == PbTypeName::Interval,
-        "bytea" | "geometry" => rw_type == PbTypeName::Bytea,
+        "bytea" | "geometry" | "geography" => rw_type == PbTypeName::Bytea,
         "json" | "jsonb" => rw_type == PbTypeName::Jsonb,
         "date" => rw_type == PbTypeName::Date,
         "numeric" => matches!(
@@ -181,7 +184,7 @@ fn postgres_source_column_type_compatible(
         "array" => rw_type == PbTypeName::List,
         "user-defined" => match udt_name.map(str::to_ascii_lowercase).as_deref() {
             Some("citext") => rw_type == PbTypeName::Varchar,
-            Some("geometry") => rw_type == PbTypeName::Bytea,
+            Some("geometry" | "geography") => rw_type == PbTypeName::Bytea,
             Some("vector") => rw_type == PbTypeName::Vector,
             Some("ltree" | "hstore") | None => false,
             Some(_) => rw_type == PbTypeName::Varchar,

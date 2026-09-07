@@ -47,9 +47,9 @@ def_anyhow_newtype! {
     // TODO(error-handling): Remove implicit contexts below and specify ad-hoc context for each conversion.
 
     // Parsing errors
-    url::ParseError => "failed to parse url",
-    serde_json::Error => "failed to parse json",
-    csv::Error => "failed to parse csv",
+    url::ParseError => "failed to parse URL",
+    serde_json::Error => "failed to parse JSON",
+    csv::Error => "failed to parse CSV",
 
     uuid::Error => transparent, // believed to be self-explanatory
 

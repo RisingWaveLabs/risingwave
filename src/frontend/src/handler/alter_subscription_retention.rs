@@ -70,7 +70,7 @@ fn update_subscription_definition(definition: &str, retention: Value) -> Result<
         }
         _ => {
             return Err(ErrorCode::InternalError(
-                "Unexpected statement in subscription definition.".to_owned(),
+                "Unexpected statement in the subscription definition.".to_owned(),
             )
             .into());
         }

@@ -100,10 +100,10 @@ impl IndependentCheckpointJobControl {
         }
     }
 
-    pub(crate) fn pinned_upstream_log_epoch(&self) -> (u64, HashSet<TableId>) {
+    pub(crate) fn pinned_upstream_tables(&self) -> HashSet<TableId> {
         match self {
-            Self::CreatingStreamingJob(j) => j.pinned_upstream_log_epoch(),
-            Self::BatchRefresh(j) => j.pinned_upstream_log_epoch(),
+            Self::CreatingStreamingJob(j) => j.pinned_upstream_tables(),
+            Self::BatchRefresh(j) => j.pinned_upstream_tables(),
         }
     }
 

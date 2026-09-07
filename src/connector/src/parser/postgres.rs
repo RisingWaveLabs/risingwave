@@ -156,7 +156,7 @@ pub fn postgres_cell_to_scalar_impl_strict(
             // Decimal is more efficient than PgNumeric in ScalarAdapter
             try_handle_data_type!(row, i, name, Decimal)
         }
-        DataType::Varchar | DataType::Int256 => {
+        DataType::Varchar | DataType::Int256 | DataType::Struct(_) => {
             match row
                 .try_get::<_, Option<ScalarAdapter>>(i)
                 .with_context(|| format!("failed to decode PostgreSQL snapshot column `{name}`"))?
@@ -217,7 +217,7 @@ pub fn postgres_cell_to_scalar_impl_strict(
                 }
             }
         },
-        DataType::Struct(_) | DataType::Serial | DataType::Map(_) | DataType::Variant => {
+        DataType::Serial | DataType::Map(_) | DataType::Variant => {
             bail!("unsupported PostgreSQL snapshot data type {data_type} for column `{name}`")
         }
     }

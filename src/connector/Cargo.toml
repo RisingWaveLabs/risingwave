@@ -92,6 +92,7 @@ google-cloud-pubsub = { package = "gcloud-pubsub", version = "1.5" }
 iceberg = { workspace = true }
 iceberg-catalog-glue = { workspace = true }
 iceberg-catalog-rest = { workspace = true }
+iceberg-storage-opendal = { workspace = true }
 indexmap = { workspace = true }
 itertools = { workspace = true }
 jni = { workspace = true }

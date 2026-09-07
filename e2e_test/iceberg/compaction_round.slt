@@ -1,0 +1,113 @@
+# Run with the ci-iceberg-compaction-round profile: each task admits only one plan.
+# Use scheduled Full compaction, not VACUUM, so every partition remains eligible
+# unless its files have moved beyond the round's fixed file-sequence boundary.
+
+statement ok
+DROP TABLE IF EXISTS iceberg_round;
+
+statement ok
+DROP CONNECTION IF EXISTS iceberg_round_conn;
+
+system ok
+./risedev mc rm --recursive --force hummock-minio/hummock001/iceberg_compaction_round/
+
+statement ok
+CREATE CONNECTION iceberg_round_conn WITH (
+    type = 'iceberg',
+    catalog.type = 'storage',
+    warehouse.path = 's3://hummock001/iceberg_compaction_round',
+    s3.endpoint = 'http://127.0.0.1:9301',
+    s3.region = 'us-east-1',
+    s3.access.key = 'hummockadmin',
+    s3.secret.key = 'hummockadmin'
+);
+
+statement ok
+SET iceberg_engine_connection = 'public.iceberg_round_conn';
+
+statement ok
+SET streaming_parallelism = 1;
+
+statement ok
+CREATE TABLE iceberg_round(id INT, part INT, PRIMARY KEY (part, id)) APPEND ONLY WITH (
+    format_version = 2,
+    partition_by = 'part',
+    commit_checkpoint_interval = 1,
+    enable_compaction = 'true',
+    compaction.type = 'full',
+    compaction.trigger_snapshot_count = '2',
+    compaction_interval_sec = '3600',
+    enable_snapshot_expiration = 'false'
+) ENGINE = iceberg;
+
+statement ok
+INSERT INTO iceberg_round VALUES (1, 1), (2, 2), (3, 3);
+
+statement ok
+FLUSH;
+
+# Wait for a separate first commit before producing the second file per partition.
+query TI retry 30 backoff 1s
+SELECT task_type, pending_snapshot_count
+FROM rw_iceberg_compaction_schedules
+WHERE sink_name = '__iceberg_sink_iceberg_round';
+----
+full 1
+
+query II retry 30 backoff 1s
+SELECT count(*), sum(record_count)
+FROM rw_iceberg_files
+WHERE source_name = '__iceberg_source_iceberg_round' AND content = 'Data';
+----
+3 3
+
+statement ok
+INSERT INTO iceberg_round VALUES (4, 1), (5, 2), (6, 3);
+
+statement ok
+FLUSH;
+
+# The second commit starts one round containing three partition plans. There are
+# no further sink commits: the remaining batches must run without another trigger.
+query I rowsort retry 60 backoff 1s
+SELECT record_count
+FROM rw_iceberg_files
+WHERE source_name = '__iceberg_source_iceberg_round' AND content = 'Data';
+----
+2
+2
+2
+
+# Drained returns to the normal interval. An immediate retry or a failed attempt's
+# short backoff must not be mistaken for round completion.
+query TIT retry 30 backoff 1s
+SELECT schedule_state, pending_snapshot_count,
+       NOT is_triggerable AND next_compaction_after_sec > 1800
+FROM rw_iceberg_compaction_schedules
+WHERE sink_name = '__iceberg_sink_iceberg_round';
+----
+idle 0 t
+
+# Two appends plus exactly three rewrites. Full compaction must not select an
+# earlier batch's output again, even though each new attempt loads the latest head.
+query III
+SELECT count(*), max(sequence_number),
+       sum(coalesce((summary->>'deleted-data-files')::INT, 0))
+FROM rw_iceberg_snapshots
+WHERE source_name = '__iceberg_source_iceberg_round';
+----
+5 5 6
+
+query II
+SELECT count(*), sum(id) FROM iceberg_round;
+----
+6 21
+
+statement ok
+DROP TABLE iceberg_round;
+
+statement ok
+DROP CONNECTION iceberg_round_conn;
+
+system ok
+./risedev mc rm --recursive --force hummock-minio/hummock001/iceberg_compaction_round/

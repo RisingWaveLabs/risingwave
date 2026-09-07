@@ -76,7 +76,11 @@ impl HummockManager {
             .metrics
             .time_travel_vacuum_metadata_latency
             .start_timer();
-        let min_pinned_version_id = self.context_info.read().await.min_pinned_version_id();
+        let min_pinned_version_id = self
+            .context_info
+            .read_with_process_name("truncate_time_travel_metadata")
+            .await
+            .min_pinned_version_id();
         let sql_store = self.env.meta_store_ref();
         let txn = sql_store.conn.begin().await?;
 

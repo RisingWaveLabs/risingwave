@@ -47,8 +47,8 @@ impl<'a> FromSql<'a> for ScalarImpl {
             {
                 ScalarImpl::from(String::from_sql(ty, raw)?)
             }
-            // PostGIS geometry type: read as EWKB bytes
-            ref ty if ty.name() == "geometry" => {
+            // PostGIS spatial types: read as EWKB bytes.
+            ref ty if matches!(ty.name(), "geometry" | "geography") => {
                 ScalarImpl::from(Vec::<u8>::from_sql(ty, raw)?.into_boxed_slice())
             }
             // Serial, Int256, Struct, List and Decimal are not supported here
@@ -83,6 +83,7 @@ impl<'a> FromSql<'a> for ScalarImpl {
             || ty.name() == "ltree"
             || ty.name() == "lquery"
             || ty.name() == "ltxtquery"
+            || ty.name() == "geography"
             || ty.name() == "geometry")
     }
 }

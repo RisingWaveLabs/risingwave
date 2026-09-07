@@ -440,7 +440,7 @@ pub async fn handle_connection<S, SM>(
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
 
     use bytes::Bytes;
     use futures::StreamExt;
@@ -466,6 +466,8 @@ mod tests {
 
     struct MockSessionManager {}
     struct MockSession {}
+
+    const STREAMING_TEST_QUERY: &str = "SELECT 'pgwire_streaming_test'";
 
     impl SessionManager for MockSessionManager {
         type Error = BoxedError;
@@ -525,26 +527,42 @@ mod tests {
 
         async fn parse(
             self: Arc<Self>,
-            _sql: Option<Statement>,
+            sql: Option<Statement>,
             _params_types: Vec<Option<DataType>>,
         ) -> Result<String, Self::Error> {
-            Ok(String::new())
+            Ok(sql.map(|stmt| stmt.to_string()).unwrap_or_default())
         }
 
         fn bind(
             self: Arc<Self>,
-            _prepare_statement: String,
+            prepare_statement: String,
             _params: Vec<Option<Bytes>>,
             _param_formats: Vec<types::Format>,
             _result_formats: Vec<types::Format>,
         ) -> Result<String, Self::Error> {
-            Ok(String::new())
+            Ok(prepare_statement)
         }
 
         async fn execute(
             self: Arc<Self>,
-            _portal: String,
+            portal: String,
         ) -> Result<PgResponse<BoxStream<'static, RowSetResult>>, Self::Error> {
+            if portal == STREAMING_TEST_QUERY {
+                let first_row = futures::stream::once(async {
+                    Ok(vec![Row::new(vec![Some(Bytes::from(vec![
+                        b'x';
+                        128 * 1024
+                    ]))])])
+                });
+                let remaining_rows = futures::stream::pending();
+                return Ok(PgResponse::builder(StatementType::SELECT)
+                    .values(
+                        first_row.chain(remaining_rows).boxed(),
+                        vec![PgFieldDescriptor::new("".to_owned(), 1043, -1)],
+                    )
+                    .into());
+            }
+
             Ok(PgResponse::builder(StatementType::SELECT)
                 .values(
                     futures::stream::iter(vec![Ok(vec![Row::new(vec![Some(Bytes::new())])])])
@@ -636,6 +654,7 @@ mod tests {
                     redact_sql_option_keywords: None,
                     message_memory_manager: MessageMemoryManager::new(u64::MAX, u64::MAX, u64::MAX)
                         .into(),
+                    stream_flush_threshold_bytes: 64 * 1024,
                 },
                 CancellationToken::new(), // dummy
             )
@@ -686,6 +705,56 @@ mod tests {
             format!("host={} port={}", dir.path().to_str().unwrap(), port),
         )
         .await;
+    }
+
+    #[cfg(not(madsim))]
+    #[tokio::test]
+    async fn test_large_query_row_is_streamed_before_query_finishes() {
+        let port: i16 = 10001;
+        let dir = tempfile::TempDir::new().unwrap();
+        let sock = dir.path().join(format!(".s.PGSQL.{port}"));
+        let bind_addr = format!("unix:{}", sock.to_str().unwrap());
+        let pg_config = format!("host={} port={port}", dir.path().to_str().unwrap());
+        let cancellation = CancellationToken::new();
+
+        let server_cancellation = cancellation.clone();
+        tokio::spawn(async move {
+            pg_serve(
+                &bind_addr,
+                socket2::TcpKeepalive::new(),
+                Arc::new(MockSessionManager {}),
+                ConnectionContext {
+                    tls_config: None,
+                    redact_sql_option_keywords: None,
+                    message_memory_manager: MessageMemoryManager::new(u64::MAX, u64::MAX, u64::MAX)
+                        .into(),
+                    stream_flush_threshold_bytes: 64 * 1024,
+                },
+                server_cancellation,
+            )
+            .await
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let (client, connection) = tokio_postgres::connect(&pg_config, NoTls).await.unwrap();
+        let connection_handle = tokio::spawn(connection);
+        let params: &[&str] = &[];
+        let rows = client
+            .query_raw(STREAMING_TEST_QUERY, params)
+            .await
+            .unwrap();
+        futures::pin_mut!(rows);
+
+        let first_row = tokio::time::timeout(Duration::from_secs(5), rows.next())
+            .await
+            .expect("first row should be sent before the result stream finishes")
+            .unwrap()
+            .unwrap();
+        assert_eq!(first_row.get::<_, &str>(0).len(), 128 * 1024);
+
+        drop(client);
+        cancellation.cancel();
+        connection_handle.abort();
     }
 
     mod jwt_validation_tests {

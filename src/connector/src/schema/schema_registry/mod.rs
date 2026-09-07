@@ -38,7 +38,7 @@ pub fn get_subject_by_strategy(
     let record_option_name = if is_key { "key.message" } else { "message" };
     let build_error_lack_field = || {
         invalid_option_error!(
-            "{} expect non-empty field {}",
+            "{} requires a non-empty `{}` field",
             name_strategy.as_str_name(),
             record_option_name,
         )

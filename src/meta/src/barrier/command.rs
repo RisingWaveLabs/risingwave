@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::fmt::{Display, Formatter};
 
@@ -22,8 +21,6 @@ use risingwave_common::catalog::{DatabaseId, TableId};
 use risingwave_common::hash::{ActorMapping, VnodeCountCompat};
 use risingwave_common::id::{JobId, SinkId, SourceId};
 use risingwave_common::must_match;
-use risingwave_common::types::Timestamptz;
-use risingwave_common::util::epoch::Epoch;
 use risingwave_connector::source::{CdcTableSnapshotSplitRaw, SplitImpl};
 use risingwave_hummock_sdk::change_log::build_table_change_log_delta;
 use risingwave_hummock_sdk::vector_index::VectorIndexDelta;
@@ -57,7 +54,6 @@ use super::info::InflightDatabaseInfo;
 use crate::barrier::backfill_order_control::get_nodes_with_backfill_dependencies;
 use crate::barrier::complete_task::CompleteBarrierTask;
 use crate::barrier::edge_builder::FragmentEdgeBuildResult;
-use crate::barrier::info::BarrierInfo;
 use crate::barrier::partial_graph::PartialGraphBarrierInfo;
 use crate::barrier::rpc::{ControlStreamManager, to_partial_graph_id};
 use crate::barrier::utils::{collect_new_vector_index_info, collect_resp_info};
@@ -839,25 +835,13 @@ fn sink_original_schema_fields(columns: &[PbColumnCatalog]) -> Vec<PbField> {
         .collect()
 }
 
-impl BarrierInfo {
-    fn get_truncate_epoch(&self, retention_second: u64) -> Epoch {
-        let Some(truncate_timestamptz) = Timestamptz::from_secs(
-            self.prev_epoch.value().as_timestamptz().timestamp() - retention_second as i64,
-        ) else {
-            warn!(retention_second, prev_epoch = ?self.prev_epoch.value(), "invalid retention second value");
-            return self.prev_epoch.value();
-        };
-        Epoch::from_unix_millis(truncate_timestamptz.timestamp_millis() as u64)
-    }
-}
-
 impl Command {
     pub(super) fn collect_commit_epoch_info(
         database_info: &InflightDatabaseInfo,
         barrier_info: &PartialGraphBarrierInfo,
         task: &mut CompleteBarrierTask,
         resps: Vec<BarrierCompleteResponse>,
-        backfill_pinned_log_epoch: HashMap<JobId, (u64, HashSet<TableId>)>,
+        backfill_pinned_upstream_tables: HashSet<TableId>,
     ) {
         let (
             sst_to_context,
@@ -888,38 +872,16 @@ impl Command {
             _ => vec![],
         };
 
-        let mut mv_log_store_truncate_epoch = HashMap::new();
+        let mut log_store_table_ids = HashSet::new();
         // TODO: may collect cross db snapshot backfill
-        let mut update_truncate_epoch =
-            |table_id: TableId, truncate_epoch| match mv_log_store_truncate_epoch.entry(table_id) {
-                Entry::Occupied(mut entry) => {
-                    let prev_truncate_epoch = entry.get_mut();
-                    if truncate_epoch < *prev_truncate_epoch {
-                        *prev_truncate_epoch = truncate_epoch;
-                    }
-                }
-                Entry::Vacant(entry) => {
-                    entry.insert(truncate_epoch);
-                }
-            };
-        for (mv_table_id, max_retention) in database_info.max_subscription_retention() {
-            let truncate_epoch = barrier_info
-                .barrier_info
-                .get_truncate_epoch(max_retention)
-                .0;
-            update_truncate_epoch(mv_table_id, truncate_epoch);
-        }
-        for (_, (backfill_epoch, upstream_mv_table_ids)) in backfill_pinned_log_epoch {
-            for mv_table_id in upstream_mv_table_ids {
-                update_truncate_epoch(mv_table_id, backfill_epoch);
-            }
-        }
+        log_store_table_ids.extend(database_info.subscribed_tables());
+        log_store_table_ids.extend(backfill_pinned_upstream_tables);
 
         let table_new_change_log = build_table_change_log_delta(
             old_value_ssts.into_iter(),
             synced_ssts.iter().map(|sst| &sst.sst_info),
             must_match!(&barrier_info.barrier_info.kind, BarrierKind::Checkpoint(epochs) => epochs),
-            mv_log_store_truncate_epoch.into_iter(),
+            log_store_table_ids.into_iter(),
         );
 
         let epoch = barrier_info.barrier_info.prev_epoch();
@@ -1098,7 +1060,7 @@ impl Command {
                         let new_sink_actors = stream_actors
                             .get(sink_fragment_id)
                             .unwrap_or_else(|| {
-                                panic!("upstream sink fragment {sink_fragment_id} not exist")
+                                panic!("upstream sink fragment {sink_fragment_id} does not exist")
                             })
                             .iter()
                             .map(|actor| {

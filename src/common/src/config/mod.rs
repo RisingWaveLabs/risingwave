@@ -473,6 +473,10 @@ pub mod default {
             1000
         }
 
+        pub fn table_change_log_truncate_interval_sec() -> u64 {
+            600
+        }
+
         pub fn enable_state_table_vnode_stats_pruning() -> bool {
             false
         }

@@ -1,0 +1,54 @@
+name: Sync Docker Image
+
+permissions:
+  contents: read
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Existing RisingWave image tag to sync"
+        required: true
+        type: string
+      ghcr_to_dockerhub:
+        description: "Sync from GHCR to Docker Hub (disable to reverse the direction)"
+        required: true
+        type: boolean
+        default: true
+
+jobs:
+  sync_image:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate image tag
+        env:
+          INPUT_IMAGE_TAG: ${{ inputs.image_tag }}
+        run: |
+          if [[ ! "$INPUT_IMAGE_TAG" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]]; then
+            echo "Invalid image_tag: $INPUT_IMAGE_TAG"
+            exit 1
+          fi
+
+          echo "IMAGE_TAG=$INPUT_IMAGE_TAG" >> "$GITHUB_ENV"
+
+      - name: Trigger Docker pipeline via Buildkite
+        id: trigger_docker
+        uses: buildkite/trigger-pipeline-action@v2.3.0
+        with:
+          buildkite_api_access_token: ${{ secrets.BUILDKITE_TOKEN }}
+          pipeline: "risingwavelabs/docker"
+          branch: ${{ github.ref_name }}
+          commit: ${{ github.sha }}
+          message: ":github: Sync Docker image: ${{ env.IMAGE_TAG }}"
+          build_env_vars: '{ "AD_HOC": "true", "SYNC_DOCKER_IMAGE": "true", "GHCR_TO_DOCKERHUB": "${{ inputs.ghcr_to_dockerhub }}", "IMAGE_TAG": "${{ env.IMAGE_TAG }}" }'
+
+      - name: Summarize Buildkite build
+        if: ${{ always() }}
+        env:
+          DOCKER_BUILD_URL: ${{ steps.trigger_docker.outputs.url }}
+        run: |
+          if [[ -n "$DOCKER_BUILD_URL" ]]; then
+            echo "- [Docker image sync build]($DOCKER_BUILD_URL)" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "- Docker image sync build: URL unavailable (trigger failed before returning one)." >> "$GITHUB_STEP_SUMMARY"
+          fi

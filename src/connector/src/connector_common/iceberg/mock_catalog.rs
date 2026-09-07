@@ -22,7 +22,8 @@ use iceberg::spec::{
 };
 use iceberg::table::Table;
 use iceberg::{
-    Catalog as CatalogV2, Namespace, NamespaceIdent, TableCommit, TableCreation, TableIdent,
+    Catalog as CatalogV2, Namespace, NamespaceIdent, Runtime, TableCommit, TableCreation,
+    TableIdent,
 };
 
 /// A mock catalog for iceberg used for plan test.
@@ -36,7 +37,7 @@ impl MockCatalog {
 
 impl MockCatalog {
     fn build_table(name: &str, schema: Schema, partition_spec: UnboundPartitionSpec) -> Table {
-        let file_io = FileIO::from_path("memory://").unwrap().build().unwrap();
+        let file_io = FileIO::new_with_memory();
         let table_creation = TableCreation {
             name: "ignore".to_owned(),
             location: Some("1".to_owned()),
@@ -52,6 +53,7 @@ impl MockCatalog {
                 name.to_owned(),
             ))
             .file_io(file_io)
+            .runtime(Runtime::try_current().unwrap())
             .metadata(
                 TableMetadataBuilder::from_table_creation(table_creation)
                     .unwrap()
@@ -225,6 +227,10 @@ impl CatalogV2 for MockCatalog {
     /// Drop a table from the catalog.
     async fn drop_table(&self, _table: &TableIdent) -> iceberg::Result<()> {
         todo!()
+    }
+
+    async fn purge_table(&self, table: &TableIdent) -> iceberg::Result<()> {
+        self.drop_table(table).await
     }
 
     /// Check if a table exists in the catalog.

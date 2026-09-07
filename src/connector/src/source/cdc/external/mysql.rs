@@ -28,7 +28,7 @@ use risingwave_common::catalog::{CDC_OFFSET_COLUMN_NAME, ColumnDesc, ColumnId, F
 use risingwave_common::row::OwnedRow;
 use risingwave_common::types::{DataType, Datum, Decimal, F32, ScalarImpl};
 use risingwave_common::util::iter_util::ZipEqFast;
-use sea_schema::mysql::def::{ColumnDefault, ColumnKey, ColumnType, NumericAttr};
+use sea_schema::mysql::def::{ColumnDefault, ColumnType, IndexInfo, NumericAttr};
 use sea_schema::mysql::discovery::SchemaDiscovery;
 use sea_schema::mysql::query::SchemaQueryBuilder;
 use sea_schema::sea_query::{Alias, IntoIden};
@@ -155,10 +155,10 @@ impl MySqlExternalTable {
         let schema = Alias::new(config.database.as_str()).into_iden();
         let table = Alias::new(config.table.as_str()).into_iden();
         let columns = schema_discovery
-            .discover_columns(schema, table, &system_info)
+            .discover_columns(schema.clone(), table.clone(), &system_info)
             .await?;
+        let indexes = schema_discovery.discover_indexes(schema, table).await?;
         let mut column_descs = vec![];
-        let mut pk_names = vec![];
         for col in columns {
             let data_type = mysql_type_to_rw_type(&col.col_type)?;
             // column name in mysql is case-insensitive, convert to lowercase
@@ -187,14 +187,10 @@ impl MySqlExternalTable {
             };
 
             column_descs.push(column_desc);
-            if matches!(col.key, ColumnKey::Primary) {
-                pk_names.push(col_name);
-            }
         }
 
-        if pk_names.is_empty() {
-            return Err(anyhow!("MySQL table doesn't define the primary key").into());
-        }
+        let pk_names = primary_key_names(&indexes)
+            .ok_or_else(|| anyhow!("MySQL table doesn't define the primary key"))?;
         Ok(Self {
             column_descs,
             pk_names,
@@ -208,6 +204,20 @@ impl MySqlExternalTable {
     pub fn pk_names(&self) -> &Vec<String> {
         &self.pk_names
     }
+}
+
+fn primary_key_names(indexes: &[IndexInfo]) -> Option<Vec<String>> {
+    indexes
+        .iter()
+        .find(|index| index.name.eq_ignore_ascii_case("PRIMARY"))
+        .map(|index| {
+            index
+                .parts
+                .iter()
+                .map(|part| part.column.to_lowercase())
+                .collect()
+        })
+        .filter(|names: &Vec<_>| !names.is_empty())
 }
 
 fn derive_default_value(default: ColumnDefault, data_type: &DataType) -> ConnectorResult<Datum> {
@@ -849,9 +859,12 @@ mod tests {
     use maplit::{convert_args, hashmap};
     use risingwave_common::catalog::{ColumnDesc, ColumnId, Field, Schema};
     use risingwave_common::types::DataType;
-    use sea_schema::mysql::def::ColumnType;
+    use sea_schema::mysql::def::{ColumnType, IndexInfo, IndexOrder, IndexPart, IndexType};
 
-    use super::{mysql_type_is_unsigned_bigint, mysql_type_to_rw_type, type_name_to_mysql_type};
+    use super::{
+        mysql_type_is_unsigned_bigint, mysql_type_to_rw_type, primary_key_names,
+        type_name_to_mysql_type,
+    };
     use crate::source::cdc::external::mysql::MySqlExternalTable;
     use crate::source::cdc::external::{
         CdcOffset, ExternalTableConfig, ExternalTableReader, MySqlExternalTableReader, MySqlOffset,
@@ -860,6 +873,35 @@ mod tests {
 
     fn parse_mysql_type_name(ty_name: &str) -> ColumnType {
         type_name_to_mysql_type(ty_name).unwrap()
+    }
+
+    #[test]
+    fn test_primary_key_names_preserve_index_order() {
+        let indexes = vec![IndexInfo {
+            unique: true,
+            name: "PRIMARY".to_owned(),
+            parts: ["RelatedID", "TypeID", "ClientID"]
+                .into_iter()
+                .map(|column| IndexPart {
+                    column: column.to_owned(),
+                    order: IndexOrder::Ascending,
+                    sub_part: None,
+                })
+                .collect(),
+            nullable: false,
+            idx_type: IndexType::BTree,
+            comment: String::new(),
+            functional: false,
+        }];
+
+        assert_eq!(
+            primary_key_names(&indexes),
+            Some(vec![
+                "relatedid".to_owned(),
+                "typeid".to_owned(),
+                "clientid".to_owned(),
+            ])
+        );
     }
 
     #[test]

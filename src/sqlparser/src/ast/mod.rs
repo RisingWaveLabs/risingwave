@@ -1261,6 +1261,13 @@ pub enum WaitTarget {
     Index(ObjectName),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FileCacheType {
+    Meta,
+    Data,
+    All,
+}
+
 /// A top-level statement (SELECT, INSERT, CREATE, etc.)
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -1700,6 +1707,10 @@ pub enum Statement {
     AlterSystem {
         param: Ident,
         value: SetVariableValue,
+    },
+    /// ALTER SYSTEM CLEAR FILE CACHE [META | DATA | ALL]
+    AlterSystemClearFileCache {
+        cache_type: FileCacheType,
     },
     /// FLUSH the current barrier.
     ///
@@ -2476,6 +2487,14 @@ impl Statement {
             Statement::AlterSystem { param, value } => {
                 f.write_str("ALTER SYSTEM SET ")?;
                 write!(f, "{param} = {value}",)
+            }
+            Statement::AlterSystemClearFileCache { cache_type } => {
+                f.write_str("ALTER SYSTEM CLEAR FILE CACHE ")?;
+                match cache_type {
+                    FileCacheType::Meta => f.write_str("META"),
+                    FileCacheType::Data => f.write_str("DATA"),
+                    FileCacheType::All => f.write_str("ALL"),
+                }
             }
             Statement::Flush => {
                 write!(f, "FLUSH")

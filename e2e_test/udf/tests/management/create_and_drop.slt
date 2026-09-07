@@ -9,7 +9,7 @@ def add(a, b):
   return a+b
 $$;
 
-statement error function with name add\(integer,integer\) exists
+statement error function named add\(integer,integer\) already exists
 create function add(int, int) returns int language sql as $$select $1 + $2$$;
 
 statement ok
@@ -28,7 +28,7 @@ def finish(state):
     return state
 $$;
 
-statement error function with name mysum\(integer\) exists
+statement error function named mysum\(integer\) already exists
 create aggregate mysum(value int) returns int language python as $$
 def create_state():
     return 0

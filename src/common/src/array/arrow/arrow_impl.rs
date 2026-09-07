@@ -1859,9 +1859,15 @@ pub fn is_parquet_schema_match_source_schema(
         | (ArrowType::Timestamp(_, None), RwType::Timestamp)
         | (ArrowType::Timestamp(_, Some(_)), RwType::Timestamptz)
         | (ArrowType::Date32, RwType::Date)
-        | (ArrowType::Time32(_) | ArrowType::Time64(_), RwType::Time)
+        | (
+            ArrowType::Time32(arrow_schema::TimeUnit::Second | arrow_schema::TimeUnit::Millisecond)
+            | ArrowType::Time64(
+                arrow_schema::TimeUnit::Microsecond | arrow_schema::TimeUnit::Nanosecond,
+            ),
+            RwType::Time,
+        )
         | (ArrowType::Interval(arrow_schema::IntervalUnit::MonthDayNano), RwType::Interval)
-        | (ArrowType::Utf8 | ArrowType::LargeUtf8, RwType::Varchar)
+        | (ArrowType::Utf8 | ArrowType::LargeUtf8 | ArrowType::Utf8View, RwType::Varchar)
         | (
             ArrowType::Binary | ArrowType::LargeBinary | ArrowType::FixedSizeBinary(_),
             RwType::Bytea,
@@ -3074,6 +3080,20 @@ mod tests {
             assert_eq!(Dummy.from_field(&field).unwrap(), RwType::Time);
         }
 
+        for arrow_type in [
+            ArrowType::Time32(arrow_schema::TimeUnit::Microsecond),
+            ArrowType::Time32(arrow_schema::TimeUnit::Nanosecond),
+            ArrowType::Time64(arrow_schema::TimeUnit::Second),
+            ArrowType::Time64(arrow_schema::TimeUnit::Millisecond),
+        ] {
+            let field = ArrowField::new("t", arrow_type, true);
+            assert!(!is_parquet_schema_match_source_schema(
+                field.data_type(),
+                &RwType::Time
+            ));
+            assert_from_arrow_error(Dummy.from_field(&field));
+        }
+
         let cases: Vec<(arrow_array::ArrayRef, TimeArray)> = vec![
             (
                 Arc::new(arrow_array::Time32SecondArray::from(vec![
@@ -3292,6 +3312,40 @@ mod tests {
         let array = Utf8Array::from_iter([None, Some("array"), Some("arrow")]);
         let arrow = arrow_array::StringArray::from(&array);
         assert_eq!(Utf8Array::from(&arrow), array);
+    }
+
+    #[test]
+    fn utf8_view_from_arrow_and_schema_match() {
+        let field = ArrowField::new("v", ArrowType::Utf8View, true);
+        assert!(is_parquet_field_match_source_schema(
+            &field,
+            &RwType::Varchar
+        ));
+        assert_eq!(Dummy.from_field(&field).unwrap(), RwType::Varchar);
+
+        let array: arrow_array::ArrayRef = Arc::new(arrow_array::StringViewArray::from(vec![
+            None,
+            Some("inline"),
+            Some("a string longer than twelve bytes"),
+        ]));
+        let ArrayImpl::Utf8(actual) = Dummy.from_array(&field, &array).unwrap() else {
+            panic!("expected RW Utf8Array");
+        };
+        assert_eq!(
+            actual,
+            Utf8Array::from_iter([
+                None,
+                Some("inline"),
+                Some("a string longer than twelve bytes"),
+            ])
+        );
+
+        let arrow_struct = ArrowType::Struct(vec![field].into());
+        let rw_struct = RwType::Struct(StructType::new(vec![("v", RwType::Varchar)]));
+        assert!(is_parquet_schema_match_source_schema(
+            &arrow_struct,
+            &rw_struct
+        ));
     }
 
     #[test]

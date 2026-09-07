@@ -339,6 +339,16 @@ enum HummockCommands {
         meta_cache_capacity_mb: Option<u64>,
         #[clap(long)]
         data_cache_capacity_mb: Option<u64>,
+        #[clap(
+            long,
+            help = "Clear the local file-backed meta cache on all compute nodes (best effort)"
+        )]
+        clear_meta_cache: bool,
+        #[clap(
+            long,
+            help = "Clear the local file-backed data cache on all compute nodes (best effort)"
+        )]
+        clear_data_cache: bool,
     },
     /// Table cache refill tools.
     #[clap(subcommand)]
@@ -923,12 +933,16 @@ async fn start_impl(opts: CliOpts, context: &CtlContext) -> Result<()> {
         Commands::Hummock(HummockCommands::ResizeCache {
             meta_cache_capacity_mb,
             data_cache_capacity_mb,
+            clear_meta_cache,
+            clear_data_cache,
         }) => {
             const MIB: u64 = 1024 * 1024;
             cmd_impl::hummock::resize_cache(
                 context,
                 meta_cache_capacity_mb.map(|v| v * MIB),
                 data_cache_capacity_mb.map(|v| v * MIB),
+                clear_meta_cache,
+                clear_data_cache,
             )
             .await?
         }

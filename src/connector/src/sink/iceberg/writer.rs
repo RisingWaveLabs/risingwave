@@ -392,7 +392,7 @@ impl IcebergSinkWriterInner {
             parquet_writer_builder,
             (config.target_file_size_mb() * 1024 * 1024) as usize,
             table.file_io().clone(),
-            DefaultLocationGenerator::new(table.metadata().clone())
+            DefaultLocationGenerator::new(table.metadata())
                 .map_err(|err| SinkError::Iceberg(anyhow!(err)))?,
             DefaultFileNameGenerator::new(
                 writer_param.actor_id.to_string(),
@@ -527,7 +527,7 @@ impl IcebergSinkWriterInner {
                 parquet_writer_builder,
                 (config.target_file_size_mb() * 1024 * 1024) as usize,
                 table.file_io().clone(),
-                DefaultLocationGenerator::new(table.metadata().clone())
+                DefaultLocationGenerator::new(table.metadata())
                     .map_err(|err| SinkError::Iceberg(anyhow!(err)))?,
                 DefaultFileNameGenerator::new(
                     writer_param.actor_id.to_string(),
@@ -538,7 +538,7 @@ impl IcebergSinkWriterInner {
             DataFileWriterBuilder::new(rolling_writer_builder)
         };
         let position_delete_builder = if use_deletion_vectors {
-            let location_generator = DefaultLocationGenerator::new(table.metadata().clone())
+            let location_generator = DefaultLocationGenerator::new(table.metadata())
                 .map_err(|err| SinkError::Iceberg(anyhow!(err)))?;
             PositionDeleteWriterBuilderType::DeletionVector(DeletionVectorWriterBuilder::new(
                 table.file_io().clone(),
@@ -558,7 +558,7 @@ impl IcebergSinkWriterInner {
                 parquet_writer_builder,
                 (config.target_file_size_mb() * 1024 * 1024) as usize,
                 table.file_io().clone(),
-                DefaultLocationGenerator::new(table.metadata().clone())
+                DefaultLocationGenerator::new(table.metadata())
                     .map_err(|err| SinkError::Iceberg(anyhow!(err)))?,
                 DefaultFileNameGenerator::new(
                     writer_param.actor_id.to_string(),
@@ -587,7 +587,7 @@ impl IcebergSinkWriterInner {
                 parquet_writer_builder,
                 (config.target_file_size_mb() * 1024 * 1024) as usize,
                 table.file_io().clone(),
-                DefaultLocationGenerator::new(table.metadata().clone())
+                DefaultLocationGenerator::new(table.metadata())
                     .map_err(|err| SinkError::Iceberg(anyhow!(err)))?,
                 DefaultFileNameGenerator::new(
                     writer_param.actor_id.to_string(),
@@ -1042,7 +1042,7 @@ pub fn resolve_partition_type(table: &Table, spec_id: i32, schema: &Schema) -> R
 /// The modified `DataFile` with large statistics truncated
 pub fn truncate_datafile(mut data_file: DataFile) -> DataFile {
     // Process lower_bounds - remove entries with large values
-    data_file.lower_bounds.retain(|field_id, datum| {
+    data_file.lower_bounds_mut().retain(|field_id, datum| {
         // Use to_bytes() to get the actual binary size without JSON serialization overhead
         let size = match datum.to_bytes() {
             Ok(bytes) => bytes.len(),
@@ -1061,7 +1061,7 @@ pub fn truncate_datafile(mut data_file: DataFile) -> DataFile {
     });
 
     // Process upper_bounds - remove entries with large values
-    data_file.upper_bounds.retain(|field_id, datum| {
+    data_file.upper_bounds_mut().retain(|field_id, datum| {
         // Use to_bytes() to get the actual binary size without JSON serialization overhead
         let size = match datum.to_bytes() {
             Ok(bytes) => bytes.len(),

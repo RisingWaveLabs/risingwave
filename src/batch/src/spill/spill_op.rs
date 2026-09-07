@@ -67,15 +67,11 @@ impl SpillOp {
         let op = match spill_backend {
             SpillBackend::Disk => {
                 let builder = Fs::default().root(&root.to_string_lossy());
-                Operator::new(builder)?
-                    .layer(RetryLayer::default())
-                    .finish()
+                Operator::new(builder)?.layer(RetryLayer::default())
             }
             SpillBackend::Memory => {
                 let builder = Memory::default().root(&root.to_string_lossy());
-                Operator::new(builder)?
-                    .layer(RetryLayer::default())
-                    .finish()
+                Operator::new(builder)?.layer(RetryLayer::default())
             }
         };
         Ok(SpillOp { op })
@@ -89,11 +85,9 @@ impl SpillOp {
 
         let builder = Fs::default().root(&root.to_string_lossy());
 
-        let op: Operator = Operator::new(builder)?
-            .layer(RetryLayer::default())
-            .finish();
+        let op: Operator = Operator::new(builder)?.layer(RetryLayer::default());
 
-        op.remove_all("/").await
+        op.delete_with("/").recursive(true).await
     }
 
     pub async fn writer_with(&self, name: &str) -> Result<opendal::Writer> {
@@ -149,7 +143,7 @@ impl Drop for SpillOp {
     fn drop(&mut self) {
         let op = self.op.clone();
         tokio::task::spawn(async move {
-            let result = op.remove_all("/").await;
+            let result = op.delete_with("/").recursive(true).await;
             if let Err(error) = result {
                 error!(
                     error = %error.as_report(),

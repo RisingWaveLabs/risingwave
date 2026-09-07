@@ -1,0 +1,56 @@
+# Regression test for creating multiple sinks into the same target table.
+# The second CREATE SINK must not loop in sink-into-table cycle detection.
+
+statement ok
+create table multi_sink_source_1 (v int primary key);
+
+statement ok
+create table multi_sink_source_2 (v int primary key);
+
+statement ok
+create materialized view multi_sink_mv_1 as select v from multi_sink_source_1;
+
+statement ok
+create materialized view multi_sink_mv_2 as select v from multi_sink_source_2;
+
+statement ok
+create table multi_sink_target (v int primary key);
+
+statement ok
+create sink multi_sink_1 into multi_sink_target from multi_sink_mv_1;
+
+statement ok
+create sink multi_sink_2 into multi_sink_target from multi_sink_mv_2;
+
+query I
+select count(*) from rw_sinks where name in ('multi_sink_1', 'multi_sink_2');
+----
+2
+
+statement error sink.*depends on it
+drop table multi_sink_target;
+
+query I
+select count(*) from rw_sinks where name in ('multi_sink_1', 'multi_sink_2');
+----
+2
+
+statement ok
+drop table multi_sink_target cascade;
+
+query I
+select count(*) from rw_sinks where name in ('multi_sink_1', 'multi_sink_2');
+----
+0
+
+statement ok
+drop materialized view multi_sink_mv_1;
+
+statement ok
+drop materialized view multi_sink_mv_2;
+
+statement ok
+drop table multi_sink_source_1;
+
+statement ok
+drop table multi_sink_source_2;

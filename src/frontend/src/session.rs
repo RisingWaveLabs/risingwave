@@ -314,12 +314,12 @@ impl FrontendEnv {
             .advertise_addr
             .as_ref()
             .unwrap_or_else(|| {
-                tracing::warn!("advertise addr is not specified, defaulting to listen_addr");
+                tracing::warn!("advertise address is not specified; defaulting to listen_addr");
                 &opts.listen_addr
             })
             .parse()
             .unwrap();
-        info!("advertise addr is {}", frontend_address);
+        info!("advertise address is {}", frontend_address);
 
         let rpc_addr: HostAddr = opts.frontend_rpc_listener_addr.parse().unwrap();
         let internal_rpc_host_addr = HostAddr {
@@ -447,7 +447,7 @@ impl FrontendEnv {
             join_handles.push(join_handle);
             shutdown_senders.push(shutdown_sender);
         } else {
-            tracing::info!("Telemetry didn't start due to config");
+            tracing::info!("Telemetry did not start because it is disabled by configuration");
         }
 
         tokio::spawn(async move {
@@ -462,7 +462,7 @@ impl FrontendEnv {
                 .unwrap();
         });
         info!(
-            "Health Check RPC Listener is set up on {}",
+            "Health check RPC listener is listening on {}",
             opts.frontend_rpc_listener_addr.clone()
         );
 
@@ -546,7 +546,7 @@ impl FrontendEnv {
         let prometheus_selector = opts.prometheus_selector.unwrap_or_default();
 
         info!(
-            "Frontend  total_memory: {} batch_memory: {}",
+            "Frontend total memory: {}, batch memory: {}",
             convert(total_memory_bytes as _),
             convert(batch_memory_limit as _),
         );

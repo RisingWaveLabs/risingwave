@@ -53,7 +53,6 @@ periodic_tombstone_reclaim_compaction_interval_sec = 600
 move_table_size_limit = 10737418240
 split_group_size_limit = 68719476736
 cut_table_size_limit = 1073741824
-protect_drop_table_with_incoming_sink = false
 do_not_config_object_storage_lifecycle = false
 partition_vnode_count = 16
 table_high_write_throughput_threshold = 16777216
@@ -136,6 +135,7 @@ hummock_time_travel_filter_out_objects_list_version_batch_size = 10
 hummock_time_travel_filter_out_objects_list_delta_batch_size = 1000
 table_change_log_insert_batch_size = 1000
 table_change_log_delete_batch_size = 1000
+table_change_log_truncate_interval_sec = 600
 
 [meta.developer.compute_client_config]
 connect_timeout_secs = 5
@@ -188,6 +188,7 @@ pool_setup_concurrency = 0
 max_total_query_size_bytes = 1073741824
 min_single_query_size_bytes = 1048576
 max_single_query_size_bytes = 1073741824
+stream_flush_threshold_bytes = 65536
 webhook_auth_max_clock_skew_ms = 300000
 unsafe_enable_local_fs_connector = false
 
@@ -319,6 +320,7 @@ compactor_max_preload_meta_file_count = 32
 vector_file_block_size_kb = 1024
 time_travel_version_cache_capacity = 10
 table_change_log_cache_capacity = 60
+iceberg_compaction_memory_limit_mb = ""
 iceberg_compaction_enable_validate = false
 iceberg_compaction_max_record_batch_rows = 1024
 iceberg_compaction_min_size_per_partition_mb = 1024

@@ -18,6 +18,7 @@ use risingwave_common::catalog::FieldDisplay;
 use risingwave_pb::stream_plan::StreamScanType;
 
 use super::*;
+use crate::optimizer::ShareId;
 use crate::optimizer::property::RequiredDist;
 
 /// `ToStream` converts a logical plan node to streaming physical node
@@ -113,7 +114,7 @@ pub fn stream_enforce_eowc_requirement(
 
 #[derive(Debug, Clone)]
 pub struct RewriteStreamContext {
-    share_rewrite_map: HashMap<PlanNodeId, (LogicalPlanRef, ColIndexMapping)>,
+    share_rewrite_map: HashMap<ShareId, (LogicalPlanRef, ColIndexMapping)>,
     // Snapshot backfill needs upstream table primary-key semantics during logical rewrite
     // so operators above `LogicalScan` can preserve hidden primary-key columns before
     // `StreamTableScan` is built. Other backfill types keep logical stream-key semantics.
@@ -143,21 +144,21 @@ impl RewriteStreamContext {
 
     pub fn add_rewrite_result(
         &mut self,
-        plan_node_id: PlanNodeId,
+        share_id: ShareId,
         plan_ref: LogicalPlanRef,
         col_change: ColIndexMapping,
     ) {
         let prev = self
             .share_rewrite_map
-            .insert(plan_node_id, (plan_ref, col_change));
+            .insert(share_id, (plan_ref, col_change));
         assert!(prev.is_none());
     }
 
     pub fn get_rewrite_result(
         &self,
-        plan_node_id: PlanNodeId,
+        share_id: ShareId,
     ) -> Option<&(LogicalPlanRef, ColIndexMapping)> {
-        self.share_rewrite_map.get(&plan_node_id)
+        self.share_rewrite_map.get(&share_id)
     }
 }
 
@@ -209,7 +210,7 @@ impl BackfillType {
 
 #[derive(Debug, Clone)]
 pub struct ToStreamContext {
-    share_to_stream_map: HashMap<PlanNodeId, StreamPlanRef>,
+    share_to_stream_map: HashMap<ShareId, StreamPlanRef>,
     emit_on_window_close: bool,
     backfill_type: BackfillType,
 }
@@ -227,14 +228,14 @@ impl ToStreamContext {
         self.backfill_type
     }
 
-    pub fn add_to_stream_result(&mut self, plan_node_id: PlanNodeId, plan_ref: StreamPlanRef) {
+    pub fn add_to_stream_result(&mut self, share_id: ShareId, plan_ref: StreamPlanRef) {
         self.share_to_stream_map
-            .try_insert(plan_node_id, plan_ref)
+            .try_insert(share_id, plan_ref)
             .unwrap();
     }
 
-    pub fn get_to_stream_result(&self, plan_node_id: PlanNodeId) -> Option<&StreamPlanRef> {
-        self.share_to_stream_map.get(&plan_node_id)
+    pub fn get_to_stream_result(&self, share_id: ShareId) -> Option<&StreamPlanRef> {
+        self.share_to_stream_map.get(&share_id)
     }
 
     pub fn emit_on_window_close(&self) -> bool {

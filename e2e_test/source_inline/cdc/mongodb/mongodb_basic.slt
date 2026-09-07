@@ -22,6 +22,59 @@ WITH (
   collection.name = 'random_data.*'
 );
 
+# A regular-expression collection filter does not trigger database inference, so Debezium
+# still discovers every database and the limited user cannot list collections in config.
+statement error Failed to discover MongoDB collections with the configured user:.*not authorized on config to execute command.*listCollections
+CREATE TABLE users_insufficient_discovery_privilege (
+  _id JSONB PRIMARY KEY,
+  payload JSONB
+) WITH (
+  connector = 'mongodb-cdc',
+  mongodb.url = 'mongodb://rw_limited:risingwave@mongodb-auth:27017/?replicaSet=rs-auth&authSource=admin',
+  collection.name = 'rw_allowed[.]events'
+);
+
+# An unambiguous literal collection list infers Debezium's database include list and literal
+# match mode at runtime, avoiding discovery of databases that the limited user cannot access.
+statement ok
+CREATE TABLE users_inferred_database_list (
+  _id JSONB PRIMARY KEY,
+  payload JSONB
+) WITH (
+  connector = 'mongodb-cdc',
+  mongodb.url = 'mongodb://rw_limited:risingwave@mongodb-auth:27017/?replicaSet=rs-auth&authSource=admin',
+  collection.name = 'rw_allowed.events'
+);
+
+query I retry 20 backoff 1s
+SELECT count(*) FROM users_inferred_database_list;
+----
+1
+
+statement ok
+DROP TABLE users_inferred_database_list;
+
+# Restricting Debezium's database discovery to the authorized database avoids touching
+# config and allows both validation and ingestion to proceed.
+statement ok
+CREATE TABLE users_restricted_database_discovery (
+  _id JSONB PRIMARY KEY,
+  payload JSONB
+) WITH (
+  connector = 'mongodb-cdc',
+  mongodb.url = 'mongodb://rw_limited:risingwave@mongodb-auth:27017/?replicaSet=rs-auth&authSource=admin',
+  collection.name = 'rw_allowed.events',
+  debezium.database.include.list = 'rw_allowed'
+);
+
+query I retry 20 backoff 1s
+SELECT count(*) FROM users_restricted_database_discovery;
+----
+1
+
+statement ok
+DROP TABLE users_restricted_database_discovery;
+
 system ok
 mongosh 'mongodb://mongodb:27017' <<EOF
 db.all_types.insertOne({

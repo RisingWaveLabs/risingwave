@@ -71,6 +71,7 @@ pub use risingwave_pb::expr::expr_node::Type as ExprType;
 pub use secret_ref::SecretRef;
 pub use session_timezone::{SessionTimezone, TimestamptzExprFinder};
 pub use subquery::{Subquery, SubqueryKind};
+pub(crate) use table_function::expr_impl_to_string_fn;
 pub use table_function::{TableFunction, TableFunctionType};
 pub use type_inference::*;
 pub use user_defined_function::UserDefinedFunction;

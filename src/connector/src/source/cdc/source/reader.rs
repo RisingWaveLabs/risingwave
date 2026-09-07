@@ -160,20 +160,24 @@ impl<T: CdcSourceTypeTrait> SplitReader for CdcSplitReader<T> {
             let inited = match resp.control {
                 Some(info) => info.handshake_ok,
                 None => {
-                    tracing::error!(?source_id, "handshake message not received. {:?}", resp);
+                    tracing::error!(
+                        ?source_id,
+                        "did not receive the CDC handshake message: {:?}",
+                        resp
+                    );
                     false
                 }
             };
             if !inited {
                 bail!(
-                    "failed to start cdc connector due to timeout (default 60s).\n\
+                    "failed to start the CDC connector before the timeout (default: 60s).\n\
                     HINT: You can increase the timeout by:\n\
                     - Alter the running source: ALTER SOURCE <source_name> CONNECTOR WITH (cdc.source.wait.streaming.start.timeout = '<larger_value>');\n\
-                    - Set session variable and recreate the source: SET cdc_source_wait_streaming_start_timeout = <larger_value>;"
+                    - Set the session variable and recreate the source: SET cdc_source_wait_streaming_start_timeout = <larger_value>;"
                 );
             }
         }
-        tracing::info!(?source_id, "cdc connector started");
+        tracing::info!(?source_id, "CDC connector started");
 
         let instance = match T::source_type() {
             CdcSourceType::Mysql

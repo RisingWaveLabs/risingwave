@@ -307,3 +307,19 @@
     on r.b = l.b;
   expected_outputs:
   - batch_plan
+- id: mv_with_cte_single_reference
+  sql: |
+    create table t_cte (a int, b int, c int);
+    create materialized view mv_cte as with cte as (select a, b from t_cte where c > 0) select a, sum(b) as s from cte group by a;
+    set enable_mv_selection = true;
+    with cte as (select a, b from t_cte where c > 0) select a, sum(b) as s from cte group by a;
+  expected_outputs:
+  - batch_plan
+- id: mv_with_cte_multiple_references
+  sql: |
+    create table t_cte2 (a int, b int, c int);
+    create materialized view mv_cte2 as with cte as (select a, b from t_cte2 where c > 0) select c1.a, sum(c2.b) as s from cte c1 join cte c2 on c1.a = c2.a group by c1.a;
+    set enable_mv_selection = true;
+    with cte as (select a, b from t_cte2 where c > 0) select c1.a, sum(c2.b) as s from cte c1 join cte c2 on c1.a = c2.a group by c1.a;
+  expected_outputs:
+  - batch_plan

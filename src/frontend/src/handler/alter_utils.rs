@@ -58,25 +58,6 @@ pub(super) fn resolve_streaming_job_id_for_alter(
     alter_stmt_type: StatementType,
     alter_target: &str,
 ) -> Result<JobId> {
-    resolve_streaming_job_id_for_alter_impl(session, obj_name, alter_stmt_type, alter_target, false)
-}
-
-pub(super) fn resolve_streaming_job_id_for_alter_parallelism(
-    session: &SessionImpl,
-    obj_name: ObjectName,
-    alter_stmt_type: StatementType,
-    alter_target: &str,
-) -> Result<JobId> {
-    resolve_streaming_job_id_for_alter_impl(session, obj_name, alter_stmt_type, alter_target, true)
-}
-
-fn resolve_streaming_job_id_for_alter_impl(
-    session: &SessionImpl,
-    obj_name: ObjectName,
-    alter_stmt_type: StatementType,
-    alter_target: &str,
-    include_creating_table: bool,
-) -> Result<JobId> {
     let db_name = &session.database();
     let (schema_name, real_table_name) = Binder::resolve_schema_qualified_name(db_name, &obj_name)?;
     let search_path = session.config().search_path();
@@ -88,11 +69,8 @@ fn resolve_streaming_job_id_for_alter_impl(
         StatementType::ALTER_TABLE
         | StatementType::ALTER_MATERIALIZED_VIEW
         | StatementType::ALTER_INDEX => {
-            let (table, schema_name) = if include_creating_table {
-                reader.get_table_by_name(db_name, schema_path, &real_table_name, true)?
-            } else {
-                reader.get_created_table_by_name(db_name, schema_path, &real_table_name)?
-            };
+            let (table, schema_name) =
+                reader.get_table_by_name(db_name, schema_path, &real_table_name, true)?;
 
             validate_table_type_for_alter(table, alter_stmt_type, alter_target)?;
 
@@ -115,7 +93,7 @@ fn resolve_streaming_job_id_for_alter_impl(
         }
         StatementType::ALTER_SINK => {
             let (sink, schema_name) =
-                reader.get_created_sink_by_name(db_name, schema_path, &real_table_name)?;
+                reader.get_any_sink_by_name(db_name, schema_path, &real_table_name)?;
 
             session.check_privilege_for_drop_alter(schema_name, &**sink)?;
             sink.id.as_job_id()

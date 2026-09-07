@@ -1,0 +1,83 @@
+# ALTER MATERIALIZED VIEW must reject replacement while an incoming sink-into-table job is still
+# being created.
+
+statement ok
+set streaming_use_snapshot_backfill = false;
+
+statement ok
+create table alter_mv_concurrency_source (v int) append only;
+
+statement ok
+insert into alter_mv_concurrency_source select * from generate_series(1, 10000);
+
+statement ok
+flush;
+
+statement ok
+create materialized view alter_mv_concurrency_source_mv as
+select v from alter_mv_concurrency_source;
+
+statement ok
+create table alter_mv_concurrency_target (v int);
+
+statement ok
+set background_ddl = true;
+
+statement ok
+set backfill_rate_limit = 0;
+
+statement ok
+create sink alter_mv_concurrency_sink
+into alter_mv_concurrency_target
+from alter_mv_concurrency_source_mv
+with (type = 'append-only', force_append_only = 'true');
+
+query I retry 10 backoff 1s
+select count(*) from rw_catalog.rw_ddl_progress
+where ddl_statement like 'CREATE SINK alter_mv_concurrency_sink%';
+----
+1
+
+statement error job is being altered or referenced by some creating jobs
+alter materialized view alter_mv_concurrency_source_mv as
+select v from alter_mv_concurrency_source where v > 0;
+
+statement ok
+alter sink alter_mv_concurrency_sink set backfill_rate_limit = default;
+
+statement ok
+set backfill_rate_limit = default;
+
+statement ok
+set background_ddl = false;
+
+query I retry 30 backoff 1s
+select count(*) from rw_catalog.rw_ddl_progress
+where ddl_statement like 'CREATE SINK alter_mv_concurrency_sink%';
+----
+0
+
+query T
+select status from rw_catalog.rw_streaming_jobs
+where name = 'alter_mv_concurrency_sink';
+----
+CREATED
+
+statement ok
+alter materialized view alter_mv_concurrency_source_mv as
+select v from alter_mv_concurrency_source where v > 0;
+
+statement ok
+drop sink alter_mv_concurrency_sink;
+
+statement ok
+drop table alter_mv_concurrency_target;
+
+statement ok
+drop materialized view alter_mv_concurrency_source_mv;
+
+statement ok
+drop table alter_mv_concurrency_source;
+
+statement ok
+set streaming_use_snapshot_backfill = default;

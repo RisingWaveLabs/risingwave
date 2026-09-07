@@ -21,6 +21,7 @@ use std::time::{Duration, Instant};
 use auto_enums::auto_enum;
 use risingwave_common::catalog::TableId;
 use risingwave_common::log::LogSuppressor;
+use risingwave_common::util::retry::exponential_backoff;
 use risingwave_hummock_sdk::level::{Level, Levels};
 use risingwave_hummock_sdk::version::HummockVersion;
 use risingwave_hummock_sdk::{CompactionGroupId, HummockVersionId, INVALID_VERSION_ID};
@@ -200,11 +201,8 @@ pub(crate) async fn start_pinned_version_worker(
 ) {
     let min_execute_interval = Duration::from_millis(1000);
     let max_retry_interval = Duration::from_secs(10);
-    let get_backoff_strategy = || {
-        tokio_retry::strategy::ExponentialBackoff::from_millis(10)
-            .max_delay(max_retry_interval)
-            .map(jitter)
-    };
+    let get_backoff_strategy =
+        || exponential_backoff(Duration::from_millis(10), 10, max_retry_interval).map(jitter);
     let mut retry_backoff = get_backoff_strategy();
     let mut min_execute_interval_tick = tokio::time::interval(min_execute_interval);
     min_execute_interval_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
