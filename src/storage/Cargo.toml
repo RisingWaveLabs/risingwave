@@ -81,7 +81,7 @@ zstd = { version = "0.13", default-features = false }
 workspace-hack = { path = "../workspace-hack" }
 
 [dev-dependencies]
-bincode = "1"
+bincode = "2"
 criterion = { workspace = true, features = ["async_futures", "async_tokio"] }
 expect-test = "1"
 risingwave_hummock_sdk = { workspace = true, features = ["test"] }

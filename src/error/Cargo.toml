@@ -9,7 +9,7 @@ repository = { workspace = true }
 
 [dependencies]
 anyhow = "1"
-bincode = "1"
+bincode = "2"
 easy-ext = "1"
 iceberg = { workspace = true }
 serde = { workspace = true }
