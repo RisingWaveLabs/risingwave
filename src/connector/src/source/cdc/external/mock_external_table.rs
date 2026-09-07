@@ -182,17 +182,21 @@ impl MockExternalTableReader {
         right: Option<OwnedRow>,
     ) {
         self.take_snapshot_error()?;
+
         let compare_pk = |row: &OwnedRow, cursor: &OwnedRow| {
             self.parallel_backfill_pk_indices
                 .iter()
+                .map(|&idx| row.datum_at(idx))
                 .zip(cursor.iter())
-                .find_map(|(&idx, cursor_datum)| {
+                .find_map(|(row_datum, cursor_datum)| {
                     let ordering =
-                        cmp_datum(&row[idx], cursor_datum, OrderType::ascending_nulls_first());
+                        cmp_datum(row_datum, cursor_datum, OrderType::ascending_nulls_first());
+
                     (ordering != CmpOrdering::Equal).then_some(ordering)
                 })
                 .unwrap_or(CmpOrdering::Equal)
         };
+
         let mut rows = self
             .parallel_backfill_snapshots
             .iter()
@@ -206,15 +210,22 @@ impl MockExternalTableReader {
                     .is_none_or(|cursor| compare_pk(row, cursor).is_gt())
             })
             .collect::<Vec<_>>();
+
         rows.sort_by(|left, right| {
-            let right_pk = OwnedRow::new(
-                self.parallel_backfill_pk_indices
-                    .iter()
-                    .map(|&idx| right[idx].clone())
-                    .collect(),
-            );
-            compare_pk(left, &right_pk)
+            self.parallel_backfill_pk_indices
+                .iter()
+                .find_map(|&idx| {
+                    let ordering = cmp_datum(
+                        left.datum_at(idx),
+                        right.datum_at(idx),
+                        OrderType::ascending_nulls_first(),
+                    );
+
+                    (ordering != CmpOrdering::Equal).then_some(ordering)
+                })
+                .unwrap_or(CmpOrdering::Equal)
         });
+
         for row in rows {
             yield row.clone();
         }
