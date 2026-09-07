@@ -18,7 +18,7 @@ clap = { workspace = true }
 educe = "0.6"
 hex = "0.4"
 otlp-embedded = { workspace = true }
-prometheus-http-query = "0.8"
+prometheus-http-query = "0.9"
 redact = "0.1.5"
 regex = { workspace = true }
 risingwave_common = { workspace = true }

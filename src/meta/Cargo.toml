@@ -45,7 +45,7 @@ otlp-embedded = { workspace = true }
 parking_lot = { workspace = true }
 pretty_assertions = "1"
 prometheus = "0.14"
-prometheus-http-query = "0.8.3"
+prometheus-http-query = "0.9.0"
 prost = { workspace = true }
 rand = { workspace = true }
 risingwave_backup = { workspace = true }
