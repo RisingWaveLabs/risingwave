@@ -77,11 +77,11 @@ use prometheus::Registry;
 use risingwave_common::array::ArrayError;
 use risingwave_common::bitmap::Bitmap;
 use risingwave_common::catalog::{ColumnDesc, Field, Schema};
-use risingwave_common::config::StreamingConfig;
+use risingwave_common::config::{MetricLevel, StreamingConfig};
 use risingwave_common::hash::ActorId;
 use risingwave_common::metrics::{
-    LabelGuardedHistogram, LabelGuardedHistogramVec, LabelGuardedIntCounter,
-    LabelGuardedIntCounterVec, LabelGuardedIntGaugeVec,
+    LabelGuardedHistogram, LabelGuardedIntCounter, LabelGuardedIntGaugeVec, MetricVecRelabelExt,
+    RelabeledGuardedHistogramVec, RelabeledGuardedIntCounterVec, RelabeledGuardedIntGaugeVec,
 };
 use risingwave_common::monitor::GLOBAL_METRICS_REGISTRY;
 use risingwave_common::secret::{LocalSecretManager, SecretError};
@@ -106,7 +106,6 @@ use self::clickhouse::CLICKHOUSE_SINK;
 use self::deltalake::DELTALAKE_SINK;
 use self::iceberg::ICEBERG_SINK;
 use self::mock_coordination_client::{MockMetaClient, SinkCoordinationRpcClientEnum};
-use crate::WithPropertiesExt;
 use crate::connector_common::IcebergSinkCompactionUpdate;
 use crate::error::{ConnectorError, ConnectorResult};
 use crate::sink::boxed::{BoxSinglePhaseCoordinator, BoxTwoPhaseCoordinator};
@@ -117,6 +116,7 @@ use crate::sink::file_sink::fs::FsSink;
 use crate::sink::log_store::{LogReader, LogStoreReadItem, LogStoreResult, TruncateOffset};
 use crate::sink::snowflake_redshift::snowflake::SNOWFLAKE_SINK_V2;
 use crate::sink::utils::feature_gated_sink_mod;
+use crate::{WithPropertiesExt, connector_metrics_level};
 
 const BOUNDED_CHANNEL_SIZE: usize = 16;
 #[macro_export]
@@ -465,43 +465,44 @@ pub fn enforce_secret_sink(props: &impl WithPropertiesExt) -> ConnectorResult<()
 }
 
 pub static GLOBAL_SINK_METRICS: LazyLock<SinkMetrics> =
-    LazyLock::new(|| SinkMetrics::new(&GLOBAL_METRICS_REGISTRY));
+    LazyLock::new(|| SinkMetrics::new(&GLOBAL_METRICS_REGISTRY, connector_metrics_level()));
 
 #[derive(Clone)]
 pub struct SinkMetrics {
-    pub sink_commit_duration: LabelGuardedHistogramVec,
-    pub connector_sink_rows_received: LabelGuardedIntCounterVec,
+    pub sink_commit_duration: RelabeledGuardedHistogramVec,
+    pub connector_sink_rows_received: RelabeledGuardedIntCounterVec,
 
     // Log store writer metrics
-    pub log_store_first_write_epoch: LabelGuardedIntGaugeVec,
-    pub log_store_latest_write_epoch: LabelGuardedIntGaugeVec,
-    pub log_store_write_rows: LabelGuardedIntCounterVec,
+    pub log_store_first_write_epoch: RelabeledGuardedIntGaugeVec,
+    pub log_store_latest_write_epoch: RelabeledGuardedIntGaugeVec,
+    pub log_store_write_rows: RelabeledGuardedIntCounterVec,
 
     // Log store reader metrics
-    pub log_store_latest_read_epoch: LabelGuardedIntGaugeVec,
-    pub log_store_read_rows: LabelGuardedIntCounterVec,
-    pub log_store_read_bytes: LabelGuardedIntCounterVec,
-    pub log_store_reader_wait_new_future_duration_ns: LabelGuardedIntCounterVec,
+    pub log_store_latest_read_epoch: RelabeledGuardedIntGaugeVec,
+    pub log_store_read_rows: RelabeledGuardedIntCounterVec,
+    pub log_store_read_bytes: RelabeledGuardedIntCounterVec,
+    pub log_store_reader_wait_new_future_duration_ns: RelabeledGuardedIntCounterVec,
 
     // Iceberg metrics
-    pub iceberg_write_qps: LabelGuardedIntCounterVec,
-    pub iceberg_write_latency: LabelGuardedHistogramVec,
-    pub iceberg_rolling_unflushed_data_file: LabelGuardedIntGaugeVec,
-    pub iceberg_position_delete_cache_num: LabelGuardedIntGaugeVec,
-    pub iceberg_partition_num: LabelGuardedIntGaugeVec,
-    pub iceberg_write_bytes: LabelGuardedIntCounterVec,
+    pub iceberg_write_qps: RelabeledGuardedIntCounterVec,
+    pub iceberg_write_latency: RelabeledGuardedHistogramVec,
+    pub iceberg_rolling_unflushed_data_file: RelabeledGuardedIntGaugeVec,
+    pub iceberg_position_delete_cache_num: RelabeledGuardedIntGaugeVec,
+    pub iceberg_partition_num: RelabeledGuardedIntGaugeVec,
+    pub iceberg_write_bytes: RelabeledGuardedIntCounterVec,
     pub iceberg_snapshot_num: LabelGuardedIntGaugeVec,
 }
 
 impl SinkMetrics {
-    pub fn new(registry: &Registry) -> Self {
+    pub fn new(registry: &Registry, metric_level: MetricLevel) -> Self {
         let sink_commit_duration = register_guarded_histogram_vec_with_registry!(
             "sink_commit_duration",
             "Duration of commit op in sink",
             &["actor_id", "connector", "sink_id", "sink_name"],
             registry
         )
-        .unwrap();
+        .unwrap()
+        .relabel_debug_1(metric_level);
 
         let connector_sink_rows_received = register_guarded_int_counter_vec_with_registry!(
             "connector_sink_rows_received",
@@ -509,7 +510,8 @@ impl SinkMetrics {
             &["actor_id", "connector_type", "sink_id", "sink_name"],
             registry
         )
-        .unwrap();
+        .unwrap()
+        .relabel_debug_1(metric_level);
 
         let log_store_first_write_epoch = register_guarded_int_gauge_vec_with_registry!(
             "log_store_first_write_epoch",
@@ -517,7 +519,8 @@ impl SinkMetrics {
             &["actor_id", "sink_id", "sink_name"],
             registry
         )
-        .unwrap();
+        .unwrap()
+        .relabel_debug_1(metric_level);
 
         let log_store_latest_write_epoch = register_guarded_int_gauge_vec_with_registry!(
             "log_store_latest_write_epoch",
@@ -525,7 +528,8 @@ impl SinkMetrics {
             &["actor_id", "sink_id", "sink_name"],
             registry
         )
-        .unwrap();
+        .unwrap()
+        .relabel_debug_1(metric_level);
 
         let log_store_write_rows = register_guarded_int_counter_vec_with_registry!(
             "log_store_write_rows",
@@ -533,7 +537,8 @@ impl SinkMetrics {
             &["actor_id", "sink_id", "sink_name"],
             registry
         )
-        .unwrap();
+        .unwrap()
+        .relabel_debug_1(metric_level);
 
         let log_store_latest_read_epoch = register_guarded_int_gauge_vec_with_registry!(
             "log_store_latest_read_epoch",
@@ -541,7 +546,8 @@ impl SinkMetrics {
             &["actor_id", "connector", "sink_id", "sink_name"],
             registry
         )
-        .unwrap();
+        .unwrap()
+        .relabel_debug_1(metric_level);
 
         let log_store_read_rows = register_guarded_int_counter_vec_with_registry!(
             "log_store_read_rows",
@@ -549,7 +555,8 @@ impl SinkMetrics {
             &["actor_id", "connector", "sink_id", "sink_name"],
             registry
         )
-        .unwrap();
+        .unwrap()
+        .relabel_debug_1(metric_level);
 
         let log_store_read_bytes = register_guarded_int_counter_vec_with_registry!(
             "log_store_read_bytes",
@@ -557,7 +564,8 @@ impl SinkMetrics {
             &["actor_id", "connector", "sink_id", "sink_name"],
             registry
         )
-        .unwrap();
+        .unwrap()
+        .relabel_debug_1(metric_level);
 
         let log_store_reader_wait_new_future_duration_ns =
             register_guarded_int_counter_vec_with_registry!(
@@ -566,7 +574,8 @@ impl SinkMetrics {
                 &["actor_id", "connector", "sink_id", "sink_name"],
                 registry
             )
-            .unwrap();
+            .unwrap()
+            .relabel_debug_1(metric_level);
 
         let iceberg_write_qps = register_guarded_int_counter_vec_with_registry!(
             "iceberg_write_qps",
@@ -574,7 +583,8 @@ impl SinkMetrics {
             &["actor_id", "sink_id", "sink_name"],
             registry
         )
-        .unwrap();
+        .unwrap()
+        .relabel_debug_1(metric_level);
 
         let iceberg_write_latency = register_guarded_histogram_vec_with_registry!(
             "iceberg_write_latency",
@@ -582,7 +592,8 @@ impl SinkMetrics {
             &["actor_id", "sink_id", "sink_name"],
             registry
         )
-        .unwrap();
+        .unwrap()
+        .relabel_debug_1(metric_level);
 
         let iceberg_rolling_unflushed_data_file = register_guarded_int_gauge_vec_with_registry!(
             "iceberg_rolling_unflushed_data_file",
@@ -590,7 +601,8 @@ impl SinkMetrics {
             &["actor_id", "sink_id", "sink_name"],
             registry
         )
-        .unwrap();
+        .unwrap()
+        .relabel_debug_1(metric_level);
 
         let iceberg_position_delete_cache_num = register_guarded_int_gauge_vec_with_registry!(
             "iceberg_position_delete_cache_num",
@@ -598,7 +610,8 @@ impl SinkMetrics {
             &["actor_id", "sink_id", "sink_name"],
             registry
         )
-        .unwrap();
+        .unwrap()
+        .relabel_debug_1(metric_level);
 
         let iceberg_partition_num = register_guarded_int_gauge_vec_with_registry!(
             "iceberg_partition_num",
@@ -606,7 +619,8 @@ impl SinkMetrics {
             &["actor_id", "sink_id", "sink_name"],
             registry
         )
-        .unwrap();
+        .unwrap()
+        .relabel_debug_1(metric_level);
 
         let iceberg_write_bytes = register_guarded_int_counter_vec_with_registry!(
             "iceberg_write_bytes",
@@ -614,7 +628,8 @@ impl SinkMetrics {
             &["actor_id", "sink_id", "sink_name"],
             registry
         )
-        .unwrap();
+        .unwrap()
+        .relabel_debug_1(metric_level);
 
         let iceberg_snapshot_num = register_guarded_int_gauge_vec_with_registry!(
             "iceberg_snapshot_num",

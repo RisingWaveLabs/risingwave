@@ -68,17 +68,17 @@ pub struct StreamingMetrics {
     pub actor_out_record_cnt: RelabeledGuardedIntCounterVec,
     pub fragment_channel_buffered_bytes: LabelGuardedIntGaugeVec,
     pub actor_current_epoch: RelabeledGuardedIntGaugeVec,
-    pub project_expr_inflight_window_size: LabelGuardedIntGaugeVec,
+    pub project_expr_inflight_window_size: RelabeledGuardedIntGaugeVec,
 
     // Source
-    pub source_output_row_count: LabelGuardedIntCounterVec,
-    pub source_split_change_count: LabelGuardedIntCounterVec,
-    pub source_backfill_row_count: LabelGuardedIntCounterVec,
+    pub source_output_row_count: RelabeledGuardedIntCounterVec,
+    pub source_split_change_count: RelabeledGuardedIntCounterVec,
+    pub source_backfill_row_count: RelabeledGuardedIntCounterVec,
 
     // Sink
-    sink_input_row_count: LabelGuardedIntCounterVec,
-    sink_input_bytes: LabelGuardedIntCounterVec,
-    sink_chunk_buffer_size: LabelGuardedIntGaugeVec,
+    sink_input_row_count: RelabeledGuardedIntCounterVec,
+    sink_input_bytes: RelabeledGuardedIntCounterVec,
+    sink_chunk_buffer_size: RelabeledGuardedIntGaugeVec,
 
     // Exchange (see also `compute::ExchangeServiceMetrics`)
     pub exchange_frag_recv_size: LabelGuardedIntCounterVec,
@@ -92,72 +92,72 @@ pub struct StreamingMetrics {
     actor_input_buffer_blocking_duration_ns: RelabeledGuardedIntCounterVec,
 
     // Streaming Join
-    pub join_lookup_miss_count: LabelGuardedIntCounterVec,
-    pub join_lookup_total_count: LabelGuardedIntCounterVec,
-    pub join_insert_cache_miss_count: LabelGuardedIntCounterVec,
-    pub join_actor_input_waiting_duration_ns: LabelGuardedIntCounterVec,
-    pub join_match_duration_ns: LabelGuardedIntCounterVec,
-    pub join_cached_entry_count: LabelGuardedIntGaugeVec,
+    pub join_lookup_miss_count: RelabeledGuardedIntCounterVec,
+    pub join_lookup_total_count: RelabeledGuardedIntCounterVec,
+    pub join_insert_cache_miss_count: RelabeledGuardedIntCounterVec,
+    pub join_actor_input_waiting_duration_ns: RelabeledGuardedIntCounterVec,
+    pub join_match_duration_ns: RelabeledGuardedIntCounterVec,
+    pub join_cached_entry_count: RelabeledGuardedIntGaugeVec,
     pub join_matched_join_keys: RelabeledGuardedHistogramVec,
 
     // Streaming Join, Streaming Dynamic Filter and Streaming Union
     pub barrier_align_duration: RelabeledGuardedIntCounterVec,
 
     // Streaming Aggregation
-    agg_lookup_miss_count: LabelGuardedIntCounterVec,
-    agg_total_lookup_count: LabelGuardedIntCounterVec,
-    agg_cached_entry_count: LabelGuardedIntGaugeVec,
-    agg_chunk_lookup_miss_count: LabelGuardedIntCounterVec,
-    agg_chunk_total_lookup_count: LabelGuardedIntCounterVec,
-    agg_dirty_groups_count: LabelGuardedIntGaugeVec,
-    agg_dirty_groups_heap_size: LabelGuardedIntGaugeVec,
-    agg_distinct_cache_miss_count: LabelGuardedIntCounterVec,
-    agg_distinct_total_cache_count: LabelGuardedIntCounterVec,
-    agg_distinct_cached_entry_count: LabelGuardedIntGaugeVec,
-    agg_state_cache_lookup_count: LabelGuardedIntCounterVec,
-    agg_state_cache_miss_count: LabelGuardedIntCounterVec,
+    agg_lookup_miss_count: RelabeledGuardedIntCounterVec,
+    agg_total_lookup_count: RelabeledGuardedIntCounterVec,
+    agg_cached_entry_count: RelabeledGuardedIntGaugeVec,
+    agg_chunk_lookup_miss_count: RelabeledGuardedIntCounterVec,
+    agg_chunk_total_lookup_count: RelabeledGuardedIntCounterVec,
+    agg_dirty_groups_count: RelabeledGuardedIntGaugeVec,
+    agg_dirty_groups_heap_size: RelabeledGuardedIntGaugeVec,
+    agg_distinct_cache_miss_count: RelabeledGuardedIntCounterVec,
+    agg_distinct_total_cache_count: RelabeledGuardedIntCounterVec,
+    agg_distinct_cached_entry_count: RelabeledGuardedIntGaugeVec,
+    agg_state_cache_lookup_count: RelabeledGuardedIntCounterVec,
+    agg_state_cache_miss_count: RelabeledGuardedIntCounterVec,
 
     // Streaming TopN
-    group_top_n_cache_miss_count: LabelGuardedIntCounterVec,
-    group_top_n_total_query_cache_count: LabelGuardedIntCounterVec,
-    group_top_n_cached_entry_count: LabelGuardedIntGaugeVec,
+    group_top_n_cache_miss_count: RelabeledGuardedIntCounterVec,
+    group_top_n_total_query_cache_count: RelabeledGuardedIntCounterVec,
+    group_top_n_cached_entry_count: RelabeledGuardedIntGaugeVec,
     // TODO(rc): why not just use the above three?
-    group_top_n_appendonly_cache_miss_count: LabelGuardedIntCounterVec,
-    group_top_n_appendonly_total_query_cache_count: LabelGuardedIntCounterVec,
-    group_top_n_appendonly_cached_entry_count: LabelGuardedIntGaugeVec,
+    group_top_n_appendonly_cache_miss_count: RelabeledGuardedIntCounterVec,
+    group_top_n_appendonly_total_query_cache_count: RelabeledGuardedIntCounterVec,
+    group_top_n_appendonly_cached_entry_count: RelabeledGuardedIntGaugeVec,
 
     // Lookup executor
-    lookup_cache_miss_count: LabelGuardedIntCounterVec,
-    lookup_total_query_cache_count: LabelGuardedIntCounterVec,
-    lookup_cached_entry_count: LabelGuardedIntGaugeVec,
+    lookup_cache_miss_count: RelabeledGuardedIntCounterVec,
+    lookup_total_query_cache_count: RelabeledGuardedIntCounterVec,
+    lookup_cached_entry_count: RelabeledGuardedIntGaugeVec,
 
     // temporal join
-    temporal_join_cache_miss_count: LabelGuardedIntCounterVec,
-    temporal_join_total_query_cache_count: LabelGuardedIntCounterVec,
-    temporal_join_cached_entry_count: LabelGuardedIntGaugeVec,
+    temporal_join_cache_miss_count: RelabeledGuardedIntCounterVec,
+    temporal_join_total_query_cache_count: RelabeledGuardedIntCounterVec,
+    temporal_join_cached_entry_count: RelabeledGuardedIntGaugeVec,
 
     // Backfill
-    backfill_snapshot_read_row_count: LabelGuardedIntCounterVec,
-    backfill_upstream_output_row_count: LabelGuardedIntCounterVec,
+    backfill_snapshot_read_row_count: RelabeledGuardedIntCounterVec,
+    backfill_upstream_output_row_count: RelabeledGuardedIntCounterVec,
 
     // CDC Backfill
-    cdc_backfill_snapshot_read_row_count: LabelGuardedIntCounterVec,
-    cdc_backfill_upstream_output_row_count: LabelGuardedIntCounterVec,
+    cdc_backfill_snapshot_read_row_count: RelabeledGuardedIntCounterVec,
+    cdc_backfill_upstream_output_row_count: RelabeledGuardedIntCounterVec,
 
     // Snapshot Backfill
-    pub(crate) snapshot_backfill_consume_row_count: LabelGuardedIntCounterVec,
+    pub(crate) snapshot_backfill_consume_row_count: RelabeledGuardedIntCounterVec,
 
     // Over Window
-    over_window_cached_entry_count: LabelGuardedIntGaugeVec,
-    over_window_cache_lookup_count: LabelGuardedIntCounterVec,
-    over_window_cache_miss_count: LabelGuardedIntCounterVec,
-    over_window_range_cache_entry_count: LabelGuardedIntGaugeVec,
-    over_window_range_cache_lookup_count: LabelGuardedIntCounterVec,
-    over_window_range_cache_left_miss_count: LabelGuardedIntCounterVec,
-    over_window_range_cache_right_miss_count: LabelGuardedIntCounterVec,
-    over_window_accessed_entry_count: LabelGuardedIntCounterVec,
-    over_window_compute_count: LabelGuardedIntCounterVec,
-    over_window_same_output_count: LabelGuardedIntCounterVec,
+    over_window_cached_entry_count: RelabeledGuardedIntGaugeVec,
+    over_window_cache_lookup_count: RelabeledGuardedIntCounterVec,
+    over_window_cache_miss_count: RelabeledGuardedIntCounterVec,
+    over_window_range_cache_entry_count: RelabeledGuardedIntGaugeVec,
+    over_window_range_cache_lookup_count: RelabeledGuardedIntCounterVec,
+    over_window_range_cache_left_miss_count: RelabeledGuardedIntCounterVec,
+    over_window_range_cache_right_miss_count: RelabeledGuardedIntCounterVec,
+    over_window_accessed_entry_count: RelabeledGuardedIntCounterVec,
+    over_window_compute_count: RelabeledGuardedIntCounterVec,
+    over_window_same_output_count: RelabeledGuardedIntCounterVec,
 
     /// The duration from receipt of barrier to all actors collection.
     /// The max of all nodes' `barrier_inflight_latency` for a partial graph is the latency for a
@@ -169,32 +169,32 @@ pub struct StreamingMetrics {
     /// The progress made by the earliest in-flight barriers in the local barrier manager.
     pub barrier_manager_progress: LabelGuardedIntCounterVec,
 
-    pub kv_log_store_storage_write_count: LabelGuardedIntCounterVec,
-    pub kv_log_store_storage_write_size: LabelGuardedIntCounterVec,
-    pub kv_log_store_rewind_count: LabelGuardedIntCounterVec,
-    pub kv_log_store_rewind_delay: LabelGuardedHistogramVec,
-    pub kv_log_store_storage_read_count: LabelGuardedIntCounterVec,
-    pub kv_log_store_storage_read_size: LabelGuardedIntCounterVec,
-    pub kv_log_store_buffer_unconsumed_item_count: LabelGuardedIntGaugeVec,
-    pub kv_log_store_buffer_unconsumed_row_count: LabelGuardedIntGaugeVec,
-    pub kv_log_store_buffer_unconsumed_epoch_count: LabelGuardedIntGaugeVec,
-    pub kv_log_store_buffer_unconsumed_min_epoch: LabelGuardedIntGaugeVec,
-    pub kv_log_store_buffer_memory_bytes: LabelGuardedIntGaugeVec,
+    pub kv_log_store_storage_write_count: RelabeledGuardedIntCounterVec,
+    pub kv_log_store_storage_write_size: RelabeledGuardedIntCounterVec,
+    pub kv_log_store_rewind_count: RelabeledGuardedIntCounterVec,
+    pub kv_log_store_rewind_delay: RelabeledGuardedHistogramVec,
+    pub kv_log_store_storage_read_count: RelabeledGuardedIntCounterVec,
+    pub kv_log_store_storage_read_size: RelabeledGuardedIntCounterVec,
+    pub kv_log_store_buffer_unconsumed_item_count: RelabeledGuardedIntGaugeVec,
+    pub kv_log_store_buffer_unconsumed_row_count: RelabeledGuardedIntGaugeVec,
+    pub kv_log_store_buffer_unconsumed_epoch_count: RelabeledGuardedIntGaugeVec,
+    pub kv_log_store_buffer_unconsumed_min_epoch: RelabeledGuardedIntGaugeVec,
+    pub kv_log_store_buffer_memory_bytes: RelabeledGuardedIntGaugeVec,
 
-    pub crossdb_last_consumed_min_epoch: LabelGuardedIntGaugeVec,
+    pub crossdb_last_consumed_min_epoch: RelabeledGuardedIntGaugeVec,
 
-    pub sync_kv_log_store_read_count: LabelGuardedIntCounterVec,
-    pub sync_kv_log_store_read_size: LabelGuardedIntCounterVec,
-    pub sync_kv_log_store_write_pause_duration_ns: LabelGuardedIntCounterVec,
-    pub sync_kv_log_store_state: LabelGuardedIntCounterVec,
-    pub sync_kv_log_store_wait_next_poll_ns: LabelGuardedIntCounterVec,
-    pub sync_kv_log_store_storage_write_count: LabelGuardedIntCounterVec,
-    pub sync_kv_log_store_storage_write_size: LabelGuardedIntCounterVec,
-    pub sync_kv_log_store_buffer_unconsumed_item_count: LabelGuardedIntGaugeVec,
-    pub sync_kv_log_store_buffer_unconsumed_row_count: LabelGuardedIntGaugeVec,
-    pub sync_kv_log_store_buffer_unconsumed_epoch_count: LabelGuardedIntGaugeVec,
-    pub sync_kv_log_store_buffer_unconsumed_min_epoch: LabelGuardedIntGaugeVec,
-    pub sync_kv_log_store_buffer_memory_bytes: LabelGuardedIntGaugeVec,
+    pub sync_kv_log_store_read_count: RelabeledGuardedIntCounterVec,
+    pub sync_kv_log_store_read_size: RelabeledGuardedIntCounterVec,
+    pub sync_kv_log_store_write_pause_duration_ns: RelabeledGuardedIntCounterVec,
+    pub sync_kv_log_store_state: RelabeledGuardedIntCounterVec,
+    pub sync_kv_log_store_wait_next_poll_ns: RelabeledGuardedIntCounterVec,
+    pub sync_kv_log_store_storage_write_count: RelabeledGuardedIntCounterVec,
+    pub sync_kv_log_store_storage_write_size: RelabeledGuardedIntCounterVec,
+    pub sync_kv_log_store_buffer_unconsumed_item_count: RelabeledGuardedIntGaugeVec,
+    pub sync_kv_log_store_buffer_unconsumed_row_count: RelabeledGuardedIntGaugeVec,
+    pub sync_kv_log_store_buffer_unconsumed_epoch_count: RelabeledGuardedIntGaugeVec,
+    pub sync_kv_log_store_buffer_unconsumed_min_epoch: RelabeledGuardedIntGaugeVec,
+    pub sync_kv_log_store_buffer_memory_bytes: RelabeledGuardedIntGaugeVec,
 
     // Memory management
     pub lru_runtime_loop_count: IntCounter,
@@ -274,42 +274,47 @@ impl StreamingMetrics {
         let source_output_row_count = register_guarded_int_counter_vec_with_registry!(
             "stream_source_output_rows_counts",
             "Total number of rows that have been output from source",
-            &["source_id", "source_name", "actor_id", "fragment_id"],
+            &["actor_id", "source_id", "source_name", "fragment_id"],
             registry
         )
-        .unwrap();
+        .unwrap()
+        .relabel_debug_1(level);
 
         let source_split_change_count = register_guarded_int_counter_vec_with_registry!(
             "stream_source_split_change_event_count",
             "Total number of split change events that have been operated by source",
-            &["source_id", "source_name", "actor_id", "fragment_id"],
+            &["actor_id", "source_id", "source_name", "fragment_id"],
             registry
         )
-        .unwrap();
+        .unwrap()
+        .relabel_debug_1(level);
 
         let source_backfill_row_count = register_guarded_int_counter_vec_with_registry!(
             "stream_source_backfill_rows_counts",
             "Total number of rows that have been backfilled for source",
-            &["source_id", "source_name", "actor_id", "fragment_id"],
+            &["actor_id", "source_id", "source_name", "fragment_id"],
             registry
         )
-        .unwrap();
+        .unwrap()
+        .relabel_debug_1(level);
 
         let sink_input_row_count = register_guarded_int_counter_vec_with_registry!(
             "stream_sink_input_row_count",
             "Total number of rows streamed into sink executors",
-            &["sink_id", "actor_id", "fragment_id"],
+            &["actor_id", "sink_id", "fragment_id"],
             registry
         )
-        .unwrap();
+        .unwrap()
+        .relabel_debug_1(level);
 
         let sink_input_bytes = register_guarded_int_counter_vec_with_registry!(
             "stream_sink_input_bytes",
             "Total size of chunks streamed into sink executors",
-            &["sink_id", "actor_id", "fragment_id"],
+            &["actor_id", "sink_id", "fragment_id"],
             registry
         )
-        .unwrap();
+        .unwrap()
+        .relabel_debug_1(level);
 
         let materialize_input_row_count = register_guarded_int_counter_vec_with_registry!(
             "stream_mview_input_row_count",
@@ -388,10 +393,11 @@ impl StreamingMetrics {
         let sink_chunk_buffer_size = register_guarded_int_gauge_vec_with_registry!(
             "stream_sink_chunk_buffer_size",
             "Total size of chunks buffered in a barrier",
-            &["sink_id", "actor_id", "fragment_id"],
+            &["actor_id", "sink_id", "fragment_id"],
             registry
         )
-        .unwrap();
+        .unwrap()
+        .relabel_debug_1(level);
         let actor_output_buffer_blocking_duration_ns =
             register_guarded_int_counter_vec_with_registry!(
                 "stream_actor_output_buffer_blocking_duration_ns",
@@ -517,7 +523,8 @@ impl StreamingMetrics {
             &["actor_id", "fragment_id"],
             registry
         )
-        .unwrap();
+        .unwrap()
+        .relabel_debug_1(level);
 
         let actor_count = register_guarded_int_gauge_vec_with_registry!(
             "stream_actor_count",
@@ -539,26 +546,29 @@ impl StreamingMetrics {
         let join_lookup_miss_count = register_guarded_int_counter_vec_with_registry!(
             "stream_join_lookup_miss_count",
             "Join executor lookup miss duration",
-            &["side", "join_table_id", "actor_id", "fragment_id"],
+            &["actor_id", "side", "join_table_id", "fragment_id"],
             registry
         )
-        .unwrap();
+        .unwrap()
+        .relabel_debug_1(level);
 
         let join_lookup_total_count = register_guarded_int_counter_vec_with_registry!(
             "stream_join_lookup_total_count",
             "Join executor lookup total operation",
-            &["side", "join_table_id", "actor_id", "fragment_id"],
+            &["actor_id", "side", "join_table_id", "fragment_id"],
             registry
         )
-        .unwrap();
+        .unwrap()
+        .relabel_debug_1(level);
 
         let join_insert_cache_miss_count = register_guarded_int_counter_vec_with_registry!(
             "stream_join_insert_cache_miss_count",
             "Join executor cache miss when insert operation",
-            &["side", "join_table_id", "actor_id", "fragment_id"],
+            &["actor_id", "side", "join_table_id", "fragment_id"],
             registry
         )
-        .unwrap();
+        .unwrap()
+        .relabel_debug_1(level);
 
         let join_actor_input_waiting_duration_ns = register_guarded_int_counter_vec_with_registry!(
             "stream_join_actor_input_waiting_duration_ns",
@@ -566,7 +576,8 @@ impl StreamingMetrics {
             &["actor_id", "fragment_id"],
             registry
         )
-        .unwrap();
+        .unwrap()
+        .relabel_debug_1(level);
 
         let join_match_duration_ns = register_guarded_int_counter_vec_with_registry!(
             "stream_join_match_duration_ns",
@@ -574,7 +585,8 @@ impl StreamingMetrics {
             &["actor_id", "fragment_id", "side"],
             registry
         )
-        .unwrap();
+        .unwrap()
+        .relabel_debug_1(level);
 
         let barrier_align_duration = register_guarded_int_counter_vec_with_registry!(
             "stream_barrier_align_duration_ns",
@@ -591,7 +603,8 @@ impl StreamingMetrics {
             &["actor_id", "fragment_id", "side"],
             registry
         )
-        .unwrap();
+        .unwrap()
+        .relabel_debug_1(level);
 
         let join_matched_join_keys_opts = histogram_opts!(
             "stream_join_matched_join_keys",
@@ -610,321 +623,360 @@ impl StreamingMetrics {
         let agg_lookup_miss_count = register_guarded_int_counter_vec_with_registry!(
             "stream_agg_lookup_miss_count",
             "Aggregation executor lookup miss duration",
-            &["table_id", "actor_id", "fragment_id"],
+            &["actor_id", "table_id", "fragment_id"],
             registry
         )
-        .unwrap();
+        .unwrap()
+        .relabel_debug_1(level);
 
         let agg_total_lookup_count = register_guarded_int_counter_vec_with_registry!(
             "stream_agg_lookup_total_count",
             "Aggregation executor lookup total operation",
-            &["table_id", "actor_id", "fragment_id"],
+            &["actor_id", "table_id", "fragment_id"],
             registry
         )
-        .unwrap();
+        .unwrap()
+        .relabel_debug_1(level);
 
         let agg_distinct_cache_miss_count = register_guarded_int_counter_vec_with_registry!(
             "stream_agg_distinct_cache_miss_count",
             "Aggregation executor dinsinct miss duration",
-            &["table_id", "actor_id", "fragment_id"],
+            &["actor_id", "table_id", "fragment_id"],
             registry
         )
-        .unwrap();
+        .unwrap()
+        .relabel_debug_1(level);
 
         let agg_distinct_total_cache_count = register_guarded_int_counter_vec_with_registry!(
             "stream_agg_distinct_total_cache_count",
             "Aggregation executor distinct total operation",
-            &["table_id", "actor_id", "fragment_id"],
+            &["actor_id", "table_id", "fragment_id"],
             registry
         )
-        .unwrap();
+        .unwrap()
+        .relabel_debug_1(level);
 
         let agg_distinct_cached_entry_count = register_guarded_int_gauge_vec_with_registry!(
             "stream_agg_distinct_cached_entry_count",
             "Total entry counts in distinct aggregation executor cache",
-            &["table_id", "actor_id", "fragment_id"],
+            &["actor_id", "table_id", "fragment_id"],
             registry
         )
-        .unwrap();
+        .unwrap()
+        .relabel_debug_1(level);
 
         let agg_dirty_groups_count = register_guarded_int_gauge_vec_with_registry!(
             "stream_agg_dirty_groups_count",
             "Total dirty group counts in aggregation executor",
-            &["table_id", "actor_id", "fragment_id"],
+            &["actor_id", "table_id", "fragment_id"],
             registry
         )
-        .unwrap();
+        .unwrap()
+        .relabel_debug_1(level);
 
         let agg_dirty_groups_heap_size = register_guarded_int_gauge_vec_with_registry!(
             "stream_agg_dirty_groups_heap_size",
             "Total dirty group heap size in aggregation executor",
-            &["table_id", "actor_id", "fragment_id"],
+            &["actor_id", "table_id", "fragment_id"],
             registry
         )
-        .unwrap();
+        .unwrap()
+        .relabel_debug_1(level);
 
         let agg_state_cache_lookup_count = register_guarded_int_counter_vec_with_registry!(
             "stream_agg_state_cache_lookup_count",
             "Aggregation executor state cache lookup count",
-            &["table_id", "actor_id", "fragment_id"],
+            &["actor_id", "table_id", "fragment_id"],
             registry
         )
-        .unwrap();
+        .unwrap()
+        .relabel_debug_1(level);
 
         let agg_state_cache_miss_count = register_guarded_int_counter_vec_with_registry!(
             "stream_agg_state_cache_miss_count",
             "Aggregation executor state cache miss count",
-            &["table_id", "actor_id", "fragment_id"],
+            &["actor_id", "table_id", "fragment_id"],
             registry
         )
-        .unwrap();
+        .unwrap()
+        .relabel_debug_1(level);
 
         let group_top_n_cache_miss_count = register_guarded_int_counter_vec_with_registry!(
             "stream_group_top_n_cache_miss_count",
             "Group top n executor cache miss count",
-            &["table_id", "actor_id", "fragment_id"],
+            &["actor_id", "table_id", "fragment_id"],
             registry
         )
-        .unwrap();
+        .unwrap()
+        .relabel_debug_1(level);
 
         let group_top_n_total_query_cache_count = register_guarded_int_counter_vec_with_registry!(
             "stream_group_top_n_total_query_cache_count",
             "Group top n executor query cache total count",
-            &["table_id", "actor_id", "fragment_id"],
+            &["actor_id", "table_id", "fragment_id"],
             registry
         )
-        .unwrap();
+        .unwrap()
+        .relabel_debug_1(level);
 
         let group_top_n_cached_entry_count = register_guarded_int_gauge_vec_with_registry!(
             "stream_group_top_n_cached_entry_count",
             "Total entry counts in group top n executor cache",
-            &["table_id", "actor_id", "fragment_id"],
+            &["actor_id", "table_id", "fragment_id"],
             registry
         )
-        .unwrap();
+        .unwrap()
+        .relabel_debug_1(level);
 
         let group_top_n_appendonly_cache_miss_count =
             register_guarded_int_counter_vec_with_registry!(
                 "stream_group_top_n_appendonly_cache_miss_count",
                 "Group top n appendonly executor cache miss count",
-                &["table_id", "actor_id", "fragment_id"],
+                &["actor_id", "table_id", "fragment_id"],
                 registry
             )
-            .unwrap();
+            .unwrap()
+            .relabel_debug_1(level);
 
         let group_top_n_appendonly_total_query_cache_count =
             register_guarded_int_counter_vec_with_registry!(
                 "stream_group_top_n_appendonly_total_query_cache_count",
                 "Group top n appendonly executor total cache count",
-                &["table_id", "actor_id", "fragment_id"],
+                &["actor_id", "table_id", "fragment_id"],
                 registry
             )
-            .unwrap();
+            .unwrap()
+            .relabel_debug_1(level);
 
         let group_top_n_appendonly_cached_entry_count =
             register_guarded_int_gauge_vec_with_registry!(
                 "stream_group_top_n_appendonly_cached_entry_count",
                 "Total entry counts in group top n appendonly executor cache",
-                &["table_id", "actor_id", "fragment_id"],
+                &["actor_id", "table_id", "fragment_id"],
                 registry
             )
-            .unwrap();
+            .unwrap()
+            .relabel_debug_1(level);
 
         let lookup_cache_miss_count = register_guarded_int_counter_vec_with_registry!(
             "stream_lookup_cache_miss_count",
             "Lookup executor cache miss count",
-            &["table_id", "actor_id", "fragment_id"],
+            &["actor_id", "table_id", "fragment_id"],
             registry
         )
-        .unwrap();
+        .unwrap()
+        .relabel_debug_1(level);
 
         let lookup_total_query_cache_count = register_guarded_int_counter_vec_with_registry!(
             "stream_lookup_total_query_cache_count",
             "Lookup executor query cache total count",
-            &["table_id", "actor_id", "fragment_id"],
+            &["actor_id", "table_id", "fragment_id"],
             registry
         )
-        .unwrap();
+        .unwrap()
+        .relabel_debug_1(level);
 
         let lookup_cached_entry_count = register_guarded_int_gauge_vec_with_registry!(
             "stream_lookup_cached_entry_count",
             "Total entry counts in lookup executor cache",
-            &["table_id", "actor_id", "fragment_id"],
+            &["actor_id", "table_id", "fragment_id"],
             registry
         )
-        .unwrap();
+        .unwrap()
+        .relabel_debug_1(level);
 
         let temporal_join_cache_miss_count = register_guarded_int_counter_vec_with_registry!(
             "stream_temporal_join_cache_miss_count",
             "Temporal join executor cache miss count",
-            &["table_id", "actor_id", "fragment_id"],
+            &["actor_id", "table_id", "fragment_id"],
             registry
         )
-        .unwrap();
+        .unwrap()
+        .relabel_debug_1(level);
 
         let temporal_join_total_query_cache_count =
             register_guarded_int_counter_vec_with_registry!(
                 "stream_temporal_join_total_query_cache_count",
                 "Temporal join executor query cache total count",
-                &["table_id", "actor_id", "fragment_id"],
+                &["actor_id", "table_id", "fragment_id"],
                 registry
             )
-            .unwrap();
+            .unwrap()
+            .relabel_debug_1(level);
 
         let temporal_join_cached_entry_count = register_guarded_int_gauge_vec_with_registry!(
             "stream_temporal_join_cached_entry_count",
             "Total entry count in temporal join executor cache",
-            &["table_id", "actor_id", "fragment_id"],
+            &["actor_id", "table_id", "fragment_id"],
             registry
         )
-        .unwrap();
+        .unwrap()
+        .relabel_debug_1(level);
 
         let agg_cached_entry_count = register_guarded_int_gauge_vec_with_registry!(
             "stream_agg_cached_entry_count",
             "Number of cached keys in streaming aggregation operators",
-            &["table_id", "actor_id", "fragment_id"],
+            &["actor_id", "table_id", "fragment_id"],
             registry
         )
-        .unwrap();
+        .unwrap()
+        .relabel_debug_1(level);
 
         let agg_chunk_lookup_miss_count = register_guarded_int_counter_vec_with_registry!(
             "stream_agg_chunk_lookup_miss_count",
             "Aggregation executor chunk-level lookup miss duration",
-            &["table_id", "actor_id", "fragment_id"],
+            &["actor_id", "table_id", "fragment_id"],
             registry
         )
-        .unwrap();
+        .unwrap()
+        .relabel_debug_1(level);
 
         let agg_chunk_total_lookup_count = register_guarded_int_counter_vec_with_registry!(
             "stream_agg_chunk_lookup_total_count",
             "Aggregation executor chunk-level lookup total operation",
-            &["table_id", "actor_id", "fragment_id"],
+            &["actor_id", "table_id", "fragment_id"],
             registry
         )
-        .unwrap();
+        .unwrap()
+        .relabel_debug_1(level);
 
         let backfill_snapshot_read_row_count = register_guarded_int_counter_vec_with_registry!(
             "stream_backfill_snapshot_read_row_count",
             "Total number of rows that have been read from the backfill snapshot",
-            &["table_id", "actor_id"],
+            &["actor_id", "table_id"],
             registry
         )
-        .unwrap();
+        .unwrap()
+        .relabel_debug_1(level);
 
         let backfill_upstream_output_row_count = register_guarded_int_counter_vec_with_registry!(
             "stream_backfill_upstream_output_row_count",
             "Total number of rows that have been output from the backfill upstream",
-            &["table_id", "actor_id"],
+            &["actor_id", "table_id"],
             registry
         )
-        .unwrap();
+        .unwrap()
+        .relabel_debug_1(level);
 
         let cdc_backfill_snapshot_read_row_count = register_guarded_int_counter_vec_with_registry!(
             "stream_cdc_backfill_snapshot_read_row_count",
             "Total number of rows that have been read from the cdc_backfill snapshot",
-            &["table_id", "actor_id"],
+            &["actor_id", "table_id"],
             registry
         )
-        .unwrap();
+        .unwrap()
+        .relabel_debug_1(level);
 
         let cdc_backfill_upstream_output_row_count =
             register_guarded_int_counter_vec_with_registry!(
                 "stream_cdc_backfill_upstream_output_row_count",
                 "Total number of rows that have been output from the cdc_backfill upstream",
-                &["table_id", "actor_id"],
+                &["actor_id", "table_id"],
                 registry
             )
-            .unwrap();
+            .unwrap()
+            .relabel_debug_1(level);
 
         let snapshot_backfill_consume_row_count = register_guarded_int_counter_vec_with_registry!(
             "stream_snapshot_backfill_consume_snapshot_row_count",
             "Total number of rows that have been output from snapshot backfill",
-            &["table_id", "actor_id", "stage"],
+            &["actor_id", "table_id", "stage"],
             registry
         )
-        .unwrap();
+        .unwrap()
+        .relabel_debug_1(level);
 
         let over_window_cached_entry_count = register_guarded_int_gauge_vec_with_registry!(
             "stream_over_window_cached_entry_count",
             "Total entry (partition) count in over window executor cache",
-            &["table_id", "actor_id", "fragment_id"],
+            &["actor_id", "table_id", "fragment_id"],
             registry
         )
-        .unwrap();
+        .unwrap()
+        .relabel_debug_1(level);
 
         let over_window_cache_lookup_count = register_guarded_int_counter_vec_with_registry!(
             "stream_over_window_cache_lookup_count",
             "Over window executor cache lookup count",
-            &["table_id", "actor_id", "fragment_id"],
+            &["actor_id", "table_id", "fragment_id"],
             registry
         )
-        .unwrap();
+        .unwrap()
+        .relabel_debug_1(level);
 
         let over_window_cache_miss_count = register_guarded_int_counter_vec_with_registry!(
             "stream_over_window_cache_miss_count",
             "Over window executor cache miss count",
-            &["table_id", "actor_id", "fragment_id"],
+            &["actor_id", "table_id", "fragment_id"],
             registry
         )
-        .unwrap();
+        .unwrap()
+        .relabel_debug_1(level);
 
         let over_window_range_cache_entry_count = register_guarded_int_gauge_vec_with_registry!(
             "stream_over_window_range_cache_entry_count",
             "Over window partition range cache entry count",
-            &["table_id", "actor_id", "fragment_id"],
+            &["actor_id", "table_id", "fragment_id"],
             registry,
         )
-        .unwrap();
+        .unwrap()
+        .relabel_debug_1(level);
 
         let over_window_range_cache_lookup_count = register_guarded_int_counter_vec_with_registry!(
             "stream_over_window_range_cache_lookup_count",
             "Over window partition range cache lookup count",
-            &["table_id", "actor_id", "fragment_id"],
+            &["actor_id", "table_id", "fragment_id"],
             registry
         )
-        .unwrap();
+        .unwrap()
+        .relabel_debug_1(level);
 
         let over_window_range_cache_left_miss_count =
             register_guarded_int_counter_vec_with_registry!(
                 "stream_over_window_range_cache_left_miss_count",
                 "Over window partition range cache left miss count",
-                &["table_id", "actor_id", "fragment_id"],
+                &["actor_id", "table_id", "fragment_id"],
                 registry
             )
-            .unwrap();
+            .unwrap()
+            .relabel_debug_1(level);
 
         let over_window_range_cache_right_miss_count =
             register_guarded_int_counter_vec_with_registry!(
                 "stream_over_window_range_cache_right_miss_count",
                 "Over window partition range cache right miss count",
-                &["table_id", "actor_id", "fragment_id"],
+                &["actor_id", "table_id", "fragment_id"],
                 registry
             )
-            .unwrap();
+            .unwrap()
+            .relabel_debug_1(level);
 
         let over_window_accessed_entry_count = register_guarded_int_counter_vec_with_registry!(
             "stream_over_window_accessed_entry_count",
             "Over window accessed entry count",
-            &["table_id", "actor_id", "fragment_id"],
+            &["actor_id", "table_id", "fragment_id"],
             registry
         )
-        .unwrap();
+        .unwrap()
+        .relabel_debug_1(level);
 
         let over_window_compute_count = register_guarded_int_counter_vec_with_registry!(
             "stream_over_window_compute_count",
             "Over window compute count",
-            &["table_id", "actor_id", "fragment_id"],
+            &["actor_id", "table_id", "fragment_id"],
             registry
         )
-        .unwrap();
+        .unwrap()
+        .relabel_debug_1(level);
 
         let over_window_same_output_count = register_guarded_int_counter_vec_with_registry!(
             "stream_over_window_same_output_count",
             "Over window same output count",
-            &["table_id", "actor_id", "fragment_id"],
+            &["actor_id", "table_id", "fragment_id"],
             registry
         )
-        .unwrap();
+        .unwrap()
+        .relabel_debug_1(level);
 
         let barrier_inflight_latency = register_guarded_histogram_vec_with_registry!(
             "stream_barrier_inflight_duration_seconds",
@@ -965,23 +1017,26 @@ impl StreamingMetrics {
             &["actor_id", "target", "fragment_id", "relation"],
             registry
         )
-        .unwrap();
+        .unwrap()
+        .relabel_debug_1(level);
 
         let sync_kv_log_store_read_count = register_guarded_int_counter_vec_with_registry!(
             "sync_kv_log_store_read_count",
             "read row count throughput of sync_kv log store",
-            &["type", "actor_id", "target", "fragment_id", "relation"],
+            &["actor_id", "type", "target", "fragment_id", "relation"],
             registry
         )
-        .unwrap();
+        .unwrap()
+        .relabel_debug_1(level);
 
         let sync_kv_log_store_read_size = register_guarded_int_counter_vec_with_registry!(
             "sync_kv_log_store_read_size",
             "read size throughput of sync_kv log store",
-            &["type", "actor_id", "target", "fragment_id", "relation"],
+            &["actor_id", "type", "target", "fragment_id", "relation"],
             registry
         )
-        .unwrap();
+        .unwrap()
+        .relabel_debug_1(level);
 
         let sync_kv_log_store_write_pause_duration_ns =
             register_guarded_int_counter_vec_with_registry!(
@@ -990,15 +1045,17 @@ impl StreamingMetrics {
                 &["actor_id", "target", "fragment_id", "relation"],
                 registry
             )
-            .unwrap();
+            .unwrap()
+            .relabel_debug_1(level);
 
         let sync_kv_log_store_state = register_guarded_int_counter_vec_with_registry!(
             "sync_kv_log_store_state",
             "clean/unclean state transition for sync_kv log store",
-            &["state", "actor_id", "target", "fragment_id", "relation"],
+            &["actor_id", "state", "target", "fragment_id", "relation"],
             registry
         )
-        .unwrap();
+        .unwrap()
+        .relabel_debug_1(level);
 
         let sync_kv_log_store_storage_write_count =
             register_guarded_int_counter_vec_with_registry!(
@@ -1007,7 +1064,8 @@ impl StreamingMetrics {
                 &["actor_id", "target", "fragment_id", "relation"],
                 registry
             )
-            .unwrap();
+            .unwrap()
+            .relabel_debug_1(level);
 
         let sync_kv_log_store_storage_write_size = register_guarded_int_counter_vec_with_registry!(
             "sync_kv_log_store_storage_write_size",
@@ -1015,7 +1073,8 @@ impl StreamingMetrics {
             &["actor_id", "target", "fragment_id", "relation"],
             registry
         )
-        .unwrap();
+        .unwrap()
+        .relabel_debug_1(level);
 
         let sync_kv_log_store_buffer_unconsumed_item_count =
             register_guarded_int_gauge_vec_with_registry!(
@@ -1024,7 +1083,8 @@ impl StreamingMetrics {
                 &["actor_id", "target", "fragment_id", "relation"],
                 registry
             )
-            .unwrap();
+            .unwrap()
+            .relabel_debug_1(level);
 
         let sync_kv_log_store_buffer_unconsumed_row_count =
             register_guarded_int_gauge_vec_with_registry!(
@@ -1033,7 +1093,8 @@ impl StreamingMetrics {
                 &["actor_id", "target", "fragment_id", "relation"],
                 registry
             )
-            .unwrap();
+            .unwrap()
+            .relabel_debug_1(level);
 
         let sync_kv_log_store_buffer_unconsumed_epoch_count =
             register_guarded_int_gauge_vec_with_registry!(
@@ -1042,7 +1103,8 @@ impl StreamingMetrics {
                 &["actor_id", "target", "fragment_id", "relation"],
                 registry
             )
-            .unwrap();
+            .unwrap()
+            .relabel_debug_1(level);
 
         let sync_kv_log_store_buffer_unconsumed_min_epoch =
             register_guarded_int_gauge_vec_with_registry!(
@@ -1051,7 +1113,8 @@ impl StreamingMetrics {
                 &["actor_id", "target", "fragment_id", "relation"],
                 registry
             )
-            .unwrap();
+            .unwrap()
+            .relabel_debug_1(level);
         let sync_kv_log_store_buffer_memory_bytes =
             register_guarded_int_gauge_vec_with_registry!(
                 "sync_kv_log_store_buffer_memory_bytes",
@@ -1059,7 +1122,8 @@ impl StreamingMetrics {
                 &["actor_id", "target", "fragment_id", "relation"],
                 registry
             )
-            .unwrap();
+            .unwrap()
+            .relabel_debug_1(level);
 
         let kv_log_store_storage_write_count = register_guarded_int_counter_vec_with_registry!(
             "kv_log_store_storage_write_count",
@@ -1067,7 +1131,8 @@ impl StreamingMetrics {
             &["actor_id", "connector", "sink_id", "sink_name"],
             registry
         )
-        .unwrap();
+        .unwrap()
+        .relabel_debug_1(level);
 
         let kv_log_store_storage_write_size = register_guarded_int_counter_vec_with_registry!(
             "kv_log_store_storage_write_size",
@@ -1075,7 +1140,8 @@ impl StreamingMetrics {
             &["actor_id", "connector", "sink_id", "sink_name"],
             registry
         )
-        .unwrap();
+        .unwrap()
+        .relabel_debug_1(level);
 
         let kv_log_store_storage_read_count = register_guarded_int_counter_vec_with_registry!(
             "kv_log_store_storage_read_count",
@@ -1083,7 +1149,8 @@ impl StreamingMetrics {
             &["actor_id", "connector", "sink_id", "sink_name", "read_type"],
             registry
         )
-        .unwrap();
+        .unwrap()
+        .relabel_debug_1(level);
 
         let kv_log_store_storage_read_size = register_guarded_int_counter_vec_with_registry!(
             "kv_log_store_storage_read_size",
@@ -1091,7 +1158,8 @@ impl StreamingMetrics {
             &["actor_id", "connector", "sink_id", "sink_name", "read_type"],
             registry
         )
-        .unwrap();
+        .unwrap()
+        .relabel_debug_1(level);
 
         let kv_log_store_rewind_count = register_guarded_int_counter_vec_with_registry!(
             "kv_log_store_rewind_count",
@@ -1099,7 +1167,8 @@ impl StreamingMetrics {
             &["actor_id", "connector", "sink_id", "sink_name"],
             registry
         )
-        .unwrap();
+        .unwrap()
+        .relabel_debug_1(level);
 
         let kv_log_store_rewind_delay_opts = {
             let first_delay_secs = REWIND_INITIAL_DELAY.as_secs_f64();
@@ -1120,7 +1189,8 @@ impl StreamingMetrics {
             &["actor_id", "connector", "sink_id", "sink_name"],
             registry
         )
-        .unwrap();
+        .unwrap()
+        .relabel_debug_1(level);
 
         let kv_log_store_buffer_unconsumed_item_count =
             register_guarded_int_gauge_vec_with_registry!(
@@ -1129,7 +1199,8 @@ impl StreamingMetrics {
                 &["actor_id", "connector", "sink_id", "sink_name"],
                 registry
             )
-            .unwrap();
+            .unwrap()
+            .relabel_debug_1(level);
 
         let kv_log_store_buffer_unconsumed_row_count =
             register_guarded_int_gauge_vec_with_registry!(
@@ -1138,7 +1209,8 @@ impl StreamingMetrics {
                 &["actor_id", "connector", "sink_id", "sink_name"],
                 registry
             )
-            .unwrap();
+            .unwrap()
+            .relabel_debug_1(level);
 
         let kv_log_store_buffer_unconsumed_epoch_count =
             register_guarded_int_gauge_vec_with_registry!(
@@ -1147,7 +1219,8 @@ impl StreamingMetrics {
                 &["actor_id", "connector", "sink_id", "sink_name"],
                 registry
             )
-            .unwrap();
+            .unwrap()
+            .relabel_debug_1(level);
 
         let kv_log_store_buffer_unconsumed_min_epoch =
             register_guarded_int_gauge_vec_with_registry!(
@@ -1156,15 +1229,17 @@ impl StreamingMetrics {
                 &["actor_id", "connector", "sink_id", "sink_name"],
                 registry
             )
-            .unwrap();
+            .unwrap()
+            .relabel_debug_1(level);
 
         let crossdb_last_consumed_min_epoch = register_guarded_int_gauge_vec_with_registry!(
             "crossdb_last_consumed_min_epoch",
             "Last consumed min epoch for cross-database changelog stream scan",
-            &["table_id", "actor_id", "fragment_id"],
+            &["actor_id", "table_id", "fragment_id"],
             registry
         )
-        .unwrap();
+        .unwrap()
+        .relabel_debug_1(level);
 
         let kv_log_store_buffer_memory_bytes =
             register_guarded_int_gauge_vec_with_registry!(
@@ -1173,7 +1248,8 @@ impl StreamingMetrics {
                 &["actor_id", "connector", "sink_id", "sink_name"],
                 registry
             )
-            .unwrap();
+            .unwrap()
+            .relabel_debug_1(level);
 
         let lru_runtime_loop_count = register_int_counter_with_registry!(
             "lru_runtime_loop_count",
@@ -1522,8 +1598,8 @@ impl StreamingMetrics {
         fragment_id: FragmentId,
     ) -> SinkExecutorMetrics {
         let label_list: &[&str; 3] = &[
-            &id.to_string(),
             &actor_id.to_string(),
+            &id.to_string(),
             &fragment_id.to_string(),
         ];
         SinkExecutorMetrics {
@@ -1544,8 +1620,8 @@ impl StreamingMetrics {
         fragment_id: FragmentId,
     ) -> GroupTopNMetrics {
         let label_list: &[&str; 3] = &[
-            &table_id.to_string(),
             &actor_id.to_string(),
+            &table_id.to_string(),
             &fragment_id.to_string(),
         ];
 
@@ -1569,8 +1645,8 @@ impl StreamingMetrics {
         fragment_id: FragmentId,
     ) -> GroupTopNMetrics {
         let label_list: &[&str; 3] = &[
-            &table_id.to_string(),
             &actor_id.to_string(),
+            &table_id.to_string(),
             &fragment_id.to_string(),
         ];
 
@@ -1594,8 +1670,8 @@ impl StreamingMetrics {
         fragment_id: FragmentId,
     ) -> LookupExecutorMetrics {
         let label_list: &[&str; 3] = &[
-            &table_id.to_string(),
             &actor_id.to_string(),
+            &table_id.to_string(),
             &fragment_id.to_string(),
         ];
 
@@ -1619,8 +1695,8 @@ impl StreamingMetrics {
         fragment_id: FragmentId,
     ) -> HashAggMetrics {
         let label_list: &[&str; 3] = &[
-            &table_id.to_string(),
             &actor_id.to_string(),
+            &table_id.to_string(),
             &fragment_id.to_string(),
         ];
         HashAggMetrics {
@@ -1661,8 +1737,8 @@ impl StreamingMetrics {
         fragment_id: FragmentId,
     ) -> AggDistinctDedupMetrics {
         let label_list: &[&str; 3] = &[
-            &table_id.to_string(),
             &actor_id.to_string(),
+            &table_id.to_string(),
             &fragment_id.to_string(),
         ];
         AggDistinctDedupMetrics {
@@ -1685,8 +1761,8 @@ impl StreamingMetrics {
         fragment_id: FragmentId,
     ) -> TemporalJoinMetrics {
         let label_list: &[&str; 3] = &[
-            &table_id.to_string(),
             &actor_id.to_string(),
+            &table_id.to_string(),
             &fragment_id.to_string(),
         ];
         TemporalJoinMetrics {
@@ -1703,7 +1779,7 @@ impl StreamingMetrics {
     }
 
     pub fn new_backfill_metrics(&self, table_id: TableId, actor_id: ActorId) -> BackfillMetrics {
-        let label_list: &[&str; 2] = &[&table_id.to_string(), &actor_id.to_string()];
+        let label_list: &[&str; 2] = &[&actor_id.to_string(), &table_id.to_string()];
         BackfillMetrics {
             backfill_snapshot_read_row_count: self
                 .backfill_snapshot_read_row_count
@@ -1719,7 +1795,7 @@ impl StreamingMetrics {
         table_id: TableId,
         actor_id: ActorId,
     ) -> CdcBackfillMetrics {
-        let label_list: &[&str; 2] = &[&table_id.to_string(), &actor_id.to_string()];
+        let label_list: &[&str; 2] = &[&actor_id.to_string(), &table_id.to_string()];
         CdcBackfillMetrics {
             cdc_backfill_snapshot_read_row_count: self
                 .cdc_backfill_snapshot_read_row_count
@@ -1737,8 +1813,8 @@ impl StreamingMetrics {
         fragment_id: FragmentId,
     ) -> OverWindowMetrics {
         let label_list: &[&str; 3] = &[
-            &table_id.to_string(),
             &actor_id.to_string(),
+            &table_id.to_string(),
             &fragment_id.to_string(),
         ];
         OverWindowMetrics {
@@ -1946,4 +2022,82 @@ pub struct StateTableMetrics {
     pub get_count: LabelGuardedIntCounter,
     pub iter_vnode_pruned_count: LabelGuardedIntCounter,
     pub get_vnode_pruned_count: LabelGuardedIntCounter,
+}
+
+#[cfg(test)]
+mod tests {
+    use risingwave_common::metrics::get_label;
+
+    use super::*;
+
+    fn assert_metric_labels(registry: &Registry, metric_name: &str, expected: &[(&str, &str)]) {
+        let metric_family = registry
+            .gather()
+            .into_iter()
+            .find(|family| family.name() == metric_name)
+            .unwrap();
+        let metric = metric_family.get_metric().first().unwrap();
+        for (name, value) in expected {
+            assert_eq!(get_label::<String>(metric, name).as_deref(), Some(*value));
+        }
+    }
+
+    fn record_reordered_metrics(
+        metrics: &StreamingMetrics,
+    ) -> (LabelGuardedIntCounter, SinkExecutorMetrics, HashAggMetrics) {
+        let source_output_row_count = metrics
+            .source_output_row_count
+            .with_guarded_label_values(&["11", "22", "source", "33"]);
+        source_output_row_count.inc();
+        let sink_metrics =
+            metrics.new_sink_exec_metrics(SinkId::new(44), ActorId::new(11), FragmentId::new(33));
+        sink_metrics.sink_input_row_count.inc();
+        let agg_metrics =
+            metrics.new_hash_agg_metrics(TableId::new(55), ActorId::new(11), FragmentId::new(33));
+        agg_metrics.agg_lookup_miss_count.inc();
+        (source_output_row_count, sink_metrics, agg_metrics)
+    }
+
+    #[test]
+    fn info_and_critical_metrics_blank_actor_id_without_shifting_other_labels() {
+        for level in [MetricLevel::Critical, MetricLevel::Info] {
+            let registry = Registry::new();
+            let metrics = StreamingMetrics::new(&registry, level);
+            let _recorded_metrics = record_reordered_metrics(&metrics);
+
+            assert_metric_labels(
+                &registry,
+                "stream_source_output_rows_counts",
+                &[
+                    ("actor_id", ""),
+                    ("source_id", "22"),
+                    ("source_name", "source"),
+                    ("fragment_id", "33"),
+                ],
+            );
+            assert_metric_labels(
+                &registry,
+                "stream_sink_input_row_count",
+                &[("actor_id", ""), ("sink_id", "44"), ("fragment_id", "33")],
+            );
+            assert_metric_labels(
+                &registry,
+                "stream_agg_lookup_miss_count",
+                &[("actor_id", ""), ("table_id", "55"), ("fragment_id", "33")],
+            );
+        }
+    }
+
+    #[test]
+    fn debug_metrics_retain_actor_id() {
+        let registry = Registry::new();
+        let metrics = StreamingMetrics::new(&registry, MetricLevel::Debug);
+        let _recorded_metrics = record_reordered_metrics(&metrics);
+
+        assert_metric_labels(
+            &registry,
+            "stream_sink_input_row_count",
+            &[("actor_id", "11"), ("sink_id", "44"), ("fragment_id", "33")],
+        );
+    }
 }

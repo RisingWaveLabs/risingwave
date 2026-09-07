@@ -93,7 +93,7 @@ impl<Src: OpendalSource> OpendalReader<Src> {
                 .source_ctx
                 .metrics
                 .file_source_input_row_count
-                .with_guarded_label_values(&[&source_id, &source_name, &actor_id, &fragment_id]);
+                .with_guarded_label_values(&[&actor_id, &source_id, &source_name, &fragment_id]);
             let chunk_stream;
             if let EncodingProperties::Parquet(parquet_props) =
                 &self.parser_config.specific.encoding_config

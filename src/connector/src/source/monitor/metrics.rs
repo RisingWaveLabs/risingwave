@@ -18,8 +18,10 @@ use prometheus::{
     IntCounterVec, Registry, exponential_buckets, histogram_opts,
     register_int_counter_vec_with_registry,
 };
+use risingwave_common::config::MetricLevel;
 use risingwave_common::metrics::{
     LabelGuardedHistogramVec, LabelGuardedIntCounterVec, LabelGuardedIntGaugeVec,
+    MetricVecRelabelExt, RelabeledGuardedIntCounterVec, RelabeledGuardedIntGaugeVec,
 };
 use risingwave_common::monitor::GLOBAL_METRICS_REGISTRY;
 use risingwave_common::{
@@ -27,6 +29,7 @@ use risingwave_common::{
     register_guarded_int_gauge_vec_with_registry,
 };
 
+use crate::connector_metrics_level;
 use crate::source::kafka::stats::RdKafkaStats;
 
 /// Low-cardinality connector ack failure categories.
@@ -173,23 +176,23 @@ impl Default for EnumeratorMetrics {
 
 #[derive(Debug, Clone)]
 pub struct SourceMetrics {
-    pub partition_input_count: LabelGuardedIntCounterVec,
+    pub partition_input_count: RelabeledGuardedIntCounterVec,
 
     // **Note**: for normal messages, the metric is the message's payload size.
     // For messages from load generator, the metric is the size of stream chunk.
-    pub partition_input_bytes: LabelGuardedIntCounterVec,
+    pub partition_input_bytes: RelabeledGuardedIntCounterVec,
     /// Report latest message id
-    pub latest_message_id: LabelGuardedIntGaugeVec,
+    pub latest_message_id: RelabeledGuardedIntGaugeVec,
     pub partition_eof_count: LabelGuardedIntCounterVec,
     pub partition_eof_offset: LabelGuardedIntGaugeVec,
     pub rdkafka_native_metric: Arc<RdKafkaStats>,
 
     pub direct_cdc_event_lag_latency: LabelGuardedHistogramVec,
 
-    pub parquet_source_skip_row_count: LabelGuardedIntCounterVec,
-    pub file_source_input_row_count: LabelGuardedIntCounterVec,
-    pub file_source_dirty_split_count: LabelGuardedIntGaugeVec,
-    pub file_source_failed_split_count: LabelGuardedIntCounterVec,
+    pub parquet_source_skip_row_count: RelabeledGuardedIntCounterVec,
+    pub file_source_input_row_count: RelabeledGuardedIntCounterVec,
+    pub file_source_dirty_split_count: RelabeledGuardedIntGaugeVec,
+    pub file_source_failed_split_count: RelabeledGuardedIntCounterVec,
 
     // kinesis source
     pub kinesis_throughput_exceeded_count: LabelGuardedIntCounterVec,
@@ -205,7 +208,7 @@ pub struct SourceMetrics {
 }
 
 pub static GLOBAL_SOURCE_METRICS: LazyLock<SourceMetrics> =
-    LazyLock::new(|| SourceMetrics::new(&GLOBAL_METRICS_REGISTRY));
+    LazyLock::new(|| SourceMetrics::new(&GLOBAL_METRICS_REGISTRY, connector_metrics_level()));
 
 impl SourceMetrics {
     pub fn inc_connector_ack_failure_count(
@@ -225,7 +228,7 @@ impl SourceMetrics {
             .inc();
     }
 
-    fn new(registry: &Registry) -> Self {
+    fn new(registry: &Registry, metric_level: MetricLevel) -> Self {
         let partition_input_count = register_guarded_int_counter_vec_with_registry!(
             "source_partition_input_count",
             "Total number of rows that have been input from specific partition",
@@ -238,7 +241,8 @@ impl SourceMetrics {
             ],
             registry
         )
-        .unwrap();
+        .unwrap()
+        .relabel_debug_1(metric_level);
         let partition_input_bytes = register_guarded_int_counter_vec_with_registry!(
             "source_partition_input_bytes",
             "Total bytes that have been input from specific partition",
@@ -251,14 +255,16 @@ impl SourceMetrics {
             ],
             registry
         )
-        .unwrap();
+        .unwrap()
+        .relabel_debug_1(metric_level);
         let latest_message_id = register_guarded_int_gauge_vec_with_registry!(
             "source_latest_message_id",
             "Latest message id for a exec per partition",
-            &["source_id", "actor_id", "partition"],
+            &["actor_id", "source_id", "partition"],
             registry,
         )
-        .unwrap();
+        .unwrap()
+        .relabel_debug_1(metric_level);
         let partition_eof_count = register_guarded_int_counter_vec_with_registry!(
             "source_partition_eof_count",
             "Total number of EOF events received from specific partition",
@@ -286,7 +292,8 @@ impl SourceMetrics {
             &["actor_id", "source_id", "source_name", "fragment_id"],
             registry
         )
-        .unwrap();
+        .unwrap()
+        .relabel_debug_1(metric_level);
 
         let direct_cdc_event_lag_latency =
             register_guarded_histogram_vec_with_registry!(opts, &["table_name"], registry).unwrap();
@@ -296,24 +303,27 @@ impl SourceMetrics {
         let file_source_input_row_count = register_guarded_int_counter_vec_with_registry!(
             "file_source_input_row_count",
             "Total number of rows that have been read in file source",
-            &["source_id", "source_name", "actor_id", "fragment_id"],
+            &["actor_id", "source_id", "source_name", "fragment_id"],
             registry
         )
-        .unwrap();
+        .unwrap()
+        .relabel_debug_1(metric_level);
         let file_source_dirty_split_count = register_guarded_int_gauge_vec_with_registry!(
             "file_source_dirty_split_count",
             "Current number of dirty file splits in file source",
-            &["source_id", "source_name", "actor_id", "fragment_id"],
+            &["actor_id", "source_id", "source_name", "fragment_id"],
             registry
         )
-        .unwrap();
+        .unwrap()
+        .relabel_debug_1(metric_level);
         let file_source_failed_split_count = register_guarded_int_counter_vec_with_registry!(
             "file_source_failed_split_count",
             "Total number of file splits marked dirty in file source",
-            &["source_id", "source_name", "actor_id", "fragment_id"],
+            &["actor_id", "source_id", "source_name", "fragment_id"],
             registry
         )
-        .unwrap();
+        .unwrap()
+        .relabel_debug_1(metric_level);
 
         let kinesis_throughput_exceeded_count = register_guarded_int_counter_vec_with_registry!(
             "kinesis_throughput_exceeded_count",

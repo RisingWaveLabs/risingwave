@@ -147,6 +147,10 @@ impl<T: MetricVecBuilder> RelabeledMetricVec<MetricVec<T>> {
         }
         self.metric.with_label_values(vals)
     }
+
+    pub fn reset(&self) {
+        self.metric.reset();
+    }
 }
 
 impl<T: MetricVecBuilder> RelabeledMetricVec<LabelGuardedMetricVec<T>> {

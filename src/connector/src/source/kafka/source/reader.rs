@@ -515,8 +515,8 @@ impl KafkaSplitReader {
                             .latest_message_id
                             .with_guarded_label_values(&[
                                 // source name is not available here
-                                &self.source_ctx.source_id.to_string(),
                                 &self.source_ctx.actor_id.to_string(),
+                                &self.source_ctx.source_id.to_string(),
                                 &split_id,
                             ])
                     })

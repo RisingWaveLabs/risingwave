@@ -34,9 +34,11 @@
 #![feature(custom_inner_attributes)]
 #![feature(iter_array_chunks)]
 
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use duration_str::parse_std;
+use risingwave_common::config::MetricLevel;
 use serde::de;
 
 pub mod aws_utils;
@@ -67,6 +69,19 @@ pub const AUTO_SCHEMA_CHANGE_KEY: &str = "auto.schema.change";
 pub const SINK_CREATE_TABLE_IF_NOT_EXISTS_KEY: &str = "create_table_if_not_exists";
 pub const SINK_TARGET_TABLE_NAME: &str = "table.name";
 pub const SINK_INTERMEDIATE_TABLE_NAME: &str = "intermediate.table.name";
+
+static CONNECTOR_METRICS_LEVEL: OnceLock<MetricLevel> = OnceLock::new();
+
+pub fn init_connector_metrics(metric_level: MetricLevel) {
+    CONNECTOR_METRICS_LEVEL.get_or_init(|| metric_level);
+}
+
+fn connector_metrics_level() -> MetricLevel {
+    CONNECTOR_METRICS_LEVEL
+        .get()
+        .copied()
+        .unwrap_or(MetricLevel::Debug)
+}
 
 pub(crate) fn deserialize_u32_from_string<'de, D>(deserializer: D) -> Result<u32, D::Error>
 where

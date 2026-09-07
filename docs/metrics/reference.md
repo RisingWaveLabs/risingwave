@@ -154,6 +154,12 @@ The remaining rarer labels (`op`, `level`, `upstream_fragment_id`, `slot_name`,
 `status`, `top_n`, `event_type`, `uploader_stage`, `executor_name`, …) are
 explained inline with the metrics that use them.
 
+At the `info` and `critical` server metric levels, compute-node and meta-node
+metrics replace `actor_id` values with the empty string to keep cardinality
+bounded. At `debug`, actor-level diagnostic metrics retain their real actor
+IDs. The only exception is `actor_info`, which retains real actor IDs at all
+enabled levels because dashboards use it to locate and count actors.
+
 ### 2.3 The info/join metrics
 
 Several metrics exist purely to carry human-readable names alongside numeric
@@ -162,9 +168,9 @@ IDs, for dashboard joining:
 | Info metric      | Labels                                      | Purpose |
 |------------------|---------------------------------------------|---------|
 | `table_info`     | `materialized_view_id`, `table_id`, `fragment_id`, `table_name`, `table_type`, `compaction_group_id` | Resolves `table_id` → `table_name` (and gives the owning fragment / compaction group / containing MV). Value is 1 while the table exists. |
-| `sink_info`      | `actor_id`, `sink_id`, `sink_name`          | Resolves `sink_id` → `sink_name` (and the backing actor). There is no equivalent `source_info` metric — see the note on `source_id` in §2.2 for how to resolve source names. |
+| `sink_info`      | `actor_id`, `sink_id`, `sink_name`          | Resolves `sink_id` → `sink_name`. The backing actor is available at the `debug` metric level. There is no equivalent `source_info` metric — see the note on `source_id` in §2.2 for how to resolve source names. |
 | `worker_num`     | `worker_type`                               | Current count of workers per type. `worker_type` values are the protobuf `WorkerType::as_str_name()` strings — `WORKER_TYPE_COMPUTE_NODE`, `WORKER_TYPE_FRONTEND`, `WORKER_TYPE_META`, `WORKER_TYPE_COMPACTOR`. Useful for "at least N of each" alerts. |
-| `actor_info`     | `actor_id`, `fragment_id`, `compute_node`   | Resolves `actor_id` → location. |
+| `actor_info`     | `actor_id`, `fragment_id`, `compute_node`   | Resolves `actor_id` → location. This is the sole allowlisted metric that retains non-empty actor IDs below `debug`. |
 
 Dashboards routinely use the PromQL pattern:
 
@@ -308,7 +314,7 @@ is which. For a precise short-window rate on a counter, use
 | `source_partition_input_bytes`        | `actor_id`, `source_id`, `partition`, `source_name`, `fragment_id` | Bytes read from the same partition. |
 | `source_partition_eof_count`          | `source_id`, `partition`, `source_name`, `fragment_id`  | EOF events received from a partition. For bounded sources this ticks up when the partition finishes. |
 | `source_partition_eof_offset`         | `source_id`, `partition`, `source_name`, `fragment_id`  | Offset at which the EOF was observed. Gauge. |
-| `file_source_input_row_count`         | `source_id`, `source_name`, `actor_id`, `fragment_id`   | Rows read by a **file source** (e.g. S3 / GCS ingest). File sources don't have partitions in the Kafka sense so they get a separate counter. |
+| `file_source_input_row_count`         | `actor_id`, `source_id`, `source_name`, `fragment_id`   | Rows read by a **file source** (e.g. S3 / GCS ingest). File sources don't have partitions in the Kafka sense so they get a separate counter. |
 
 **Per-source throughput in rows/s (user dashboard):**
 ```promql
@@ -324,17 +330,17 @@ sum(rate(source_partition_input_bytes[$__rate_interval])) by (source_id, source_
 
 | Metric                                  | Labels                                                  | What it measures |
 |-----------------------------------------|---------------------------------------------------------|------------------|
-| `stream_source_output_rows_counts`      | `source_id`, `source_name`, `actor_id`, `fragment_id`   | Rows emitted by the source executor into the streaming graph. Equals `source_partition_input_count` summed over partitions when there is no row-level filtering at the source. |
-| `stream_source_split_change_event_count`| `source_id`, `source_name`, `actor_id`, `fragment_id`   | Split reassignment / rebalance events received by the source executor. A steady non-zero rate usually indicates a Kafka consumer-group rebalance storm. |
-| `stream_source_backfill_rows_counts`    | `source_id`, `source_name`, `actor_id`, `fragment_id`   | Rows read specifically during source-backfill (e.g. when a source-backed materialised view is still catching up on its initial snapshot). |
+| `stream_source_output_rows_counts`      | `actor_id`, `source_id`, `source_name`, `fragment_id`   | Rows emitted by the source executor into the streaming graph. Equals `source_partition_input_count` summed over partitions when there is no row-level filtering at the source. |
+| `stream_source_split_change_event_count`| `actor_id`, `source_id`, `source_name`, `fragment_id`   | Split reassignment / rebalance events received by the source executor. A steady non-zero rate usually indicates a Kafka consumer-group rebalance storm. |
+| `stream_source_backfill_rows_counts`    | `actor_id`, `source_id`, `source_name`, `fragment_id`   | Rows read specifically during source-backfill (e.g. when a source-backed materialised view is still catching up on its initial snapshot). |
 
 ### 4.3 Sink output (from the streaming graph to the external system)
 
 | Metric                           | Labels                                  | What it measures |
 |----------------------------------|-----------------------------------------|------------------|
-| `stream_sink_input_row_count`    | `sink_id`, `actor_id`, `fragment_id`    | Rows handed to the sink executor for delivery. |
-| `stream_sink_input_bytes`        | `sink_id`, `actor_id`, `fragment_id`    | Bytes handed to the sink executor. |
-| `stream_sink_chunk_buffer_size`  | `sink_id`, `actor_id`, `fragment_id`    | Estimated byte size of chunks currently buffered inside the barrier window, waiting to be flushed to the sink (sum of each chunk's `estimated_heap_size()` in the sink executor's chunk buffer). Gauge. Sustained growth indicates sink back-pressure. |
+| `stream_sink_input_row_count`    | `actor_id`, `sink_id`, `fragment_id`    | Rows handed to the sink executor for delivery. |
+| `stream_sink_input_bytes`        | `actor_id`, `sink_id`, `fragment_id`    | Bytes handed to the sink executor. |
+| `stream_sink_chunk_buffer_size`  | `actor_id`, `sink_id`, `fragment_id`    | Estimated byte size of chunks currently buffered inside the barrier window, waiting to be flushed to the sink (sum of each chunk's `estimated_heap_size()` in the sink executor's chunk buffer). Gauge. Sustained growth indicates sink back-pressure. |
 
 Because these carry only `sink_id` (not `sink_name`), dashboard queries join
 against `sink_info` to add the name — see the PromQL pattern in §2.3.
@@ -362,11 +368,11 @@ by a `stage` label.
 
 | Metric                                                | Labels                            | Backfill kind |
 |-------------------------------------------------------|-----------------------------------|---------------|
-| `stream_backfill_snapshot_read_row_count`             | `table_id`, `actor_id`            | MV-on-MV: rows read from the existing materialised view's snapshot. |
-| `stream_backfill_upstream_output_row_count`           | `table_id`, `actor_id`            | MV-on-MV: rows coming from the live upstream during backfill. |
-| `stream_cdc_backfill_snapshot_read_row_count`         | `table_id`, `actor_id`            | CDC: rows read from the source's initial snapshot. |
-| `stream_cdc_backfill_upstream_output_row_count`       | `table_id`, `actor_id`            | CDC: live binlog / WAL rows during backfill. |
-| `stream_snapshot_backfill_consume_snapshot_row_count` | `table_id`, `actor_id`, `stage`   | Snapshot-backfill (the newer path that reads from object store directly). `stage` takes one of three values — `consuming_snapshot` (Phase 1: consume the frozen snapshot), `consuming_log_store` (Phase 2: catch up via the kv log store), `consume_upstream` (Phase 3: switch to the live upstream feed). See `src/stream/src/executor/backfill/snapshot_backfill/executor.rs`. |
+| `stream_backfill_snapshot_read_row_count`             | `actor_id`, `table_id`            | MV-on-MV: rows read from the existing materialised view's snapshot. |
+| `stream_backfill_upstream_output_row_count`           | `actor_id`, `table_id`            | MV-on-MV: rows coming from the live upstream during backfill. |
+| `stream_cdc_backfill_snapshot_read_row_count`         | `actor_id`, `table_id`            | CDC: rows read from the source's initial snapshot. |
+| `stream_cdc_backfill_upstream_output_row_count`       | `actor_id`, `table_id`            | CDC: live binlog / WAL rows during backfill. |
+| `stream_snapshot_backfill_consume_snapshot_row_count` | `actor_id`, `table_id`, `stage`   | Snapshot-backfill (the newer path that reads from object store directly). `stage` takes one of three values — `consuming_snapshot` (Phase 1: consume the frozen snapshot), `consuming_log_store` (Phase 2: catch up via the kv log store), `consume_upstream` (Phase 3: switch to the live upstream feed). See `src/stream/src/executor/backfill/snapshot_backfill/executor.rs`. |
 
 Monitoring both counters of an MV-on-MV or CDC backfill tells you whether
 backfill is *running* (snapshot rate > 0) and whether it is *keeping up
@@ -658,10 +664,10 @@ monitoring** of a Kafka source.
 | Metric                          | Type                         | Labels                                                        | Meaning |
 |---------------------------------|------------------------------|---------------------------------------------------------------|---------|
 | `source_kafka_high_watermark`   | gauge      | `source_id`, `partition`                                      | Kafka high-watermark offset for this partition — the *next* offset the broker will assign (one past the last produced message). Pair with `source_latest_message_id` (last *processed* offset) for lag. Note this means a fully caught-up partition naturally reports `high_watermark - latest_message_id == 1`, not 0. |
-| `source_latest_message_id`      | gauge      | `source_id`, `actor_id`, `partition`                          | Latest message offset that the source reader has processed. Use `source_kafka_high_watermark - source_latest_message_id` for per-partition lag. |
+| `source_latest_message_id`      | gauge      | `actor_id`, `source_id`, `partition`                          | Latest message offset that the source reader has processed. Use `source_kafka_high_watermark - source_latest_message_id` for per-partition lag. |
 | `source_partition_eof_count`    | counter    | `source_id`, `partition`, `source_name`, `fragment_id`        | Count of end-of-partition events observed. For bounded sources this ticks up when the partition is drained. |
 | `source_partition_eof_offset`   | gauge      | `source_id`, `partition`, `source_name`, `fragment_id`        | Offset at which the EOF was observed. |
-| `stream_source_split_change_event_count` | counter | `source_id`, `source_name`, `actor_id`, `fragment_id`    | Split-reassignment events (Kafka consumer-group rebalance or split migration). A sustained non-zero rate indicates churn. |
+| `stream_source_split_change_event_count` | counter | `actor_id`, `source_id`, `source_name`, `fragment_id`    | Split-reassignment events (Kafka consumer-group rebalance or split migration). A sustained non-zero rate indicates churn. |
 
 **Per-partition Kafka lag** (matches the dev-dashboard panel in
 `grafana/dashboard/dev/source_general.py`):
@@ -753,9 +759,9 @@ Emitted by the AWS Kinesis connector. All five carry the same label set:
 
 | Metric                            | Type                      | Labels                                                        | Meaning |
 |-----------------------------------|---------------------------|---------------------------------------------------------------|---------|
-| `file_source_input_row_count`     | counter | `source_id`, `source_name`, `actor_id`, `fragment_id`         | Rows read by the file source. Counter. |
-| `file_source_dirty_split_count`   | gauge   | `source_id`, `source_name`, `actor_id`, `fragment_id`         | Current number of splits that failed and are retained for retry / inspection. Gauge. |
-| `file_source_failed_split_count`  | counter | `source_id`, `source_name`, `actor_id`, `fragment_id`         | Cumulative count of splits that ended in failure. |
+| `file_source_input_row_count`     | counter | `actor_id`, `source_id`, `source_name`, `fragment_id`         | Rows read by the file source. Counter. |
+| `file_source_dirty_split_count`   | gauge   | `actor_id`, `source_id`, `source_name`, `fragment_id`         | Current number of splits that failed and are retained for retry / inspection. Gauge. |
+| `file_source_failed_split_count`  | counter | `actor_id`, `source_id`, `source_name`, `fragment_id`         | Cumulative count of splits that ended in failure. |
 
 ### 8.6 CDC (Postgres / MySQL / SQL Server)
 
@@ -883,11 +889,11 @@ the different label convention.
 | `sync_kv_log_store_buffer_unconsumed_min_epoch`         | gauge   | …                                                      | Earliest unconsumed epoch. |
 | `sync_kv_log_store_storage_write_count`                 | counter | …                                                      | Rows written through the storage path. |
 | `sync_kv_log_store_storage_write_size`                  | counter | …                                                      | Bytes written. |
-| `sync_kv_log_store_read_count`                          | counter | `type`, `actor_id`, `target`, `fragment_id`, `relation`| Rows read; `type` ∈ `buffer` (served directly from in-memory buffer), `total` (all reads), `persistent_log` (read from Hummock-backed persistent log), `flushed_buffer` (read from a buffer that has been flushed to storage). |
+| `sync_kv_log_store_read_count`                          | counter | `actor_id`, `type`, `target`, `fragment_id`, `relation`| Rows read; `type` ∈ `buffer` (served directly from in-memory buffer), `total` (all reads), `persistent_log` (read from Hummock-backed persistent log), `flushed_buffer` (read from a buffer that has been flushed to storage). |
 | `sync_kv_log_store_read_size`                           | counter | same as `_read_count`                                  | Bytes read. Same label space as `_read_count`, but in current code only the `persistent_log` and `flushed_buffer` `type` values are actually incremented — the `buffer` and `total` size series are constructed and exported but stay at zero. |
 | `sync_kv_log_store_wait_next_poll_ns`                   | counter | `actor_id`, `target`, `fragment_id`, `relation`        | Cumulative idle time waiting for the next poll. |
 | `sync_kv_log_store_write_pause_duration_ns`             | counter | `actor_id`, `target`, `fragment_id`, `relation`        | Total nanoseconds writes were paused because the buffer was full. Directly translates to "how long the sink's upstream was backpressured". |
-| `sync_kv_log_store_state`                               | counter | `state`, `actor_id`, `target`, `fragment_id`, `relation`| Counts state transitions of the log store — `state` ∈ `clean` / `dirty`. |
+| `sync_kv_log_store_state`                               | counter | `actor_id`, `state`, `target`, `fragment_id`, `relation`| Counts state transitions of the log store — `state` ∈ `clean` / `dirty`. |
 
 ### 9.4 Iceberg sinks
 
@@ -955,7 +961,7 @@ through the state store. Key metrics:
 
 The `state_table_*` companion metrics sit one layer above — they are
 per-state-table counts of `get` / `iter` calls and vnode-pruning
-effectiveness, keyed on `table_id`, `actor_id`, `fragment_id`.
+effectiveness, keyed on `actor_id`, `table_id`, `fragment_id`.
 
 ### 10.2 State-store writes and uploads (compute side)
 
@@ -1103,14 +1109,14 @@ than fits in its share of the LRU budget, and remote reads dominate.
 
 | Metric                                    | Type                      | Labels                                    | Cache for |
 |-------------------------------------------|---------------------------|-------------------------------------------|-----------|
-| `stream_join_lookup_total_count` / `_miss_count` | counter | `side`, `join_table_id`, `actor_id`, `fragment_id` | Hash-join probe-side cache. |
-| `stream_join_insert_cache_miss_count`     | counter | `side`, `join_table_id`, `actor_id`, `fragment_id` | Join state writes that had to hit storage. |
-| `stream_agg_lookup_total_count` / `_miss_count`  | counter | `table_id`, `actor_id`, `fragment_id`            | Hash-agg cache. |
-| `stream_agg_state_cache_lookup_count` / `_miss_count` | counter | `table_id`, `actor_id`, `fragment_id`       | Per-group state cache (approx agg, top-N on-group, etc). |
-| `stream_group_top_n_total_query_cache_count` / `_cache_miss_count` | counter | `table_id`, `actor_id`, `fragment_id` | Group TopN operator cache. |
+| `stream_join_lookup_total_count` / `_miss_count` | counter | `actor_id`, `side`, `join_table_id`, `fragment_id` | Hash-join probe-side cache. |
+| `stream_join_insert_cache_miss_count`     | counter | `actor_id`, `side`, `join_table_id`, `fragment_id` | Join state writes that had to hit storage. |
+| `stream_agg_lookup_total_count` / `_miss_count`  | counter | `actor_id`, `table_id`, `fragment_id`            | Hash-agg cache. |
+| `stream_agg_state_cache_lookup_count` / `_miss_count` | counter | `actor_id`, `table_id`, `fragment_id`       | Per-group state cache (approx agg, top-N on-group, etc). |
+| `stream_group_top_n_total_query_cache_count` / `_cache_miss_count` | counter | `actor_id`, `table_id`, `fragment_id` | Group TopN operator cache. |
 | `stream_materialize_cache_total_count` / `stream_materialize_cache_hit_count` / `stream_materialize_data_exist_count` | counter | `actor_id`, `table_id`, `fragment_id` | Materialize executor upsert cache. Note that the third metric drops the `cache_` infix — it counts how often, on a write, the row already existed in storage (i.e. an UPSERT that becomes UPDATE rather than INSERT). |
-| `stream_lookup_total_query_cache_count` / `stream_lookup_cache_miss_count` | counter | `table_id`, `actor_id`, `fragment_id` | **Lookup-executor** (index lookup join) cache total vs misses. Pair with `stream_lookup_cached_entry_count` (gauge) for current cached-row count. |
-| `stream_temporal_join_total_query_cache_count` / `stream_temporal_join_cache_miss_count` | counter | `table_id`, `actor_id`, `fragment_id` | **Temporal-join** cache total vs misses. Pair with `stream_temporal_join_cached_entry_count` (gauge). Distinct executor from the lookup-join family above. |
+| `stream_lookup_total_query_cache_count` / `stream_lookup_cache_miss_count` | counter | `actor_id`, `table_id`, `fragment_id` | **Lookup-executor** (index lookup join) cache total vs misses. Pair with `stream_lookup_cached_entry_count` (gauge) for current cached-row count. |
+| `stream_temporal_join_total_query_cache_count` / `stream_temporal_join_cache_miss_count` | counter | `actor_id`, `table_id`, `fragment_id` | **Temporal-join** cache total vs misses. Pair with `stream_temporal_join_cached_entry_count` (gauge). Distinct executor from the lookup-join family above. |
 | `stream_over_window_cached_entry_count` / `stream_over_window_cache_lookup_count` / `_cache_miss_count` / `stream_over_window_range_cache_left_miss_count` / `_right_miss_count` / `stream_over_window_accessed_entry_count` / `_compute_count` / `_same_output_count` | various | see TSV | Over-window operator internals. |
 
 Compute hit rate as `1 - (miss_count / total_count)` over a rolling window.

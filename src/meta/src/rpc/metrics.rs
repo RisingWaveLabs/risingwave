@@ -14,7 +14,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::AtomicU64;
-use std::sync::{Arc, LazyLock};
+use std::sync::{Arc, LazyLock, OnceLock};
 use std::time::Duration;
 
 use prometheus::core::{AtomicF64, GenericGaugeVec};
@@ -26,9 +26,10 @@ use prometheus::{
     register_int_gauge_with_registry,
 };
 use risingwave_common::catalog::{FragmentTypeFlag, TableId};
+use risingwave_common::config::MetricLevel;
 use risingwave_common::metrics::{
     LabelGuardedHistogramVec, LabelGuardedIntCounterVec, LabelGuardedIntGaugeVec,
-    LabelGuardedUintGaugeVec,
+    LabelGuardedUintGaugeVec, MetricVecRelabelExt, RelabeledMetricVec,
 };
 use risingwave_common::monitor::GLOBAL_METRICS_REGISTRY;
 use risingwave_common::system_param::reader::SystemParamsRead;
@@ -217,12 +218,15 @@ pub struct MetaMetrics {
     pub source_enumerator_metrics: Arc<SourceEnumeratorMetrics>,
 
     // ********************************** Fragment ************************************
-    /// A dummy gauge metrics with its label to be the mapping from actor id to fragment id
+    /// A dummy gauge metrics with its label to be the mapping from actor id to fragment id.
+    ///
+    /// This is the only metric allowlisted to retain `actor_id` below `Debug`, because dashboards
+    /// use it to map actors to fragments and compute nodes and to count actors on each node.
     pub actor_info: IntGaugeVec,
     /// A dummy gauge metrics with its label to be the mapping from table id to actor id
     pub table_info: IntGaugeVec,
     /// A dummy gauge metrics with its label to be the mapping from actor id to sink id
-    pub sink_info: IntGaugeVec,
+    pub sink_info: RelabeledMetricVec<IntGaugeVec>,
     /// A dummy gauge metrics with its label to be relation info
     pub relation_info: IntGaugeVec,
     /// A dummy gauge metrics with its label to be the mapping from database id to database name
@@ -262,8 +266,21 @@ pub struct MetaMetrics {
     pub refresh_cron_job_miss_cnt: LabelGuardedIntCounterVec,
 }
 
+static META_METRICS_LEVEL: OnceLock<MetricLevel> = OnceLock::new();
+
+pub fn init_meta_metrics(metric_level: MetricLevel) {
+    META_METRICS_LEVEL.get_or_init(|| metric_level);
+}
+
+fn meta_metrics_level() -> MetricLevel {
+    META_METRICS_LEVEL
+        .get()
+        .copied()
+        .unwrap_or(MetricLevel::Debug)
+}
+
 pub static GLOBAL_META_METRICS: LazyLock<MetaMetrics> =
-    LazyLock::new(|| MetaMetrics::new(&GLOBAL_METRICS_REGISTRY));
+    LazyLock::new(|| MetaMetrics::new(&GLOBAL_METRICS_REGISTRY, meta_metrics_level()));
 
 fn latency_buckets(max: f64, count: usize) -> Vec<f64> {
     const MIN: f64 = 0.1;
@@ -276,7 +293,7 @@ fn latency_buckets(max: f64, count: usize) -> Vec<f64> {
 }
 
 impl MetaMetrics {
-    fn new(registry: &Registry) -> Self {
+    fn new(registry: &Registry, metric_level: MetricLevel) -> Self {
         let opts = histogram_opts!(
             "meta_grpc_duration_seconds",
             "gRPC latency of meta services",
@@ -785,7 +802,8 @@ impl MetaMetrics {
             &["actor_id", "sink_id", "sink_name",],
             registry
         )
-        .unwrap();
+        .unwrap()
+        .relabel_debug_1(metric_level);
 
         let relation_info = register_int_gauge_vec_with_registry!(
             "relation_info",
@@ -1103,7 +1121,7 @@ impl MetaMetrics {
 
     #[cfg(test)]
     pub fn for_test(registry: &Registry) -> Self {
-        Self::new(registry)
+        Self::new(registry, MetricLevel::Debug)
     }
 }
 impl Default for MetaMetrics {
@@ -1689,4 +1707,53 @@ pub fn start_info_monitor(
     });
 
     (join_handle, shutdown_tx)
+}
+
+#[cfg(test)]
+mod tests {
+    use risingwave_common::metrics::get_label;
+
+    use super::*;
+
+    fn actor_id(registry: &Registry, metric_name: &str) -> String {
+        let metric_family = registry
+            .gather()
+            .into_iter()
+            .find(|family| family.name() == metric_name)
+            .unwrap();
+        get_label(metric_family.get_metric().first().unwrap(), "actor_id").unwrap()
+    }
+
+    #[test]
+    fn actor_info_is_the_only_meta_actor_id_allowlist() {
+        for level in [MetricLevel::Critical, MetricLevel::Info] {
+            let registry = Registry::new();
+            let metrics = MetaMetrics::new(&registry, level);
+
+            metrics
+                .actor_info
+                .with_label_values(&["11", "22", "compute-0"])
+                .set(1);
+            metrics
+                .sink_info
+                .with_label_values(&["11", "33", "sink"])
+                .set(1);
+
+            assert_eq!(actor_id(&registry, "actor_info"), "11");
+            assert_eq!(actor_id(&registry, "sink_info"), "");
+        }
+    }
+
+    #[test]
+    fn debug_meta_metrics_retain_actor_id() {
+        let registry = Registry::new();
+        let metrics = MetaMetrics::new(&registry, MetricLevel::Debug);
+
+        metrics
+            .sink_info
+            .with_label_values(&["11", "33", "sink"])
+            .set(1);
+
+        assert_eq!(actor_id(&registry, "sink_info"), "11");
+    }
 }

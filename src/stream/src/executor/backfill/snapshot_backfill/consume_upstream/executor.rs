@@ -75,8 +75,8 @@ impl<T: UpstreamTable, S: StateStore> UpstreamTableExecutor<T, S> {
             .streaming_metrics
             .crossdb_last_consumed_min_epoch
             .with_guarded_label_values(&[
-                table_id_label.as_str(),
                 actor_id_label.as_str(),
+                table_id_label.as_str(),
                 fragment_id_label.as_str(),
             ]);
         let metrics = actor_ctx

@@ -423,6 +423,7 @@ impl FrontendEnv {
         meta_client.activate(&frontend_address).await?;
 
         let frontend_metrics = Arc::new(GLOBAL_FRONTEND_METRICS.clone());
+        risingwave_connector::init_connector_metrics(config.server.metrics_level);
         let source_metrics = Arc::new(GLOBAL_SOURCE_METRICS.clone());
         let spill_metrics = Arc::new(GLOBAL_BATCH_SPILL_METRICS.clone());
 

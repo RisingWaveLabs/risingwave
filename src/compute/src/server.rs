@@ -186,6 +186,7 @@ pub async fn compute_node_serve(
     info!("Assigned worker node id {}", worker_id);
 
     // Initialize the metrics subsystem.
+    risingwave_connector::init_connector_metrics(config.server.metrics_level);
     let source_metrics = Arc::new(GLOBAL_SOURCE_METRICS.clone());
     let hummock_metrics = Arc::new(GLOBAL_HUMMOCK_METRICS.clone());
     let streaming_metrics = Arc::new(global_streaming_metrics(config.server.metrics_level));

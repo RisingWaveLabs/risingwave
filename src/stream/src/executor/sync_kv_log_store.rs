@@ -158,15 +158,15 @@ pub mod metrics {
             let labels = &[&actor_id_str, target, &fragment_id_str, name];
 
             let unclean_state = metrics.sync_kv_log_store_state.with_guarded_label_values(&[
-                "dirty",
                 &actor_id_str,
+                "dirty",
                 target,
                 &fragment_id_str,
                 name,
             ]);
             let clean_state = metrics.sync_kv_log_store_state.with_guarded_label_values(&[
-                "clean",
                 &actor_id_str,
+                "clean",
                 target,
                 &fragment_id_str,
                 name,
@@ -203,8 +203,8 @@ pub mod metrics {
             let buffer_read_count = metrics
                 .sync_kv_log_store_read_count
                 .with_guarded_label_values(&[
-                    "buffer",
                     &actor_id_str,
+                    "buffer",
                     target,
                     &fragment_id_str,
                     name,
@@ -213,8 +213,8 @@ pub mod metrics {
             let buffer_read_size = metrics
                 .sync_kv_log_store_read_size
                 .with_guarded_label_values(&[
-                    "buffer",
                     &actor_id_str,
+                    "buffer",
                     target,
                     &fragment_id_str,
                     name,
@@ -223,8 +223,8 @@ pub mod metrics {
             let total_read_count = metrics
                 .sync_kv_log_store_read_count
                 .with_guarded_label_values(&[
-                    "total",
                     &actor_id_str,
+                    "total",
                     target,
                     &fragment_id_str,
                     name,
@@ -233,8 +233,8 @@ pub mod metrics {
             let total_read_size = metrics
                 .sync_kv_log_store_read_size
                 .with_guarded_label_values(&[
-                    "total",
                     &actor_id_str,
+                    "total",
                     target,
                     &fragment_id_str,
                     name,
@@ -246,8 +246,8 @@ pub mod metrics {
             let persistent_log_read_size = metrics
                 .sync_kv_log_store_read_size
                 .with_guarded_label_values(&[
-                    READ_PERSISTENT_LOG,
                     &actor_id_str,
+                    READ_PERSISTENT_LOG,
                     target,
                     &fragment_id_str,
                     name,
@@ -256,8 +256,8 @@ pub mod metrics {
             let persistent_log_read_count = metrics
                 .sync_kv_log_store_read_count
                 .with_guarded_label_values(&[
-                    READ_PERSISTENT_LOG,
                     &actor_id_str,
+                    READ_PERSISTENT_LOG,
                     target,
                     &fragment_id_str,
                     name,
@@ -266,8 +266,8 @@ pub mod metrics {
             let flushed_buffer_read_size = metrics
                 .sync_kv_log_store_read_size
                 .with_guarded_label_values(&[
-                    READ_FLUSHED_BUFFER,
                     &actor_id_str,
+                    READ_FLUSHED_BUFFER,
                     target,
                     &fragment_id_str,
                     name,
@@ -276,8 +276,8 @@ pub mod metrics {
             let flushed_buffer_read_count = metrics
                 .sync_kv_log_store_read_count
                 .with_guarded_label_values(&[
-                    READ_FLUSHED_BUFFER,
                     &actor_id_str,
+                    READ_FLUSHED_BUFFER,
                     target,
                     &fragment_id_str,
                     name,

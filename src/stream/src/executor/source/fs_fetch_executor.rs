@@ -314,11 +314,11 @@ impl<S: StateStore, Src: OpendalSource> FsFetchExecutor<S, Src> {
         let dirty_split_count_metrics = source_desc
             .metrics
             .file_source_dirty_split_count
-            .with_guarded_label_values(&[&source_id, &source_name, &actor_id, &fragment_id]);
+            .with_guarded_label_values(&[&actor_id, &source_id, &source_name, &fragment_id]);
         let failed_split_count_metrics = source_desc
             .metrics
             .file_source_failed_split_count
-            .with_guarded_label_values(&[&source_id, &source_name, &actor_id, &fragment_id]);
+            .with_guarded_label_values(&[&actor_id, &source_id, &source_name, &fragment_id]);
         dirty_split_count_metrics.set(0);
 
         // pulsar's `message_id_data_idx` is not used in this executor, so we don't need to get it.

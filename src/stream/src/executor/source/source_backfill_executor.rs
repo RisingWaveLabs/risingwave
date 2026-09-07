@@ -316,9 +316,9 @@ impl<S: StateStore> SourceBackfillExecutorInner<S> {
         let source_split_change_count = metrics
             .source_split_change_count
             .with_guarded_label_values(&[
+                &actor_ctx.id.to_string(),
                 &source_id.to_string(),
                 &source_name,
-                &actor_ctx.id.to_string(),
                 &actor_ctx.fragment_id.to_string(),
             ]);
 
@@ -524,9 +524,9 @@ impl<S: StateStore> SourceBackfillExecutorInner<S> {
                 .metrics
                 .source_backfill_row_count
                 .with_guarded_label_values(&[
+                    &self.actor_ctx.id.to_string(),
                     &self.source_id.to_string(),
                     &self.source_name,
-                    &self.actor_ctx.id.to_string(),
                     &self.actor_ctx.fragment_id.to_string(),
                 ]);
 

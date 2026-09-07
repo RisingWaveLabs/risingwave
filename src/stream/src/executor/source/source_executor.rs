@@ -187,13 +187,13 @@ impl<S: StateStore> SourceExecutor<S> {
         self.actor_ctx.config.developer.enable_auto_schema_change
     }
 
-    /// `source_id | source_name | actor_id | fragment_id`
+    /// `actor_id | source_id | source_name | fragment_id`
     #[inline]
     fn get_metric_labels(&self) -> [String; 4] {
         [
+            self.actor_ctx.id.to_string(),
             self.stream_source_core.source_id.to_string(),
             self.stream_source_core.source_name.clone(),
-            self.actor_ctx.id.to_string(),
             self.actor_ctx.fragment_id.to_string(),
         ]
     }
