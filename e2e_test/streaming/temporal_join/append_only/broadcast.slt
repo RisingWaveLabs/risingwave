@@ -1,0 +1,52 @@
+statement ok
+SET RW_IMPLICIT_FLUSH TO true;
+
+statement ok
+CREATE TABLE events(id INT, payload INT) APPEND ONLY;
+
+statement ok
+CREATE TABLE dimensions(id INT PRIMARY KEY, dim_value INT);
+
+statement ok
+CREATE MATERIALIZED VIEW joined AS
+SELECT events.id, payload, dim_value
+FROM events
+BROADCAST LEFT JOIN dimensions FOR SYSTEM_TIME AS OF PROCTIME()
+ON events.id = dimensions.id;
+
+statement ok
+INSERT INTO dimensions VALUES (1, 10), (2, 20);
+
+statement ok
+INSERT INTO events VALUES (1, 101), (1, 102), (3, 103);
+
+query III rowsort
+SELECT * FROM joined;
+----
+1 101 10
+1 102 10
+3 103 NULL
+
+statement ok
+UPDATE dimensions SET dim_value = 11 WHERE id = 1;
+
+statement ok
+INSERT INTO events VALUES (1, 104), (2, 105);
+
+query III rowsort
+SELECT * FROM joined;
+----
+1 101 10
+1 102 10
+1 104 11
+2 105 20
+3 103 NULL
+
+statement ok
+DROP MATERIALIZED VIEW joined;
+
+statement ok
+DROP TABLE events;
+
+statement ok
+DROP TABLE dimensions;

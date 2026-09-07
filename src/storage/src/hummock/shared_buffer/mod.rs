@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 use risingwave_common::metrics::{
     LabelGuardedHistogram, LabelGuardedIntCounter, LabelGuardedIntGauge,
-    LazyLabelGuardedIntCounter, LazyLabelGuardedIntGauge,
+    LazyLabelGuardedIntCounter, LazyLabelGuardedIntGauge, UintGauge,
 };
 use risingwave_pb::id::{FragmentId, TableId};
 
@@ -30,6 +30,7 @@ pub mod shared_buffer_batch;
 pub(crate) struct TableMemoryMetrics {
     imm_total_size: LabelGuardedIntGauge,
     imm_count: LabelGuardedIntGauge,
+    replicated_imm_size: Option<UintGauge>,
     pub write_batch_tuple_counts: LabelGuardedIntCounter,
     pub write_batch_duration: LabelGuardedHistogram,
     pub write_batch_size: LabelGuardedHistogram,
@@ -60,6 +61,7 @@ impl TableMemoryMetrics {
             imm_count: metrics
                 .per_table_imm_count
                 .with_guarded_label_values(table_labels),
+            replicated_imm_size: is_replicated.then(|| metrics.replicated_imm_size.clone()),
             write_batch_tuple_counts: metrics
                 .write_batch_tuple_counts
                 .with_guarded_label_values(table_labels),
@@ -91,11 +93,17 @@ impl TableMemoryMetrics {
     pub(super) fn inc_imm(&self, imm_size: usize) {
         self.imm_total_size.add(imm_size as _);
         self.imm_count.inc();
+        if let Some(replicated_imm_size) = &self.replicated_imm_size {
+            replicated_imm_size.add(imm_size as _);
+        }
     }
 
     pub(super) fn dec_imm(&self, imm_size: usize) {
         self.imm_total_size.sub(imm_size as _);
         self.imm_count.dec();
+        if let Some(replicated_imm_size) = &self.replicated_imm_size {
+            replicated_imm_size.sub(imm_size as _);
+        }
     }
 }
 

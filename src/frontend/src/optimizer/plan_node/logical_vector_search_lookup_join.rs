@@ -300,6 +300,8 @@ impl ToStream for LogicalVectorSearchLookupJoin {
 
     fn to_stream(&self, ctx: &mut ToStreamContext) -> Result<StreamPlanRef> {
         if let Some(core) = self.to_vector_index_lookup_join(|plan| plan.to_stream(ctx))? {
+            // `ProcessTimeBroadcast` is intentionally excluded: the vector-index lookup executor
+            // does not consume a broadcast change stream or maintain replicated lookup state.
             if !matches!(&core.as_of, Some(AsOf::ProcessTime)) {
                 bail!("streaming vector index lookup join must be proctime temporal join");
             }

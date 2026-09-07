@@ -679,6 +679,11 @@ impl LocalHummockStorage {
             self.spill_offset += 1;
 
             if self.is_replicated {
+                // A replicated imm cannot be uploaded independently: it is discarded when the
+                // source table's committed epoch catches up. It therefore bypasses the regular
+                // write and memory limiters. Keep this memory visible through
+                // `state_store_replicated_imm_size`, especially for operators that maintain one
+                // full replica per actor.
                 self.read_version.write().add_replicated_imm(imm);
             } else {
                 self.write_limiter.wait_permission(self.table_id).await;

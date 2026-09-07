@@ -576,18 +576,31 @@ impl fmt::Display for Join {
             }
             Suffix(constraint)
         }
+        let broadcast = if matches!(
+            self.relation,
+            TableFactor::Table {
+                as_of: Some(AsOf::ProcessTimeBroadcast),
+                ..
+            }
+        ) {
+            "BROADCAST "
+        } else {
+            ""
+        };
         match &self.join_operator {
             JoinOperator::Inner(constraint) => write!(
                 f,
-                " {}JOIN {}{}",
+                " {}{}JOIN {}{}",
                 prefix(constraint),
+                broadcast,
                 self.relation,
                 suffix(constraint)
             ),
             JoinOperator::LeftOuter(constraint) => write!(
                 f,
-                " {}LEFT JOIN {}{}",
+                " {}{}LEFT JOIN {}{}",
                 prefix(constraint),
+                broadcast,
                 self.relation,
                 suffix(constraint)
             ),

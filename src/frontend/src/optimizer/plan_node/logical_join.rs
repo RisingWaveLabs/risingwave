@@ -1100,8 +1100,11 @@ impl LogicalJoin {
 
     fn temporal_join_on(&self) -> Option<TemporalJoinScan<'_>> {
         if let Some(logical_scan) = self.core.right.as_logical_scan() {
-            matches!(logical_scan.as_of(), Some(AsOf::ProcessTime))
-                .then_some(TemporalJoinScan(logical_scan))
+            matches!(
+                logical_scan.as_of(),
+                Some(AsOf::ProcessTime | AsOf::ProcessTimeBroadcast)
+            )
+            .then_some(TemporalJoinScan(logical_scan))
         } else {
             None
         }
@@ -1262,6 +1265,8 @@ impl LogicalJoin {
 
         assert!(predicate.has_eq());
 
+        let is_broadcast = matches!(logical_scan.as_of(), Some(AsOf::ProcessTimeBroadcast));
+
         let table = logical_scan.table();
         let output_column_ids = logical_scan.output_column_ids();
 
@@ -1312,8 +1317,13 @@ impl LogicalJoin {
         };
 
         let left = self.left().to_stream(ctx)?;
-        // Enforce a shuffle for the temporal join LHS to let the scheduler be able to schedule the join fragment together with the RHS with a `no_shuffle` exchange.
-        let left = required_dist.stream_enforce(left);
+        let left = if is_broadcast {
+            left.enforce_concrete_distribution()
+        } else {
+            // Enforce a shuffle for the temporal join LHS to let the scheduler be able to schedule
+            // the join fragment together with the RHS with a `no_shuffle` exchange.
+            required_dist.stream_enforce(left)
+        };
 
         let (new_stream_table_scan, new_predicate, new_join_on, new_join_output_indices) =
             Self::temporal_join_scan_predicate_pull_up(
@@ -1323,7 +1333,12 @@ impl LogicalJoin {
                 self.left().schema().len(),
             )?;
 
-        let right = RequiredDist::no_shuffle(new_stream_table_scan.into());
+        let right = if is_broadcast {
+            RequiredDist::PhysicalDist(Distribution::Broadcast)
+                .streaming_enforce_if_not_satisfies(new_stream_table_scan.into())?
+        } else {
+            RequiredDist::no_shuffle(new_stream_table_scan.into())
+        };
         if !new_predicate.has_eq() {
             return Err(RwError::from(ErrorCode::NotSupported(
                 "Temporal join requires a non trivial join condition".into(),
@@ -1355,6 +1370,13 @@ impl LogicalJoin {
     ) -> Result<StreamPlanRef> {
         use super::stream::prelude::*;
         assert!(!predicate.has_eq());
+
+        if matches!(logical_scan.as_of(), Some(AsOf::ProcessTimeBroadcast)) {
+            return Err(RwError::from(ErrorCode::NotSupported(
+                "Broadcast temporal join requires an equality condition".into(),
+                "Please add an equality condition over a lookup-table key".into(),
+            )));
+        }
 
         let left = self.left().to_stream_with_dist_required(
             &RequiredDist::PhysicalDist(Distribution::Broadcast),

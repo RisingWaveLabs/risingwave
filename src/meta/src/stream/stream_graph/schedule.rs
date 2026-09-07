@@ -207,7 +207,15 @@ impl Scheduler {
                             return;
                         }
                     }
-                    NodeBody::TemporalJoin(node) => node.get_table_desc().unwrap().vnode_count(),
+                    NodeBody::TemporalJoin(node) => {
+                        if node.is_broadcast {
+                            // Every actor owns a full replicated view of the lookup table, so the
+                            // join fragment follows the left input rather than the lookup table's
+                            // vnode count.
+                            return;
+                        }
+                        node.get_table_desc().unwrap().vnode_count()
+                    }
                     NodeBody::BatchPlan(node) => node.get_table_desc().unwrap().vnode_count(),
                     NodeBody::Lookup(node) => node
                         .get_arrangement_table_info()

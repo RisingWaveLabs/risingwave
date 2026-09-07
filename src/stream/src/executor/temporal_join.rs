@@ -60,6 +60,7 @@ pub struct TemporalJoinExecutor<
     chunk_size: usize,
     memo_table: Option<StateTable<S>>,
     metrics: TemporalJoinMetrics,
+    is_broadcast: bool,
 }
 
 #[derive(Default)]
@@ -166,7 +167,7 @@ impl<K: HashKey, S: StateStore, SD: ValueRowSerde> TemporalSide<K, S, SD> {
     }
 
     fn force_peek(&self, key: &K) -> &JoinEntry {
-        self.cache.peek(key).expect("key should exists")
+        self.cache.peek(key).expect("key should exist")
     }
 
     fn update(
@@ -513,13 +514,15 @@ pub(super) mod phase1 {
                 }
             } else {
                 // Non-append-only temporal join
-                // The memo-table pk and columns:
-                // (`join_key` + `left_pk` + `right_pk`) -> (`right_scan_schema` + `join_key` + `left_pk`)
+                // The memo table persists each matched right row followed by
+                // `join_key + left_stream_key`. For broadcast temporal joins, its distribution key
+                // refers to the `left_stream_key` portion, so the memo state follows the left side.
                 //
                 // Write pattern:
-                //   for each left input row (with insert op), construct the memo table pk and insert the row into the memo table.
+                //   for each left input row (with insert op), persist every matched right row.
                 // Read pattern:
-                //   for each left input row (with delete op), construct pk prefix (`join_key` + `left_pk`) to fetch rows and delete them from the memo table.
+                //   for each left input row (with delete op), fetch the historical right rows by
+                //   memo prefix and delete them from the memo table.
                 //
                 // Temporal join supports inner join and left outer join, additionally, it could contain other conditions.
                 // Surprisingly, we could handle them in a unified way with memo table.
@@ -628,10 +631,10 @@ impl<
         chunk_size: usize,
         join_key_data_types: Vec<DataType>,
         memo_table: Option<StateTable<S>>,
+        is_broadcast: bool,
     ) -> Self {
         let metrics_info =
             MetricsInfo::new(metrics.clone(), table.table_id(), ctx.id, "temporal join");
-
         let cache = ManagedLruCache::unbounded(watermark_sequence, metrics_info);
 
         let metrics = metrics.new_temporal_join_metrics(table.table_id(), ctx.id, ctx.fragment_id);
@@ -655,6 +658,7 @@ impl<
             chunk_size,
             memo_table,
             metrics,
+            is_broadcast,
         }
     }
 
@@ -828,6 +832,11 @@ impl<
                 }
                 InternalMessage::Barrier(updates, barrier) => {
                     let update_vnode_bitmap = barrier.as_update_vnode_bitmap(self.ctx.id);
+                    let right_update_vnode_bitmap = if self.is_broadcast {
+                        None
+                    } else {
+                        update_vnode_bitmap.clone()
+                    };
 
                     // Write right-side chunks to the replicated state table and update LRU cache.
                     // Must happen before commit.
@@ -852,7 +861,7 @@ impl<
                     yield Message::Barrier(barrier);
 
                     if let Some((_, true)) = right_post_commit
-                        .post_yield_barrier(update_vnode_bitmap.clone())
+                        .post_yield_barrier(right_update_vnode_bitmap)
                         .await?
                     {
                         self.right_table.cache.clear();
@@ -1056,6 +1065,7 @@ mod tests {
             1024,
             join_key_data_types,
             None, // no memo table (append-only inner join)
+            false,
         );
 
         let mut stream = Box::new(executor).execute();

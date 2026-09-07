@@ -1,0 +1,206 @@
+statement ok
+SET RW_IMPLICIT_FLUSH TO true;
+
+# Give the left index and lookup table different vnode counts. The temporal join fragment follows
+# the left side; every actor independently keeps a full replica of the lookup side.
+statement ok
+SET streaming_parallelism = 2;
+
+statement ok
+SET streaming_max_parallelism = 8;
+
+statement ok
+CREATE TABLE raw_events(
+    event_id INT PRIMARY KEY,
+    lookup_id INT,
+    shard_id INT,
+    payload INT
+);
+
+statement ok
+CREATE INDEX events_by_shard
+ON raw_events(shard_id, event_id, lookup_id, payload)
+DISTRIBUTED BY (shard_id);
+
+statement ok
+SET streaming_max_parallelism = 16;
+
+statement ok
+CREATE TABLE dimensions(id INT PRIMARY KEY, dim_value INT);
+
+statement ok
+SET streaming_max_parallelism = 8;
+
+statement ok
+CREATE MATERIALIZED VIEW joined AS
+SELECT event_id, lookup_id, shard_id, payload, dim_value
+FROM events_by_shard AS events
+BROADCAST LEFT JOIN dimensions FOR SYSTEM_TIME AS OF PROCTIME()
+ON events.lookup_id = dimensions.id;
+
+statement ok
+INSERT INTO raw_events VALUES (99, 1, 0, 999);
+
+query IIIII
+SELECT * FROM joined;
+----
+99 1 0 999 NULL
+
+# A later dimension insert must not rewrite the existing unmatched temporal result. Deleting the
+# left row must retract the memoized NULL result rather than the now-current matching dimension.
+statement ok
+INSERT INTO dimensions VALUES (1, 10);
+
+query IIIII
+SELECT * FROM joined;
+----
+99 1 0 999 NULL
+
+statement ok
+DELETE FROM raw_events WHERE event_id = 99;
+
+query IIIII
+SELECT * FROM joined;
+----
+
+
+statement ok
+INSERT INTO raw_events VALUES (100, 1, 0, 1000);
+
+query IIIII
+SELECT * FROM joined;
+----
+100 1 0 1000 10
+
+# Updating the lookup table does not rewrite an existing temporal-join result.
+statement ok
+UPDATE dimensions SET dim_value = 20 WHERE id = 1;
+
+query IIIII
+SELECT * FROM joined;
+----
+100 1 0 1000 10
+
+# Deleting the left row must retract the memoized v1 row, not the current v2 lookup row.
+statement ok
+DELETE FROM raw_events WHERE event_id = 100;
+
+query IIIII
+SELECT * FROM joined;
+----
+
+
+statement ok
+INSERT INTO raw_events VALUES (101, 1, 0, 1001);
+
+query IIIII
+SELECT * FROM joined;
+----
+101 1 0 1001 20
+
+# Updating the index distribution key sends U- and U+ to actors selected by the old and new
+# shard_id respectively. Each side must access the corresponding left-owned memo vnode.
+statement ok
+UPDATE raw_events SET shard_id = 1, payload = 1002 WHERE event_id = 101;
+
+query IIIII
+SELECT * FROM joined;
+----
+101 1 1 1002 20
+
+statement ok
+UPDATE dimensions SET dim_value = 30 WHERE id = 1;
+
+# Exercise memo migration in both directions while the lookup replica keeps its full vnode set.
+statement ok
+ALTER MATERIALIZED VIEW joined SET PARALLELISM = 1;
+
+query IIIII
+SELECT * FROM joined;
+----
+101 1 1 1002 20
+
+statement ok
+ALTER MATERIALIZED VIEW joined SET PARALLELISM = 2;
+
+query IIIII
+SELECT * FROM joined;
+----
+101 1 1 1002 20
+
+statement ok
+DELETE FROM raw_events WHERE event_id = 101;
+
+query IIIII
+SELECT * FROM joined;
+----
+
+
+statement ok
+DROP MATERIALIZED VIEW joined;
+
+statement ok
+DROP INDEX events_by_shard;
+
+statement ok
+DROP TABLE raw_events;
+
+statement ok
+DROP TABLE dimensions;
+
+# A singleton retractable left input has no actor vnode bitmap. Its memo table must use singleton
+# distribution while the lookup side remains fully replicated.
+statement ok
+CREATE TABLE singleton_events(id INT PRIMARY KEY, v INT);
+
+statement ok
+CREATE TABLE singleton_dimensions(id INT PRIMARY KEY, name VARCHAR);
+
+statement ok
+INSERT INTO singleton_dimensions VALUES (1, 'one'), (2, 'two');
+
+statement ok
+CREATE MATERIALIZED VIEW singleton_joined AS
+SELECT s.k, s.c, singleton_dimensions.name
+FROM (SELECT max(id) AS k, count(*) AS c FROM singleton_events) AS s
+BROADCAST LEFT JOIN singleton_dimensions FOR SYSTEM_TIME AS OF PROCTIME()
+ON s.k = singleton_dimensions.id;
+
+statement ok
+INSERT INTO singleton_events VALUES (1, 10);
+
+query IIT
+SELECT * FROM singleton_joined;
+----
+1 1 one
+
+statement ok
+INSERT INTO singleton_events VALUES (2, 20);
+
+query IIT
+SELECT * FROM singleton_joined;
+----
+2 2 two
+
+statement ok
+DELETE FROM singleton_events WHERE id = 2;
+
+query IIT
+SELECT * FROM singleton_joined;
+----
+1 1 one
+
+statement ok
+DROP MATERIALIZED VIEW singleton_joined;
+
+statement ok
+DROP TABLE singleton_events;
+
+statement ok
+DROP TABLE singleton_dimensions;
+
+statement ok
+SET streaming_parallelism = default;
+
+statement ok
+SET streaming_max_parallelism = default;

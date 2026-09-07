@@ -326,7 +326,7 @@ impl Binder {
         }
         if matches!(
             as_of,
-            Some(AsOf::ProcessTime | AsOf::ProcessTimeWithInterval(_))
+            Some(AsOf::ProcessTime | AsOf::ProcessTimeBroadcast | AsOf::ProcessTimeWithInterval(_))
         ) {
             bail_not_implemented!(
                 "As Of ProcessTime() is not supported for Iceberg metadata relations."

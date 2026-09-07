@@ -55,7 +55,10 @@ impl LogicalPlanVisitor for TemporalJoinValidator {
     }
 
     fn visit_logical_scan(&mut self, logical_scan: &LogicalScan) -> bool {
-        matches!(logical_scan.as_of(), Some(AsOf::ProcessTime))
+        matches!(
+            logical_scan.as_of(),
+            Some(AsOf::ProcessTime | AsOf::ProcessTimeBroadcast)
+        )
     }
 }
 
@@ -69,7 +72,10 @@ impl BatchPlanVisitor for TemporalJoinValidator {
     }
 
     fn visit_batch_seq_scan(&mut self, batch_seq_scan: &BatchSeqScan) -> bool {
-        matches!(batch_seq_scan.core().as_of, Some(AsOf::ProcessTime))
+        matches!(
+            batch_seq_scan.core().as_of,
+            Some(AsOf::ProcessTime | AsOf::ProcessTimeBroadcast)
+        )
     }
 }
 
@@ -83,7 +89,10 @@ impl StreamPlanVisitor for TemporalJoinValidator {
     }
 
     fn visit_stream_table_scan(&mut self, stream_table_scan: &StreamTableScan) -> bool {
-        matches!(stream_table_scan.core().as_of, Some(AsOf::ProcessTime))
+        matches!(
+            stream_table_scan.core().as_of,
+            Some(AsOf::ProcessTime | AsOf::ProcessTimeBroadcast)
+        )
     }
 
     fn visit_stream_temporal_join(&mut self, stream_temporal_join: &StreamTemporalJoin) -> bool {

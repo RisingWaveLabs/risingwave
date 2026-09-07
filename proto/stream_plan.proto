@@ -726,6 +726,8 @@ message TemporalJoinNode {
   optional catalog.Table memo_table = 9;
   // If it is a nested lool temporal join
   bool is_nested_loop = 10;
+  // Whether lookup-side changes are broadcast to every temporal join actor.
+  bool is_broadcast = 11;
 }
 
 message DynamicFilterNode {

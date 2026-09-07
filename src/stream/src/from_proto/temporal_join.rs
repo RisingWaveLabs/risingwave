@@ -14,8 +14,9 @@
 
 use std::sync::Arc;
 
+use risingwave_common::bitmap::Bitmap;
 use risingwave_common::catalog::ColumnId;
-use risingwave_common::hash::{HashKey, HashKeyDispatcher};
+use risingwave_common::hash::{HashKey, HashKeyDispatcher, VnodeCountCompat};
 use risingwave_common::types::DataType;
 use risingwave_common::util::value_encoding::BasicSerde;
 use risingwave_common::util::value_encoding::column_aware_row_encoding::ColumnAwareSerde;
@@ -76,9 +77,18 @@ impl ExecutorBuilder for TemporalJoinExecutorBuilder {
             .iter()
             .map(|&x| ColumnId::new(table_desc.columns[x].column_id))
             .collect_vec();
-        let vnodes = params.vnode_bitmap.clone().map(Arc::new);
+        let is_broadcast = node.is_broadcast;
+        let vnodes = if is_broadcast {
+            Some(Arc::new(Bitmap::ones(table_desc.vnode_count())))
+        } else {
+            params.vnode_bitmap.clone().map(Arc::new)
+        };
 
         if node.get_is_nested_loop() {
+            assert!(
+                !is_broadcast,
+                "nested-loop temporal join cannot be broadcast"
+            );
             macro_rules! build_nested_loop {
                 ($SD:ident) => {{
                     let right_table =
@@ -151,13 +161,9 @@ impl ExecutorBuilder for TemporalJoinExecutorBuilder {
             let memo_table = node.get_memo_table();
             let memo_table = match memo_table {
                 Ok(memo_table) => {
-                    let vnodes = Arc::new(
-                        params
-                            .vnode_bitmap
-                            .expect("vnodes not set for temporal join"),
-                    );
+                    let vnodes = params.vnode_bitmap.clone().map(Arc::new);
                     Some(
-                        StateTableBuilder::new(memo_table, store.clone(), Some(vnodes.clone()))
+                        StateTableBuilder::new(memo_table, store.clone(), vnodes)
                             .enable_preload_all_rows_by_config(&params.config)
                             .build()
                             .await,
@@ -201,6 +207,7 @@ impl ExecutorBuilder for TemporalJoinExecutorBuilder {
                         join_key_data_types,
                         memo_table,
                         append_only,
+                        is_broadcast,
                     };
 
                     Ok((params.info, dispatcher_args.dispatch()?).into())
@@ -234,6 +241,7 @@ struct TemporalJoinExecutorDispatcherArgs<S: StateStore, SD: ValueRowSerde> {
     join_key_data_types: Vec<DataType>,
     memo_table: Option<StateTable<S>>,
     append_only: bool,
+    is_broadcast: bool,
 }
 
 impl<S: StateStore, SD: ValueRowSerde> HashKeyDispatcher
@@ -268,6 +276,7 @@ impl<S: StateStore, SD: ValueRowSerde> HashKeyDispatcher
                     self.chunk_size,
                     self.join_key_data_types,
                     self.memo_table,
+                    self.is_broadcast,
                 )))
             };
         }

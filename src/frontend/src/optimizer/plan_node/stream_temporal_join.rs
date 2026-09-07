@@ -32,6 +32,7 @@ use crate::optimizer::plan_node::utils::{IndicesDisplay, TableCatalogBuilder};
 use crate::optimizer::plan_node::{
     EqJoinPredicate, EqJoinPredicateDisplay, StreamExchange, StreamTableScan, TryToStreamPb,
 };
+use crate::optimizer::property::Distribution;
 use crate::scheduler::SchedulerResult;
 use crate::stream_fragmenter::BuildFragmentGraphState;
 use crate::utils::ColIndexMappingRewriteExt;
@@ -42,6 +43,7 @@ pub struct StreamTemporalJoin {
     core: generic::Join<PlanRef>,
     append_only: bool,
     is_nested_loop: bool,
+    is_broadcast: bool,
 }
 
 impl StreamTemporalJoin {
@@ -58,13 +60,23 @@ impl StreamTemporalJoin {
         let right = core.right.clone();
         let exchange: &StreamExchange = right
             .as_stream_exchange()
-            .expect("should be a no shuffle stream exchange");
-        assert!(exchange.no_shuffle());
+            .expect("temporal join lookup side should have an exchange");
         let exchange_input = exchange.input();
         let scan: &StreamTableScan = exchange_input
             .as_stream_table_scan()
             .expect("should be a stream table scan");
-        assert!(matches!(scan.core().as_of, Some(AsOf::ProcessTime)));
+        let is_broadcast = matches!(scan.core().as_of, Some(AsOf::ProcessTimeBroadcast));
+        assert!(matches!(
+            scan.core().as_of,
+            Some(AsOf::ProcessTime | AsOf::ProcessTimeBroadcast)
+        ));
+        if is_broadcast {
+            assert!(!exchange.no_shuffle());
+            assert_eq!(exchange.distribution(), &Distribution::Broadcast);
+            assert!(!is_nested_loop);
+        } else {
+            assert!(exchange.no_shuffle());
+        }
 
         let dist = if is_nested_loop {
             // Use right side distribution directly if it's nested loop temporal join.
@@ -104,6 +116,7 @@ impl StreamTemporalJoin {
             core,
             append_only,
             is_nested_loop,
+            is_broadcast,
         })
     }
 
@@ -127,17 +140,32 @@ impl StreamTemporalJoin {
         self.is_nested_loop
     }
 
-    /// Return memo-table catalog and its `pk_indices`.
-    /// (`join_key` + `left_pk` + `right_pk`) -> (`right_scan_schema` + `join_key` + `left_pk`)
+    pub fn is_broadcast(&self) -> bool {
+        self.is_broadcast
+    }
+
+    /// Return the memo-table catalog.
+    ///
+    /// The memo prefix is `join_key + left_stream_key`. A regular temporal join is distributed by
+    /// the lookup key, while a broadcast temporal join preserves the left input distribution and
+    /// maps that distribution key to its copy in the `left_stream_key` part of the prefix.
     ///
     /// Write pattern:
-    ///   for each left input row (with insert op), construct the memo table pk and insert the row into the memo table.
+    ///   for each left input row (with insert op), persist the matched right row followed by the
+    ///   memo prefix.
     ///
     /// Read pattern:
-    ///   for each left input row (with delete op), construct pk prefix (`join_key` + `left_pk`) to fetch rows and delete them from the memo table.
+    ///   for each left input row (with delete op), use the memo prefix to fetch and delete all
+    ///   right rows that matched when the left row was inserted.
     pub fn infer_memo_table_catalog(&self, right_scan: &StreamTableScan) -> TableCatalog {
         let left_eq_indexes = self.eq_join_predicate().left_eq_indexes();
-        let read_prefix_len_hint = left_eq_indexes.len() + self.left().stream_key().unwrap().len();
+        let left_stream_key = self.core.left.expect_stream_key();
+        let memo_prefix_indices = left_eq_indexes
+            .iter()
+            .chain(left_stream_key)
+            .copied()
+            .collect_vec();
+        let read_prefix_len_hint = memo_prefix_indices.len();
 
         // Build internal table
         let mut internal_table_catalog_builder = TableCatalogBuilder::default();
@@ -146,10 +174,9 @@ impl StreamTemporalJoin {
         for field in right_scan_schema.fields() {
             internal_table_catalog_builder.add_column(field);
         }
-        // Add join_key + left_pk
-        for field in left_eq_indexes
+        // Add the columns that identify and route a left row.
+        for field in memo_prefix_indices
             .iter()
-            .chain(self.core.left.stream_key().unwrap())
             .map(|idx| &self.core.left.schema().fields()[*idx])
         {
             internal_table_catalog_builder.add_column(field);
@@ -164,14 +191,31 @@ impl StreamTemporalJoin {
             internal_table_catalog_builder.add_order_column(*idx, OrderType::ascending())
         });
 
-        let dist_key_len = right_scan
-            .core()
-            .distribution_key()
-            .map(|keys| keys.len())
-            .unwrap_or(0);
-
-        let internal_table_dist_keys =
-            (right_scan_schema.len()..(right_scan_schema.len() + dist_key_len)).collect();
+        let internal_table_dist_keys = if self.is_broadcast {
+            let left_dist_key = self
+                .core
+                .left
+                .distribution()
+                .dist_column_indices_opt()
+                .expect("broadcast temporal join left input must have a concrete distribution");
+            left_dist_key
+                .iter()
+                .map(|dist_idx| {
+                    let position = left_stream_key
+                        .iter()
+                        .position(|idx| idx == dist_idx)
+                        .expect("left distribution key must be part of the left stream key");
+                    right_scan_schema.len() + left_eq_indexes.len() + position
+                })
+                .collect()
+        } else {
+            let dist_key_len = right_scan
+                .core()
+                .distribution_key()
+                .map(|keys| keys.len())
+                .unwrap_or(0);
+            (right_scan_schema.len()..(right_scan_schema.len() + dist_key_len)).collect()
+        };
         internal_table_catalog_builder.build(internal_table_dist_keys, read_prefix_len_hint)
     }
 }
@@ -193,6 +237,9 @@ impl Distill for StreamTemporalJoin {
         ));
 
         vec.push(("nested_loop", Pretty::debug(&self.is_nested_loop)));
+        if self.is_broadcast {
+            vec.push(("broadcast", Pretty::debug(&self.is_broadcast)));
+        }
 
         if let Some(ow) = watermark_pretty(self.base.watermark_columns(), self.schema()) {
             vec.push(("output_watermarks", ow));
@@ -241,8 +288,13 @@ impl TryToStreamPb for StreamTemporalJoin {
         let right = self.right();
         let exchange: &StreamExchange = right
             .as_stream_exchange()
-            .expect("should be a no shuffle stream exchange");
-        assert!(exchange.no_shuffle());
+            .expect("temporal join lookup side should have an exchange");
+        if self.is_broadcast {
+            assert!(!exchange.no_shuffle());
+            assert_eq!(exchange.distribution(), &Distribution::Broadcast);
+        } else {
+            assert!(exchange.no_shuffle());
+        }
         let exchange_input = exchange.input();
         let scan: &StreamTableScan = exchange_input
             .as_stream_table_scan()
@@ -276,6 +328,7 @@ impl TryToStreamPb for StreamTemporalJoin {
                 Some(memo_table.to_internal_table_prost())
             },
             is_nested_loop: self.is_nested_loop,
+            is_broadcast: self.is_broadcast,
         })))
     }
 }

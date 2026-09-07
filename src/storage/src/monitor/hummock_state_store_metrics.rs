@@ -83,6 +83,7 @@ pub struct HummockStateStoreMetrics {
     pub uploader_per_table_imm_count: RelabeledGuardedIntGaugeVec,
 
     // memory
+    pub replicated_imm_size: UintGauge,
     pub per_table_imm_size: RelabeledGuardedIntGaugeVec,
     pub per_table_imm_count: RelabeledGuardedIntGaugeVec,
     pub mem_table_spill_counts: RelabeledGuardedIntCounterVec,
@@ -474,6 +475,15 @@ impl HummockStateStoreMetrics {
             metric_level,
         );
 
+        let replicated_imm_size = UintGauge::new(
+            "state_store_replicated_imm_size",
+            "Total retained replicated immutable memtable size",
+        )
+        .unwrap();
+        registry
+            .register(Box::new(replicated_imm_size.clone()))
+            .unwrap();
+
         let per_table_imm_size = register_guarded_int_gauge_vec_with_registry!(
             "state_store_per_table_imm_size",
             "Total imm size per table",
@@ -650,6 +660,7 @@ impl HummockStateStoreMetrics {
             uploader_wait_poll_latency,
             uploader_per_table_imm_size,
             uploader_per_table_imm_count,
+            replicated_imm_size,
             per_table_imm_size,
             per_table_imm_count,
             mem_table_spill_counts,
