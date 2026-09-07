@@ -62,6 +62,11 @@ use crate::scheduler::{
 use crate::utils::Condition;
 use crate::{OptimizerContext, OptimizerContextRef, PgResponseStream, TableCatalog};
 
+// TODO: Wire this additive persistent-stream layer into the active cursor path in the next PR.
+#[allow(dead_code)]
+#[path = "cursor_stream.rs"]
+mod cursor_stream;
+
 /// Cancellation resources shared by a cursor and its underlying query executors.
 struct CursorLifecycle {
     /// Sender used to stop every query executor owned by this cursor.
@@ -469,6 +474,7 @@ impl Display for State {
     }
 }
 
+#[derive(Clone)]
 struct FieldsManager {
     columns_catalog: Vec<ColumnCatalog>,
     // All row fields, including hidden pk, op, rw_timestamp and all non-hidden columns in the upstream table.
