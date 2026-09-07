@@ -70,14 +70,26 @@ grep -Fx 'before update' "$HTTP_SINK_OUTPUT"
 grep -Fx 'hello world' "$HTTP_SINK_OUTPUT"
 grep -Fx '{"key":"value"}' "$HTTP_SINK_OUTPUT"
 grep -Fx 'put payload' "$HTTP_SINK_OUTPUT"
+grep -Fx 'patch payload' "$HTTP_SINK_OUTPUT"
 grep -q '"event"' "$HTTP_SINK_OUTPUT"
 grep -Fx 'dynamic url payload' "$HTTP_SINK_OUTPUT"
 grep -Fx 'dynamic url as select payload' "$HTTP_SINK_OUTPUT"
-# Exactly 1 line from ignore_delete test + 2 from varchar test (NULL was skipped) + 1 from PUT + 1 from jsonb + 2 from dynamic URL tests
-test "$(wc -l < "$HTTP_SINK_OUTPUT")" -eq 7
-# Verify the default method remains POST and an explicitly configured PUT is honored
+grep -Fx 'dynamic patch payload' "$HTTP_SINK_OUTPUT"
+grep -Fx 'dynamic custom method payload' "$HTTP_SINK_OUTPUT"
+grep -Fx 'dynamic url and method payload' "$HTTP_SINK_OUTPUT"
+! grep -F 'skipped invalid method payload' "$HTTP_SINK_OUTPUT"
+! grep -F 'skipped empty method payload' "$HTTP_SINK_OUTPUT"
+! grep -F 'skipped null method payload' "$HTTP_SINK_OUTPUT"
+# Exactly 7 existing requests + static PATCH and DELETE + 3 valid dynamic-method requests + 1 combined dynamic URL/method request.
+test "$(wc -l < "$HTTP_SINK_OUTPUT")" -eq 13
+# Verify static, dynamic, case-insensitive standard, and extension methods.
 test "$(grep -c '^POST$' "$HTTP_SINK_METHODS")" -eq 6
-test "$(grep -c '^PUT$' "$HTTP_SINK_METHODS")" -eq 1
+test "$(grep -c '^PUT$' "$HTTP_SINK_METHODS")" -eq 2
+test "$(grep -c '^PATCH$' "$HTTP_SINK_METHODS")" -eq 2
+test "$(grep -c '^DELETE$' "$HTTP_SINK_METHODS")" -eq 2
+test "$(grep -c '^PROPFIND$' "$HTTP_SINK_METHODS")" -eq 1
+# The static and dynamic DELETE requests have no body.
+test "$(paste "$HTTP_SINK_METHODS" "$HTTP_SINK_OUTPUT" | grep -c $'^DELETE\t$')" -eq 2
 # Verify the custom header set via header.x_test = 'rw-http-sink' was sent
 grep -q '"x_test": "rw-http-sink"' "$HTTP_SINK_HEADERS"
 # Verify inferred default content types for varchar and jsonb payloads

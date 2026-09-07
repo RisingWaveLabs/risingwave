@@ -459,7 +459,9 @@ HttpConfig:
     required: false
   - name: method
     field_type: String
-    comments: HTTP request method. Supported values are `POST` and `PUT`. Defaults to `POST`.
+    comments: |-
+      Static HTTP request method. Any syntactically valid method is accepted. Defaults to `POST`.
+      Cannot be used together with a dynamic `method` column.
     required: false
   - name: content_type
     field_type: String

@@ -34,13 +34,15 @@ use crate::sink::{Result, SINK_TYPE_APPEND_ONLY, Sink, SinkError, SinkParam, Sin
 pub const HTTP_SINK: &str = "http";
 const HTTP_SINK_PAYLOAD_COLUMN: &str = "payload";
 const HTTP_SINK_URL_COLUMN: &str = "url";
+const HTTP_SINK_METHOD_COLUMN: &str = "method";
 
 #[derive(Clone, Debug, Deserialize, WithOptions)]
 pub struct HttpConfig {
     /// The endpoint URL to send data to.
     pub url: Option<String>,
 
-    /// HTTP request method. Supported values are `POST` and `PUT`. Defaults to `POST`.
+    /// Static HTTP request method. Any syntactically valid method is accepted. Defaults to `POST`.
+    /// Cannot be used together with a dynamic `method` column.
     pub method: Option<String>,
 
     /// Content-Type header value. Defaults to `text/plain` for `varchar` and `application/json`
@@ -92,6 +94,44 @@ enum HttpUrl {
     Dynamic { url_index: usize },
 }
 
+#[derive(Clone, Debug)]
+enum HttpMethod {
+    Static(reqwest::Method),
+    Dynamic { method_index: usize },
+}
+
+fn parse_http_method(method: &str) -> anyhow::Result<reqwest::Method> {
+    // Preserve the existing case-insensitive behavior for standard methods. Extension methods are
+    // case-sensitive and should be sent exactly as supplied.
+    for standard_method in [
+        reqwest::Method::GET,
+        reqwest::Method::HEAD,
+        reqwest::Method::POST,
+        reqwest::Method::PUT,
+        reqwest::Method::DELETE,
+        reqwest::Method::CONNECT,
+        reqwest::Method::OPTIONS,
+        reqwest::Method::TRACE,
+        reqwest::Method::PATCH,
+    ] {
+        if method.eq_ignore_ascii_case(standard_method.as_str()) {
+            return Ok(standard_method);
+        }
+    }
+
+    method.parse().context("invalid HTTP method")
+}
+
+fn parse_static_http_method(method: Option<&str>) -> Result<HttpMethod> {
+    let method = match method {
+        Some(method) => parse_http_method(method)
+            .with_context(|| format!("invalid HTTP sink method '{method}'"))
+            .map_err(SinkError::Config)?,
+        None => reqwest::Method::POST,
+    };
+    Ok(HttpMethod::Static(method))
+}
+
 /// Validates the HTTP sink parameters and returns the sink so callers can use it directly without
 /// re-parsing.
 fn validate_http_sink(
@@ -110,19 +150,8 @@ fn validate_http_sink(
         )));
     }
 
-    let method = match method {
-        None => reqwest::Method::POST,
-        Some(method) if method.eq_ignore_ascii_case("POST") => reqwest::Method::POST,
-        Some(method) if method.eq_ignore_ascii_case("PUT") => reqwest::Method::PUT,
-        Some(method) => {
-            return Err(SinkError::Config(anyhow!(
-                "HTTP sink method must be POST or PUT, got '{method}'"
-            )));
-        }
-    };
-
     let fields = schema.fields();
-    let (payload_index, url, payload_type) = if fields.len() == 1 {
+    let (payload_index, url, method, payload_type) = if fields.len() == 1 {
         let Some(url) = url else {
             return Err(SinkError::Config(anyhow!(
                 "HTTP sink requires url option when schema has exactly 1 column"
@@ -132,14 +161,15 @@ fn validate_http_sink(
             .parse()
             .context("invalid URL")
             .map_err(SinkError::Config)?;
-        (0, HttpUrl::Static(url), fields[0].data_type.clone())
+        let method = parse_static_http_method(method)?;
+        (0, HttpUrl::Static(url), method, fields[0].data_type.clone())
     } else {
         for field in fields {
             match field.name.as_str() {
-                HTTP_SINK_PAYLOAD_COLUMN | HTTP_SINK_URL_COLUMN => {}
+                HTTP_SINK_PAYLOAD_COLUMN | HTTP_SINK_URL_COLUMN | HTTP_SINK_METHOD_COLUMN => {}
                 _ => {
                     return Err(SinkError::Config(anyhow!(
-                        "HTTP sink with multiple columns only supports payload and url columns, got {}",
+                        "HTTP sink with multiple columns only supports payload, url, and method columns, got {}",
                         field.name
                     )));
                 }
@@ -186,7 +216,34 @@ fn validate_http_sink(
             }
         };
 
-        (payload_index, url, fields[payload_index].data_type.clone())
+        let method_index = fields
+            .iter()
+            .position(|field| field.name == HTTP_SINK_METHOD_COLUMN);
+        let method = match (method, method_index) {
+            (Some(_), Some(_)) => {
+                return Err(SinkError::Config(anyhow!(
+                    "HTTP sink method option cannot coexist with method column"
+                )));
+            }
+            (Some(method), None) => parse_static_http_method(Some(method))?,
+            (None, Some(method_index)) => {
+                if fields[method_index].data_type != DataType::Varchar {
+                    return Err(SinkError::Config(anyhow!(
+                        "HTTP sink method column must be varchar, got {:?}",
+                        fields[method_index].data_type
+                    )));
+                }
+                HttpMethod::Dynamic { method_index }
+            }
+            (None, None) => parse_static_http_method(None)?,
+        };
+
+        (
+            payload_index,
+            url,
+            method,
+            fields[payload_index].data_type.clone(),
+        )
     };
 
     if payload_type != DataType::Varchar && payload_type != DataType::Jsonb {
@@ -233,7 +290,7 @@ fn validate_http_sink(
 #[derive(Clone, Debug)]
 pub struct HttpSink {
     url: HttpUrl,
-    method: reqwest::Method,
+    method: HttpMethod,
     payload_index: usize,
     header_map: HeaderMap,
     unknown_fields: std::collections::HashMap<String, String>,
@@ -296,14 +353,14 @@ impl Sink for HttpSink {
 pub struct HttpSinkWriter {
     client: reqwest::Client,
     url: HttpUrl,
-    method: reqwest::Method,
+    method: HttpMethod,
     payload_index: usize,
 }
 
 impl HttpSinkWriter {
     fn new(
         url: HttpUrl,
-        method: reqwest::Method,
+        method: HttpMethod,
         payload_index: usize,
         header_map: HeaderMap,
     ) -> Result<Self> {
@@ -352,6 +409,35 @@ impl HttpSinkWriter {
         }
     }
 
+    fn extract_method(&self, row: &impl Row) -> Result<Option<reqwest::Method>> {
+        match &self.method {
+            HttpMethod::Static(method) => Ok(Some(method.clone())),
+            HttpMethod::Dynamic { method_index } => match row.datum_at(*method_index) {
+                Some(ScalarRefImpl::Utf8(method)) => match parse_http_method(method) {
+                    Ok(method) => Ok(Some(method)),
+                    Err(err) => {
+                        tracing::warn!(
+                            error = %err.as_report(),
+                            payload = %self.strip_payload_for_log(row),
+                            "skip HTTP sink row due to invalid HTTP method in method column"
+                        );
+                        Ok(None)
+                    }
+                },
+                None => {
+                    tracing::warn!(
+                        payload = %self.strip_payload_for_log(row),
+                        "skip HTTP sink row due to null method column"
+                    );
+                    Ok(None)
+                }
+                Some(_) => Err(SinkError::Http(anyhow!(
+                    "unexpected method column type, expected varchar"
+                ))),
+            },
+        }
+    }
+
     fn strip_payload_for_log(&self, row: &impl Row) -> String {
         match row.datum_at(self.payload_index) {
             Some(ScalarRefImpl::Utf8(s)) => strip_text_payload(s),
@@ -370,7 +456,7 @@ impl HttpSinkWriter {
                     "unexpected payload column type, expected varchar or jsonb"
                 )));
             }
-            None => None, // skip NULL rows
+            None => None,
         })
     }
 }
@@ -447,17 +533,23 @@ impl AsyncTruncateSinkWriter for HttpSinkWriter {
                 continue;
             }
 
-            let Some(payload) = self.extract_payload(&row)? else {
+            let Some(method) = self.extract_method(&row)? else {
                 continue;
             };
+            let payload = self.extract_payload(&row)?;
+            if payload.is_none() && method != reqwest::Method::DELETE {
+                continue;
+            }
             let Some(url) = self.extract_url(&row)? else {
                 continue;
             };
 
-            let resp = self
-                .client
-                .request(self.method.clone(), url)
-                .body(payload)
+            let mut request = self.client.request(method, url);
+            if let Some(payload) = payload {
+                request = request.body(payload);
+            }
+
+            let resp = request
                 .send()
                 .await
                 .context("HTTP request failed")
@@ -483,6 +575,17 @@ mod tests {
     use risingwave_common::types::{JsonbVal, Scalar};
 
     use super::*;
+
+    #[test]
+    fn test_parse_http_method() {
+        assert_eq!(parse_http_method("patch").unwrap(), reqwest::Method::PATCH);
+        assert_eq!(
+            parse_http_method("DeLeTe").unwrap(),
+            reqwest::Method::DELETE
+        );
+        assert_eq!(parse_http_method("PROPFIND").unwrap().as_str(), "PROPFIND");
+        assert!(parse_http_method("invalid method").is_err());
+    }
 
     #[test]
     fn test_strip_text_payload() {

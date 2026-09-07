@@ -19,11 +19,11 @@ Mock HTTP server for testing the RisingWave HTTP sink.
 Usage:
     python3 http_sink_mock_server.py <body_output_file> <port> [<header_output_file>] [<path_output_file>] [<method_output_file>]
 
-Each POST or PUT request body is appended as a line to the body output file.
+Each handled request body is appended as a line to the body output file.
 If a header output file is given, received headers are appended as a JSON line per request.
 If a path output file is given, each request path is appended as a line per request.
 If a method output file is given, each request method is appended as a line per request.
-Responds 200 OK to every POST and PUT request.
+Responds 200 OK to every handled request.
 """
 
 import json
@@ -62,6 +62,15 @@ def main():
             self._handle_request()
 
         def do_PUT(self):
+            self._handle_request()
+
+        def do_PATCH(self):
+            self._handle_request()
+
+        def do_DELETE(self):
+            self._handle_request()
+
+        def do_PROPFIND(self):
             self._handle_request()
 
         def do_GET(self):

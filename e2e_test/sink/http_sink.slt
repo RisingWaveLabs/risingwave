@@ -1,13 +1,13 @@
 statement ok
 set sink_decouple = false;
 
-# ---- Validation: multiple columns must use payload/url shape ----
+# ---- Validation: multiple columns must use payload/url/method shape ----
 # force_append_only bypasses the planner-level retract-stream check so our
 # connector validate() is actually reached.
 statement ok
 CREATE TABLE t_multi_col (a varchar, b varchar);
 
-statement error HTTP sink with multiple columns only supports payload and url columns, got a
+statement error HTTP sink with multiple columns only supports payload, url, and method columns, got a
 CREATE SINK s_multi_col FROM t_multi_col WITH (
     connector = 'http',
     url = 'http://localhost:18081',
@@ -51,7 +51,7 @@ DROP TABLE t_dynamic_url_with_static_option;
 statement ok
 CREATE TABLE t_dynamic_url_missing_url (payload varchar, extra varchar);
 
-statement error HTTP sink with multiple columns only supports payload and url columns, got extra
+statement error HTTP sink with multiple columns only supports payload, url, and method columns, got extra
 CREATE SINK s_dynamic_url_missing_url FROM t_dynamic_url_missing_url WITH (
     connector = 'http',
     type = 'append-only',
@@ -75,11 +75,42 @@ CREATE SINK s_dynamic_url_bad_type FROM t_dynamic_url_bad_type WITH (
 statement ok
 DROP TABLE t_dynamic_url_bad_type;
 
+# ---- Validation: dynamic method column cannot coexist with method option ----
+statement ok
+CREATE TABLE t_dynamic_method_with_static_option (payload varchar, method varchar);
+
+statement error HTTP sink method option cannot coexist with method column
+CREATE SINK s_dynamic_method_with_static_option FROM t_dynamic_method_with_static_option WITH (
+    connector = 'http',
+    url = 'http://localhost:18081',
+    method = 'PATCH',
+    type = 'append-only',
+    force_append_only = 'true'
+);
+
+statement ok
+DROP TABLE t_dynamic_method_with_static_option;
+
+# ---- Validation: dynamic method column must be varchar ----
+statement ok
+CREATE TABLE t_dynamic_method_bad_type (payload varchar, method int);
+
+statement error HTTP sink method column must be varchar
+CREATE SINK s_dynamic_method_bad_type FROM t_dynamic_method_bad_type WITH (
+    connector = 'http',
+    url = 'http://localhost:18081',
+    type = 'append-only',
+    force_append_only = 'true'
+);
+
+statement ok
+DROP TABLE t_dynamic_method_bad_type;
+
 # ---- Validation: extra columns are rejected ----
 statement ok
 CREATE TABLE t_dynamic_url_extra_column (payload varchar, url varchar, extra varchar);
 
-statement error HTTP sink with multiple columns only supports payload and url columns, got extra
+statement error HTTP sink with multiple columns only supports payload, url, and method columns, got extra
 CREATE SINK s_dynamic_url_extra_column FROM t_dynamic_url_extra_column WITH (
     connector = 'http',
     type = 'append-only',
@@ -119,21 +150,21 @@ CREATE SINK s_bad_url FROM t_url WITH (
 statement ok
 DROP TABLE t_url;
 
-# ---- Validation: unsupported HTTP method should be rejected ----
+# ---- Validation: syntactically invalid static HTTP method should be rejected ----
 statement ok
-CREATE TABLE t_unsupported_method (payload varchar);
+CREATE TABLE t_invalid_method (payload varchar);
 
-statement error HTTP sink method must be POST or PUT, got 'DELETE'
-CREATE SINK s_unsupported_method FROM t_unsupported_method WITH (
+statement error invalid HTTP sink method 'invalid method'
+CREATE SINK s_invalid_method FROM t_invalid_method WITH (
     connector = 'http',
     url = 'http://localhost:18081',
-    method = 'DELETE',
+    method = 'invalid method',
     type = 'append-only',
     force_append_only = 'true'
 );
 
 statement ok
-DROP TABLE t_unsupported_method;
+DROP TABLE t_invalid_method;
 
 # ---- Validation: auto schema change should be rejected ----
 statement ok
@@ -242,6 +273,56 @@ DROP SINK s_put;
 statement ok
 DROP TABLE t_put;
 
+# ---- Success: static PATCH method ----
+statement ok
+CREATE TABLE t_patch (payload varchar);
+
+statement ok
+CREATE SINK s_patch FROM t_patch WITH (
+    connector = 'http',
+    url = 'http://localhost:18081',
+    method = 'PATCH',
+    type = 'append-only',
+    force_append_only = 'true'
+);
+
+statement ok
+INSERT INTO t_patch VALUES ('patch payload');
+
+statement ok
+FLUSH;
+
+statement ok
+DROP SINK s_patch;
+
+statement ok
+DROP TABLE t_patch;
+
+# ---- Success: static DELETE with a NULL payload sends a bodyless request ----
+statement ok
+CREATE TABLE t_delete (payload varchar);
+
+statement ok
+CREATE SINK s_delete FROM t_delete WITH (
+    connector = 'http',
+    url = 'http://localhost:18081',
+    method = 'DELETE',
+    type = 'append-only',
+    force_append_only = 'true'
+);
+
+statement ok
+INSERT INTO t_delete VALUES (NULL);
+
+statement ok
+FLUSH;
+
+statement ok
+DROP SINK s_delete;
+
+statement ok
+DROP TABLE t_delete;
+
 # ---- Success: jsonb payload ----
 statement ok
 CREATE TABLE t_jsonb (payload jsonb);
@@ -314,3 +395,69 @@ DROP SINK s_dynamic_url_as_select;
 
 statement ok
 DROP TABLE t_dynamic_url_as_select_src;
+
+# ---- Success: dynamic method column ----
+statement ok
+CREATE TABLE t_dynamic_method (payload varchar, method varchar);
+
+statement ok
+CREATE SINK s_dynamic_method FROM t_dynamic_method WITH (
+    connector = 'http',
+    url = 'http://localhost:18081',
+    type = 'append-only',
+    force_append_only = 'true'
+);
+
+statement ok
+INSERT INTO t_dynamic_method VALUES ('dynamic patch payload', 'patch');
+
+statement ok
+INSERT INTO t_dynamic_method VALUES ('dynamic custom method payload', 'PROPFIND');
+
+statement ok
+INSERT INTO t_dynamic_method VALUES (NULL, 'delete');
+
+statement ok
+INSERT INTO t_dynamic_method VALUES ('skipped invalid method payload', 'invalid method');
+
+statement ok
+INSERT INTO t_dynamic_method VALUES ('skipped empty method payload', '');
+
+statement ok
+INSERT INTO t_dynamic_method VALUES ('skipped null method payload', NULL);
+
+statement ok
+FLUSH;
+
+statement ok
+DROP SINK s_dynamic_method;
+
+statement ok
+DROP TABLE t_dynamic_method;
+
+# ---- Success: dynamic url and method columns ----
+statement ok
+CREATE TABLE t_dynamic_url_method (payload varchar, url varchar, method varchar);
+
+statement ok
+CREATE SINK s_dynamic_url_method FROM t_dynamic_url_method WITH (
+    connector = 'http',
+    type = 'append-only',
+    force_append_only = 'true'
+);
+
+statement ok
+INSERT INTO t_dynamic_url_method VALUES (
+    'dynamic url and method payload',
+    'http://localhost:18081',
+    'PUT'
+);
+
+statement ok
+FLUSH;
+
+statement ok
+DROP SINK s_dynamic_url_method;
+
+statement ok
+DROP TABLE t_dynamic_url_method;
