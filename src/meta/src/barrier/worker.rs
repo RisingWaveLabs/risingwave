@@ -1034,10 +1034,7 @@ impl<C: GlobalBarrierWorkerContext> GlobalBarrierWorker<C> {
     }
 
     async fn adhoc_database_recovery(&mut self, database_id: DatabaseId) -> MetaResult<()> {
-        let Some(entering_recovery) = self
-            .checkpoint_control
-            .on_report_failure(database_id, &mut self.partial_graph_manager)
-        else {
+        let Some(entering_recovery) = self.checkpoint_control.on_adhoc_recovery(database_id) else {
             // A recovery is already in progress. The caller has been registered
             // above and will be notified when that recovery finishes.
             return Ok(());
