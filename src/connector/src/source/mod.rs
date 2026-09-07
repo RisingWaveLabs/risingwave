@@ -60,6 +60,7 @@ pub mod pulsar;
 pub mod utils;
 
 mod util;
+use std::collections::HashMap;
 use std::future::IntoFuture;
 use std::time::Duration;
 
@@ -187,14 +188,24 @@ impl WaitCheckpointTask {
                 }
             }
             WaitCheckpointTask::AckPulsarMessage(ack_array) => {
-                if let Some((ack_channel_id, to_cumulative_ack)) = ack_array.last() {
-                    let Some(encode_message_id_data) = to_cumulative_ack
+                let mut latest_ack_by_channel = HashMap::new();
+                for (ack_channel_id, to_cumulative_ack) in ack_array {
+                    let encode_message_id_data = to_cumulative_ack
                         .as_bytea()
                         .iter()
-                        .last()
                         .flatten()
-                        .map(|x| x.to_owned())
-                    else {
+                        .last()
+                        .map(|message_id| message_id.to_owned());
+
+                    if let Some(encode_message_id_data) = encode_message_id_data {
+                        latest_ack_by_channel.insert(ack_channel_id, Some(encode_message_id_data));
+                    } else {
+                        latest_ack_by_channel.entry(ack_channel_id).or_insert(None);
+                    }
+                }
+
+                for (ack_channel_id, encode_message_id_data) in latest_ack_by_channel {
+                    let Some(encode_message_id_data) = encode_message_id_data else {
                         GLOBAL_SOURCE_METRICS.inc_connector_ack_failure_count(
                             source_name,
                             "pulsar",
@@ -204,12 +215,12 @@ impl WaitCheckpointTask {
                             source_id = source_id_label,
                             source_name,
                             ack_channel_id,
-                            "skip Pulsar ack because the checkpoint ack batch has no message id",
+                            "skip Pulsar ack because the checkpoint ack batches have no message id",
                         );
-                        return;
+                        continue;
                     };
 
-                    let Some(ack_tx) = PULSAR_ACK_CHANNEL.lock().get(ack_channel_id).cloned()
+                    let Some(ack_tx) = PULSAR_ACK_CHANNEL.lock().get(&ack_channel_id).cloned()
                     else {
                         GLOBAL_SOURCE_METRICS.inc_connector_ack_failure_count(
                             source_name,
@@ -222,7 +233,7 @@ impl WaitCheckpointTask {
                             ack_channel_id,
                             "skip Pulsar ack because the ack channel is missing",
                         );
-                        return;
+                        continue;
                     };
 
                     if let Err(e) = ack_tx.send(encode_message_id_data) {
@@ -424,9 +435,10 @@ pub fn build_pulsar_ack_channel_id(
 
 #[cfg(test)]
 mod tests {
-    use risingwave_pb::id::{ActorId, SourceId};
+    use risingwave_common::array::{Array, BytesArray};
+    use tokio::sync::mpsc::error::TryRecvError;
 
-    use super::{SplitId, build_pulsar_ack_channel_id};
+    use super::*;
 
     #[test]
     fn test_pulsar_ack_channel_id_is_actor_scoped() {
@@ -437,5 +449,56 @@ mod tests {
         let second = build_pulsar_ack_channel_id(source_id, &split_id, ActorId::new(12));
 
         assert_ne!(first, second);
+    }
+
+    fn message_ids<const N: usize>(values: [Option<&[u8]>; N]) -> ArrayRef {
+        BytesArray::from_iter(values).into_ref()
+    }
+
+    #[tokio::test]
+    async fn test_ack_pulsar_message_for_each_split() {
+        let split_0_channel = "test-pulsar-ack-multiple-splits-0".to_owned();
+        let split_1_channel = "test-pulsar-ack-multiple-splits-1".to_owned();
+        let empty_split_channel = "test-pulsar-ack-multiple-splits-empty".to_owned();
+        let (split_0_tx, mut split_0_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (split_1_tx, mut split_1_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (empty_split_tx, mut empty_split_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        PULSAR_ACK_CHANNEL
+            .lock()
+            .insert(split_0_channel.clone(), split_0_tx);
+        PULSAR_ACK_CHANNEL
+            .lock()
+            .insert(split_1_channel.clone(), split_1_tx);
+        PULSAR_ACK_CHANNEL
+            .lock()
+            .insert(empty_split_channel.clone(), empty_split_tx);
+
+        WaitCheckpointTask::AckPulsarMessage(vec![
+            (split_0_channel.clone(), message_ids([Some(b"split-0-old")])),
+            (
+                split_1_channel.clone(),
+                message_ids([Some(b"split-1-latest"), None]),
+            ),
+            (
+                split_0_channel.clone(),
+                message_ids([Some(b"split-0-latest")]),
+            ),
+            (split_0_channel.clone(), message_ids([None])),
+            (empty_split_channel.clone(), message_ids([None, None])),
+        ])
+        .run(SourceId::new(26891), "test_pulsar_source")
+        .await;
+
+        assert_eq!(split_0_rx.try_recv().unwrap(), b"split-0-latest");
+        assert_eq!(split_0_rx.try_recv(), Err(TryRecvError::Empty));
+        assert_eq!(split_1_rx.try_recv().unwrap(), b"split-1-latest");
+        assert_eq!(split_1_rx.try_recv(), Err(TryRecvError::Empty));
+        assert_eq!(empty_split_rx.try_recv(), Err(TryRecvError::Empty));
+
+        let mut ack_channels = PULSAR_ACK_CHANNEL.lock();
+        ack_channels.remove(&split_0_channel);
+        ack_channels.remove(&split_1_channel);
+        ack_channels.remove(&empty_split_channel);
     }
 }
