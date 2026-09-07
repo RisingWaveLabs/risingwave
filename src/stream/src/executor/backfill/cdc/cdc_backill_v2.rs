@@ -650,7 +650,14 @@ impl<S: StateStore> ParallelizedCdcBackfillExecutor<S> {
 
                         match attempt_state {
                             SnapshotAttemptState::Failed => {
-                                upstream_table_reader.disconnect().await?;
+                                if let Err(error) = upstream_table_reader.disconnect().await {
+                                    tracing::warn!(
+                                        error = %error.as_report(),
+                                        %table_id,
+                                        upstream_table_name,
+                                        "failed to disconnect CDC snapshot reader; continuing with rebuild"
+                                    );
+                                }
 
                                 let mut future = Box::pin(create_table_reader_with_retry(
                                     self.external_table.clone(),

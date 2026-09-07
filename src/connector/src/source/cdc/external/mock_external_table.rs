@@ -20,6 +20,7 @@ use futures_async_stream::try_stream;
 use risingwave_common::catalog::Field;
 use risingwave_common::row::{OwnedRow, Row};
 use risingwave_common::types::{DataType, ScalarImpl};
+use risingwave_common::util::iter_util::ZipEqFast;
 use risingwave_common::util::sort_util::{OrderType, cmp_datum};
 
 use crate::error::{ConnectorError, ConnectorResult};
@@ -187,7 +188,7 @@ impl MockExternalTableReader {
             self.parallel_backfill_pk_indices
                 .iter()
                 .map(|&idx| row.datum_at(idx))
-                .zip(cursor.iter())
+                .zip_eq_fast(cursor.iter())
                 .find_map(|(row_datum, cursor_datum)| {
                     let ordering =
                         cmp_datum(row_datum, cursor_datum, OrderType::ascending_nulls_first());
