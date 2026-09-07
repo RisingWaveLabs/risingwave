@@ -189,7 +189,7 @@ iceberg-storage-opendal = { git = "https://github.com/risingwavelabs/iceberg-rus
 ] }
 indexmap = { version = "2.12.0", features = ["serde"] }
 itertools = "0.14.0"
-jni = { version = "0.21.1", features = ["invocation"] }
+jni = { version = "0.22.4", features = ["invocation"] }
 jsonbb = { version = "0.2.3", features = ["float_roundtrip"] }
 jsonwebtoken = { version = "10", features = ["aws_lc_rs"] }
 linkme = { version = "0.3.32", features = ["used_linker"] }

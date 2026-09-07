@@ -12,7 +12,7 @@ bytes = "1"
 cfg-or-panic = "0.2"
 foyer = { workspace = true }
 futures = { version = "0.3", default-features = false, features = ["alloc"] }
-jni = "0.21.1"
+jni = "0.22.4"
 prost = { workspace = true }
 risingwave_common = { workspace = true }
 risingwave_hummock_sdk = { workspace = true }
