@@ -622,12 +622,16 @@ impl MySqlExternalTableReader {
 
         // Query primary key columns and their data types
         let sql = format!(
-            "SELECT COLUMN_NAME, COLUMN_TYPE
-            FROM INFORMATION_SCHEMA.COLUMNS
-            WHERE TABLE_SCHEMA = '{}'
-            AND TABLE_NAME = '{}'
-            AND COLUMN_KEY = 'PRI'
-            ORDER BY ORDINAL_POSITION",
+            "SELECT s.COLUMN_NAME, c.COLUMN_TYPE
+            FROM INFORMATION_SCHEMA.STATISTICS AS s
+            JOIN INFORMATION_SCHEMA.COLUMNS AS c
+              ON c.TABLE_SCHEMA = s.TABLE_SCHEMA
+             AND c.TABLE_NAME = s.TABLE_NAME
+             AND c.COLUMN_NAME = s.COLUMN_NAME
+            WHERE s.TABLE_SCHEMA = '{}'
+              AND s.TABLE_NAME = '{}'
+              AND s.INDEX_NAME = 'PRIMARY'
+            ORDER BY s.SEQ_IN_INDEX",
             database, table
         );
 
