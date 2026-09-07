@@ -21,8 +21,8 @@ use risingwave_connector::source::cdc::CdcScanOptions;
 use super::generic::GenericPlanRef;
 use super::utils::{Distill, childless_record};
 use super::{
-    BatchPlanRef, ColPrunable, ExprRewritable, Logical, LogicalPlanRef as PlanRef, LogicalProject,
-    PlanBase, PredicatePushdown, StreamPlanRef, ToBatch, ToStream, generic,
+    BatchPlanRef, ColPrunable, ExprRewritable, Logical, LogicalFilter, LogicalPlanRef as PlanRef,
+    LogicalProject, PlanBase, PredicatePushdown, StreamPlanRef, ToBatch, ToStream, generic,
 };
 use crate::catalog::ColumnId;
 use crate::error::Result;
@@ -167,10 +167,10 @@ impl ExprVisitable for LogicalCdcScan {
 impl PredicatePushdown for LogicalCdcScan {
     fn predicate_pushdown(
         &self,
-        _predicate: Condition,
+        predicate: Condition,
         _ctx: &mut PredicatePushdownContext,
     ) -> PlanRef {
-        self.clone().into()
+        LogicalFilter::create(self.clone().into(), predicate)
     }
 }
 
@@ -197,5 +197,57 @@ impl ToStream for LogicalCdcScan {
             self.clone().into(),
             ColIndexMapping::identity(self.schema().len()),
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::rc::Rc;
+
+    use risingwave_common::catalog::{CdcTableDesc, ColumnDesc, ColumnId, TableId};
+    use risingwave_common::id::SourceId;
+    use risingwave_common::types::DataType;
+    use risingwave_common::util::sort_util::{ColumnOrder, OrderType};
+    use risingwave_connector::source::cdc::CdcScanOptions;
+
+    use super::*;
+    use crate::expr::InputRef;
+    use crate::optimizer::optimizer_context::OptimizerContext;
+    use crate::optimizer::plan_node::PlanTreeNodeUnary;
+
+    #[test]
+    fn test_predicate_pushdown_preserves_filter() {
+        let desc = CdcTableDesc {
+            table_id: TableId::new(1),
+            source_id: SourceId::new(2),
+            external_table_name: "mydb.orders".to_owned(),
+            pk: vec![ColumnOrder::new(0, OrderType::ascending())],
+            columns: vec![
+                ColumnDesc::named("id", ColumnId::new(1), DataType::Int32),
+                ColumnDesc::named("selected", ColumnId::new(2), DataType::Boolean),
+            ],
+            stream_key: vec![0],
+            ..Default::default()
+        };
+        let scan: PlanRef = LogicalCdcScan::create(
+            "orders".to_owned(),
+            Rc::new(desc),
+            OptimizerContext::mock(),
+            CdcScanOptions {
+                disable_backfill: true,
+                ..Default::default()
+            },
+        )
+        .into();
+        let predicate = Condition::with_expr(InputRef::new(1, DataType::Boolean).into());
+        let mut ctx = PredicatePushdownContext::new(scan.clone());
+
+        let result = scan.predicate_pushdown(predicate.clone(), &mut ctx);
+
+        let filter = result
+            .as_logical_filter()
+            .expect("the predicate must remain above the CDC scan");
+        assert_eq!(filter.predicate(), &predicate);
+        assert!(filter.input().as_logical_cdc_scan().is_some());
     }
 }

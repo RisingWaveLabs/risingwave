@@ -137,6 +137,10 @@ CREATE MATERIALIZED VIEW orders_payload_only AS
 SELECT payload FROM mysql_orders_table_source;
 
 statement ok
+CREATE MATERIALIZED VIEW orders_filtered AS
+SELECT id, payload FROM mysql_orders_table_source WHERE payload = 'keep';
+
+statement ok
 CREATE MATERIALIZED VIEW orders_changelog AS
 WITH sub AS CHANGELOG FROM mysql_orders_table_source
 SELECT id, payload, changelog_op FROM sub;
@@ -191,6 +195,38 @@ SELECT count(*) FROM orders_state_1;
 ----
 0
 
+# Exercise a predicate that changes from false to true and back to false for the same upsert key.
+# The first query cannot pass until the filtered consumer has processed the update to `keep`; the
+# second cannot pass early because that row must first be removed by the update to `drop_again`.
+system ok
+mysql -e "
+    USE risedev;
+    INSERT INTO mysql_orders_table_source VALUES (4, 'drop');
+    UPDATE mysql_orders_table_source SET payload = 'keep' WHERE id = 4;
+"
+
+query IT retry 10 backoff 1s
+SELECT id, payload FROM orders_filtered;
+----
+4 keep
+
+system ok
+mysql -e "
+    USE risedev;
+    UPDATE mysql_orders_table_source SET payload = 'drop_again' WHERE id = 4;
+"
+
+query I retry 10 backoff 1s
+SELECT count(*) FROM orders_filtered;
+----
+0
+
+system ok
+mysql -e "
+    USE risedev;
+    DELETE FROM mysql_orders_table_source WHERE id = 4;
+"
+
 onlyif can-use-recover
 statement ok
 recover;
@@ -222,6 +258,9 @@ DROP MATERIALIZED VIEW orders_state_1;
 
 statement ok
 DROP MATERIALIZED VIEW orders_payload_only;
+
+statement ok
+DROP MATERIALIZED VIEW orders_filtered;
 
 statement ok
 DROP MATERIALIZED VIEW orders_id_only;
