@@ -60,7 +60,8 @@ message BarrierCompleteResponse {
     uint64 consumed_epoch = 3;
     // MV backfill snapshot read rows / Source backfilled rows
     uint64 consumed_rows = 4;
-    uint64 pending_epoch_lag = 5;
+    reserved 5;
+    reserved "pending_epoch_lag";
     // Buffered rows that are yet to be consumed (used by locality backfill to report precise progress)
     uint64 buffered_rows = 6;
     uint32 fragment_id = 7;

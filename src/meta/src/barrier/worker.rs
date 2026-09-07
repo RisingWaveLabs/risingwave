@@ -637,6 +637,7 @@ impl<C: GlobalBarrierWorkerContext> GlobalBarrierWorker<C> {
                                     let rendered_info = render_runtime_info(
                                         self.env.actor_id_generator(),
                                         &self.active_streaming_nodes,
+                                        self.partial_graph_manager.control_stream_manager(),
                                         &runtime_info.recovery_context,
                                         database_id,
                                     )
@@ -1155,6 +1156,7 @@ impl<C: GlobalBarrierWorkerContext> GlobalBarrierWorker<C> {
                         let Some(rendered_info) = render_runtime_info(
                             self.env.actor_id_generator(),
                             &active_streaming_nodes,
+                            recoverer.control_stream_manager(),
                             &recovery_context,
                             database_id,
                         )

@@ -42,7 +42,7 @@ use crate::barrier::checkpoint::{
 };
 use crate::barrier::context::{GlobalBarrierWorkerContext, GlobalBarrierWorkerContextImpl};
 use crate::barrier::progress::TrackingJob;
-use crate::barrier::rpc::to_partial_graph_id;
+use crate::barrier::rpc::{ControlStreamManager, to_partial_graph_id};
 use crate::controller::fragment::{InflightActorInfo, InflightFragmentInfo};
 use crate::controller::scale::{
     FragmentRenderMap, LoadedFragment, LoadedFragmentContext, RenderedGraph,
@@ -90,9 +90,10 @@ pub struct RenderedDatabaseRuntimeInfo {
     pub batch_refresh: HashMap<JobId, BatchRefreshRenderResult>,
 }
 
-pub fn render_runtime_info(
+pub(in crate::barrier) fn render_runtime_info(
     actor_id_generator: &AtomicU32,
     worker_nodes: &ActiveStreamingWorkerNodes,
+    control_stream_manager: &ControlStreamManager,
     recovery_context: &LoadedRecoveryContext,
     database_id: DatabaseId,
 ) -> MetaResult<Option<RenderedDatabaseRuntimeInfo>> {
@@ -175,6 +176,7 @@ pub fn render_runtime_info(
             &extra.job_definition,
             actor_id_generator,
             worker_nodes.current(),
+            control_stream_manager,
             &database_model.resource_group,
             streaming_job_model,
             partial_graph_id,
