@@ -46,6 +46,7 @@ use risingwave_hummock_sdk::key::{FullKey, KeyPayloadType, UserKey, UserKeyRange
 use risingwave_hummock_sdk::{HummockEpoch, HummockSstableObjectId};
 
 mod filter;
+pub(crate) mod meta;
 mod utils;
 
 pub use filter::{
