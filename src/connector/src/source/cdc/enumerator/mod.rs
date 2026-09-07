@@ -475,7 +475,11 @@ impl DebeziumSplitEnumerator<Mysql> {
                 if let Some((oldest_file, oldest_size)) = binlog_files.first() {
                     // Extract sequence number from filename (e.g., "binlog.000001" -> 1)
                     if let Some(seq) = extract_binlog_file_seq(oldest_file) {
-                        let labels = vec![hostname.to_owned(), port.to_owned()];
+                        let labels = vec![
+                            self.source_id.to_string(),
+                            hostname.to_owned(),
+                            port.to_owned(),
+                        ];
                         get_or_create_guarded_int_gauge(
                             &mut self.mysql_cdc_binlog_file_seq_min,
                             &self.metrics.mysql_cdc_binlog_file_seq_min,
@@ -496,7 +500,11 @@ impl DebeziumSplitEnumerator<Mysql> {
                 if let Some((newest_file, newest_size)) = binlog_files.last() {
                     // Extract sequence number from filename
                     if let Some(seq) = extract_binlog_file_seq(newest_file) {
-                        let labels = vec![hostname.to_owned(), port.to_owned()];
+                        let labels = vec![
+                            self.source_id.to_string(),
+                            hostname.to_owned(),
+                            port.to_owned(),
+                        ];
                         get_or_create_guarded_int_gauge(
                             &mut self.mysql_cdc_binlog_file_seq_max,
                             &self.metrics.mysql_cdc_binlog_file_seq_max,

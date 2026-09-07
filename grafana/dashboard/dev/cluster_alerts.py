@@ -9,6 +9,28 @@ cross_db_log_expiry_headroom = (
     f" + on(table_id) group_left max({metric('streaming_table_change_log_retention_seconds', node_filter_enabled=False, table_id_filter_enabled=True)} != 0) by (table_id)"
     f" - time())"
 )
+mysql_cdc_binlog_file_seq_min = metric(
+    "mysql_cdc_binlog_file_seq_min", node_filter_enabled=False
+)
+mysql_cdc_binlog_file_seq_max = metric(
+    "mysql_cdc_binlog_file_seq_max", node_filter_enabled=False
+)
+stream_mysql_cdc_state_binlog_file_seq = metric(
+    "stream_mysql_cdc_state_binlog_file_seq", node_filter_enabled=False
+)
+mysql_cdc_binlog_file_lag = (
+    f"clamp_min({mysql_cdc_binlog_file_seq_max} - on(source_id) "
+    f"{stream_mysql_cdc_state_binlog_file_seq}, 0)"
+)
+mysql_cdc_binlog_retention_risk_margin = (
+    f"(({mysql_cdc_binlog_file_seq_max} + "
+    f"{mysql_cdc_binlog_file_seq_min}) / 2 - on(source_id) "
+    f"{stream_mysql_cdc_state_binlog_file_seq})"
+)
+mysql_cdc_binlog_retention_risk = (
+    f"{alert_when(mysql_cdc_binlog_file_lag)} and "
+    f"{alert_threshold(mysql_cdc_binlog_retention_risk_margin, 0)}"
+)
 
 @section
 def _(outer_panels: Panels):
@@ -32,8 +54,9 @@ def _(outer_panels: Panels):
     - Merger Barrier Align: If the merger barrier align is high, it means the merger is not able to align the barriers in time.
     - Join Amplification: If the join amplification is high, it means the join is not able to process the data in time.
 - Cross-DB Log Retention Expiring: a cross-database MV changelog consumer's last consumed changelog epoch will expire within 12 hours.
+- MySQL CDC Binlog File Lag Too High: the MySQL CDC checkpoint is at least 20 files behind the upstream newest file, or it is behind the newest file and has entered the older half of the retained binlog range. Check `Streaming CDC` > `MySQL CDC Binlog File Lag` and `MySQL CDC Binlog Retention Risk Margin`.
 """,
-                    height=9,
+                    height=10,
                 ),
                 panels.timeseries_count(
                     "Streaming Alert Signals",
@@ -57,6 +80,11 @@ def _(outer_panels: Panels):
                                 "<",
                             ),
                             "Cross-DB Log Retention Expiring table {{table_id}} actor {{actor_id}} fragment {{fragment_id}}",
+                        ),
+                        panels.target(
+                            f"{alert_threshold(mysql_cdc_binlog_file_lag, 20)} or "
+                            f"({mysql_cdc_binlog_retention_risk})",
+                            "MySQL CDC Binlog File Lag Too High source {{source_id}} {{hostname}}:{{port}}",
                         ),
                     ],
                     ["last"],
