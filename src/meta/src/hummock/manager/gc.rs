@@ -229,12 +229,13 @@ impl HummockManager {
             .versioning
             .read_with_process_name("finalize_objects_to_delete")
             .await;
-        let tracked_object_ids: HashSet<HummockObjectId> = versioning.get_tracked_object_ids(
-            self.context_info
-                .read_with_process_name("finalize_objects_to_delete")
-                .await
-                .min_pinned_version_id(),
-        );
+        let min_pinned_version_id = self
+            .context_info
+            .read_with_process_name("finalize_objects_to_delete")
+            .await
+            .min_pinned_version_id();
+        let tracked_object_ids: HashSet<HummockObjectId> =
+            versioning.get_tracked_object_ids(min_pinned_version_id);
         let to_delete = object_ids
             .filter(|object_id| !tracked_object_ids.contains(object_id))
             .collect_vec();
@@ -540,12 +541,12 @@ impl HummockManager {
                 .versioning
                 .read_with_process_name("try_start_minor_gc")
                 .await;
-            versioning.get_tracked_object_ids(
-                self.context_info
-                    .read_with_process_name("try_start_minor_gc")
-                    .await
-                    .min_pinned_version_id(),
-            )
+            let min_pinned_version_id = self
+                .context_info
+                .read_with_process_name("try_start_minor_gc")
+                .await
+                .min_pinned_version_id();
+            versioning.get_tracked_object_ids(min_pinned_version_id)
         };
         let object_ids = object_ids
             .into_iter()
