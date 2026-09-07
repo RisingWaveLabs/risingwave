@@ -203,10 +203,10 @@ mysql_async = { version = "0.36", features = [
 opendal = "0.58.1"
 opendal-http-transport-reqwest = "0.58.1"
 openssl = "0.10.80"
-opentelemetry = "0.31"
-opentelemetry-otlp = { version = "0.31", features = ["grpc-tonic"] }
-opentelemetry-semantic-conventions = "0.31"
-opentelemetry_sdk = { version = "0.31", default-features = false, features = [
+opentelemetry = "0.32"
+opentelemetry-otlp = { version = "0.32", features = ["grpc-tonic"] }
+opentelemetry-semantic-conventions = "0.32"
+opentelemetry_sdk = { version = "0.32", default-features = false, features = [
     "trace",
 ] }
 otlp-embedded = "0.0.2"
@@ -329,7 +329,7 @@ tonic = { package = "madsim-tonic", git = "https://github.com/risingwavelabs/mad
     "zstd",
 ] }
 tonic-build = { package = "madsim-tonic-build", git = "https://github.com/risingwavelabs/madsim.git", rev = "595455fd05058b3b48bf281bea3ada1bca3d6646" }
-tracing-opentelemetry = "=0.32.0"
+tracing-opentelemetry = "=0.33.0"
 
 [workspace.lints.rust]
 # `forbid` will also prevent the misuse of `#[allow(unused)]`
