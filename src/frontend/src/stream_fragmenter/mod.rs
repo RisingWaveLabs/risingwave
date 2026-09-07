@@ -499,11 +499,11 @@ fn build_fragment(
                 current_fragment
                     .fragment_type_mask
                     .add(FragmentTypeFlag::StreamCdcScan);
-                if let Some(o) = node.options
-                    && CdcScanOptions::from_proto(&o).is_parallelized_backfill()
-                {
-                    // Use parallel CDC backfill.
-                } else {
+                let is_parallelized_backfill = node
+                    .options
+                    .as_ref()
+                    .is_some_and(|o| CdcScanOptions::from_proto(o).is_parallelized_backfill());
+                if !is_parallelized_backfill {
                     current_fragment
                         .fragment_type_mask
                         .add(FragmentTypeFlag::StreamScan);
