@@ -32,7 +32,7 @@ constant_time_eq = "0.4"
 crc32c = "0.6"
 crc32fast = "1"
 educe = "0.6"
-fancy-regex = "0.17"
+fancy-regex = "0.18"
 futures = { version = "0.3", default-features = false, features = ["alloc"] }
 futures-async-stream = { workspace = true }
 futures-util = "0.3"
