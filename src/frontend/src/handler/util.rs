@@ -38,6 +38,7 @@ use risingwave_common::util::epoch::Epoch;
 use risingwave_common::util::iter_util::ZipEqFast;
 use risingwave_connector::sink::elasticsearch_opensearch::elasticsearch::ES_SINK;
 use risingwave_connector::sink::file_sink::fs::FS_SINK;
+use risingwave_connector::source::cdc::ORACLE_CDC_CONNECTOR;
 use risingwave_connector::source::iceberg::ICEBERG_CONNECTOR;
 use risingwave_connector::source::{BATCH_POSIX_FS_CONNECTOR, KAFKA_CONNECTOR, POSIX_FS_CONNECTOR};
 use risingwave_pb::catalog::connection_params::PbConnectionType;
@@ -68,6 +69,19 @@ pub fn ensure_local_fs_connector_allowed(session: &SessionImpl, connector: &str)
         "local filesystem connector '{}' is disabled. Set `frontend.unsafe_enable_local_fs_connector = true` in `risingwave.toml` to enable it.",
         connector
     ))))
+}
+
+pub fn ensure_oracle_cdc_connector_allowed(session: &SessionImpl, connector: &str) -> RwResult<()> {
+    if !connector.eq_ignore_ascii_case(ORACLE_CDC_CONNECTOR)
+        || session.env().frontend_config().unsafe_enable_oracle_cdc
+    {
+        return Ok(());
+    }
+
+    Err(RwError::from(ProtocolError(
+        "Oracle CDC connector is disabled. Set `frontend.unsafe_enable_oracle_cdc = true` in `risingwave.toml` to enable this experimental connector."
+            .to_owned(),
+    )))
 }
 
 fn is_local_fs_connector_enabled(frontend_config: &FrontendConfig, connector: &str) -> bool {
@@ -477,6 +491,7 @@ mod tests {
     use risingwave_common::array::*;
 
     use super::*;
+    use crate::test_utils::LocalFrontend;
 
     #[test]
     fn test_to_pg_field() {
@@ -680,5 +695,28 @@ mod tests {
             BATCH_POSIX_FS_CONNECTOR
         ));
         assert!(is_local_fs_connector_enabled(&enabled_config, FS_SINK));
+    }
+
+    #[tokio::test]
+    async fn test_oracle_cdc_connector_config_gate() {
+        let frontend = LocalFrontend::new(Default::default()).await;
+        let session = frontend.session_ref();
+        assert!(
+            ensure_oracle_cdc_connector_allowed(session.as_ref(), ORACLE_CDC_CONNECTOR).is_err()
+        );
+        assert!(ensure_oracle_cdc_connector_allowed(session.as_ref(), KAFKA_CONNECTOR).is_ok());
+
+        let frontend = LocalFrontend::with_frontend_config(
+            Default::default(),
+            FrontendConfig {
+                unsafe_enable_oracle_cdc: true,
+                ..Default::default()
+            },
+        )
+        .await;
+        let session = frontend.session_ref();
+        assert!(
+            ensure_oracle_cdc_connector_allowed(session.as_ref(), ORACLE_CDC_CONNECTOR).is_ok()
+        );
     }
 }

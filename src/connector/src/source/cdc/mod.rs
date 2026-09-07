@@ -63,6 +63,7 @@ pub const POSTGRES_CDC_CONNECTOR: &str = Postgres::CDC_CONNECTOR_NAME;
 pub const CITUS_CDC_CONNECTOR: &str = Citus::CDC_CONNECTOR_NAME;
 pub const MONGODB_CDC_CONNECTOR: &str = Mongodb::CDC_CONNECTOR_NAME;
 pub const SQL_SERVER_CDC_CONNECTOR: &str = SqlServer::CDC_CONNECTOR_NAME;
+pub const ORACLE_CDC_CONNECTOR: &str = Oracle::CDC_CONNECTOR_NAME;
 
 /// Build a unique CDC table identifier from a source ID and external table name
 pub fn build_cdc_table_id(source_id: SourceId, external_table_name: &str) -> String {
@@ -100,6 +101,7 @@ impl<'a> From<&'a str> for CdcSourceType {
             CITUS_CDC_CONNECTOR => CdcSourceType::Citus,
             MONGODB_CDC_CONNECTOR => CdcSourceType::Mongodb,
             SQL_SERVER_CDC_CONNECTOR => CdcSourceType::SqlServer,
+            ORACLE_CDC_CONNECTOR => CdcSourceType::Oracle,
             _ => CdcSourceType::Unspecified,
         }
     }
@@ -113,6 +115,7 @@ impl CdcSourceType {
             CdcSourceType::Citus => "Citus",
             CdcSourceType::Mongodb => "MongoDB",
             CdcSourceType::SqlServer => "SQL Server",
+            CdcSourceType::Oracle => "Oracle",
             CdcSourceType::Unspecified => "Unspecified",
         }
     }
@@ -371,6 +374,23 @@ impl CdcScanOptions {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_oracle_source_type_identity() {
+        assert!(matches!(
+            CdcSourceType::from(ORACLE_CDC_CONNECTOR),
+            CdcSourceType::Oracle
+        ));
+        assert_eq!(ORACLE_CDC_CONNECTOR, "oracle-cdc");
+        assert!(matches!(
+            CdcSourceType::from(PbSourceType::Oracle),
+            CdcSourceType::Oracle
+        ));
+        assert_eq!(
+            PbSourceType::from(CdcSourceType::Oracle),
+            PbSourceType::Oracle
+        );
+    }
 
     #[test]
     fn test_normalize_simple_postgres_quoted_table_name() {

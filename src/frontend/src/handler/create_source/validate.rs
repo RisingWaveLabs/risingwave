@@ -90,6 +90,11 @@ static CONNECTORS_COMPATIBLE_FORMATS: LazyLock<HashMap<String, HashMap<Format, V
                     // support source stream job
                     Format::Plain => vec![Encode::Json],
                 ),
+                ORACLE_CDC_CONNECTOR => hashmap!(
+                    Format::Debezium => vec![Encode::Json],
+                    // support source stream job
+                    Format::Plain => vec![Encode::Json],
+                ),
                 MONGODB_CDC_CONNECTOR => hashmap!(
                     Format::DebeziumMongo => vec![Encode::Json],
                 ),
@@ -244,7 +249,8 @@ pub fn validate_compatibility(
         || connector == POSTGRES_CDC_CONNECTOR
         || connector == CITUS_CDC_CONNECTOR
         || connector == MONGODB_CDC_CONNECTOR
-        || connector == SQL_SERVER_CDC_CONNECTOR)
+        || connector == SQL_SERVER_CDC_CONNECTOR
+        || connector == ORACLE_CDC_CONNECTOR)
         && let Some(timeout_value) = props.get("cdc.source.wait.streaming.start.timeout")
         && timeout_value.parse::<u32>().is_err()
     {
@@ -260,7 +266,8 @@ pub fn validate_compatibility(
         || connector == POSTGRES_CDC_CONNECTOR
         || connector == CITUS_CDC_CONNECTOR
         || connector == MONGODB_CDC_CONNECTOR
-        || connector == SQL_SERVER_CDC_CONNECTOR)
+        || connector == SQL_SERVER_CDC_CONNECTOR
+        || connector == ORACLE_CDC_CONNECTOR)
         && let Some(queue_size_value) = props.get("debezium.max.queue.size")
         && queue_size_value.parse::<u32>().is_err()
     {
@@ -271,10 +278,11 @@ pub fn validate_compatibility(
         .into());
     }
 
-    // Validate debezium.heartbeat.interval.ms for Postgres CDC: must be a valid integer and not 0
-    if connector == POSTGRES_CDC_CONNECTOR
+    // Validate debezium.heartbeat.interval.ms for Postgres and Oracle CDC: if configured, it must
+    // be a positive integer.
+    if (connector == POSTGRES_CDC_CONNECTOR || connector == ORACLE_CDC_CONNECTOR)
         && let Some(interval_value) = props.get("debezium.heartbeat.interval.ms")
-        && !interval_value.parse::<i64>().is_ok_and(|v| v != 0)
+        && !is_valid_heartbeat_interval(interval_value)
     {
         return Err(ErrorCode::InvalidConfigValue {
             config_entry: "debezium.heartbeat.interval.ms".to_owned(),

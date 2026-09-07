@@ -71,6 +71,8 @@ public final class ValidatorUtils {
             case SQL_SERVER:
                 return String.format(
                         "jdbc:sqlserver://%s:%s;databaseName=%s", host, port, database);
+            case ORACLE:
+                return String.format("jdbc:oracle:thin:@//%s:%s/%s", host, port, database);
             default:
                 throw ValidatorUtils.invalidArgument("Unknown source type: " + sourceType);
         }

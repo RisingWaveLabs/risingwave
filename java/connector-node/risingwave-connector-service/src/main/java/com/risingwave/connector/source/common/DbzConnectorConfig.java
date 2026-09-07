@@ -21,6 +21,8 @@ import com.risingwave.connector.api.source.SourceTypeE;
 import com.risingwave.connector.cdc.debezium.internal.ConfigurableOffsetBackingStore;
 import com.risingwave.connector.cdc.debezium.internal.OpendalSchemaHistory;
 import io.debezium.connector.mongodb.MongoDbConnectorConfig;
+import io.debezium.heartbeat.DatabaseHeartbeatImpl;
+import io.debezium.heartbeat.Heartbeat;
 import java.io.IOException;
 import java.io.StringReader;
 import java.nio.charset.StandardCharsets;
@@ -74,14 +76,25 @@ public class DbzConnectorConfig {
     public static final String SQL_SERVER_SCHEMA_NAME = "schema.name";
     public static final String SQL_SERVER_ENCRYPT = "database.encrypt";
 
+    /* Oracle configs */
+    public static final String ORACLE_PDB_NAME = "database.pdb.name";
+    public static final String ORACLE_SCHEMA_NAME = "schema.name";
+    public static final String ORACLE_HEARTBEAT_TABLE_NAME = "heartbeat.table.name";
+
     /* RisingWave configs */
     private static final String DBZ_CONFIG_FILE = "debezium.properties";
     private static final String MYSQL_CONFIG_FILE = "mysql.properties";
     private static final String POSTGRES_CONFIG_FILE = "postgres.properties";
     private static final String MONGODB_CONFIG_FILE = "mongodb.properties";
     private static final String SQL_SERVER_CONFIG_FILE = "sql_server.properties";
+    private static final String ORACLE_CONFIG_FILE = "oracle.properties";
 
     private static final String DBZ_PROPERTY_PREFIX = "debezium.";
+
+    public static final String HEARTBEAT_INTERVAL_KEY =
+            DBZ_PROPERTY_PREFIX + Heartbeat.HEARTBEAT_INTERVAL_PROPERTY_NAME;
+    public static final String HEARTBEAT_ACTION_QUERY_KEY =
+            DBZ_PROPERTY_PREFIX + DatabaseHeartbeatImpl.HEARTBEAT_ACTION_QUERY_PROPERTY_NAME;
 
     private static final String SNAPSHOT_MODE_KEY = "debezium.snapshot.mode";
     private static final String SNAPSHOT_MODE_BACKFILL = "rw_cdc_backfill";
@@ -163,7 +176,8 @@ public class DbzConnectorConfig {
                         userProps.getOrDefault(WAIT_FOR_STREAMING_START_TIMEOUT_SECS, "60"));
 
         LOG.info(
-                "DbzConnectorConfig: source={}, sourceId={}, startOffset={}, snapshotDone={}, isCdcBackfill={}, isCdcSourceJob={}, waitStreamingStartTimeout={}",
+                "DbzConnectorConfig: source={}, sourceId={}, startOffset={}, snapshotDone={},"
+                        + " isCdcBackfill={}, isCdcSourceJob={}, waitStreamingStartTimeout={}",
                 source,
                 sourceId,
                 startOffset,
@@ -325,7 +339,9 @@ public class DbzConnectorConfig {
                                             MongoDbConnectorConfig.FiltersMatchMode.LITERAL
                                                     .getValue());
                                     LOG.info(
-                                            "Inferred MongoDB database include list '{}' and literal filter match mode from collection list '{}'",
+                                            "Inferred MongoDB database include list '{}' and"
+                                                    + " literal filter match mode from collection list"
+                                                    + " '{}'",
                                             databaseList,
                                             collection);
                                 });
@@ -370,6 +386,21 @@ public class DbzConnectorConfig {
                 LOG.info("Disable table filtering for the shared Sql Server source");
                 dbzProps.remove("table.include.list");
             }
+        } else if (source == SourceTypeE.ORACLE) {
+            var oracleProps = initiateDbConfig(ORACLE_CONFIG_FILE, substitutor);
+            if (isHeartbeatEnabled(userProps)) {
+                var heartbeatTable =
+                        OracleHeartbeatTable.parse(userProps.get(ORACLE_HEARTBEAT_TABLE_NAME));
+                oracleProps.setProperty(
+                        DatabaseHeartbeatImpl.HEARTBEAT_ACTION_QUERY_PROPERTY_NAME,
+                        heartbeatTable.actionQuery());
+            }
+            dbzProps.putAll(oracleProps);
+            if (isCdcSourceJob) {
+                // A shared Oracle source captures tables from multiple schemas in one PDB.
+                LOG.info("Disable table filtering for the shared Oracle source");
+                dbzProps.remove("table.include.list");
+            }
         } else {
             throw new RuntimeException("unsupported source type: " + source);
         }
@@ -396,6 +427,10 @@ public class DbzConnectorConfig {
         this.resolvedDbzProps = dbzProps;
         this.isBackfillSource = isCdcBackfill;
         this.waitStreamingStartTimeout = waitStreamingStartTimeout;
+    }
+
+    public static boolean isHeartbeatEnabled(Map<String, String> userProps) {
+        return userProps.containsKey(HEARTBEAT_INTERVAL_KEY);
     }
 
     private static Optional<String> inferMongoDatabaseList(String collectionList) {
@@ -458,7 +493,8 @@ public class DbzConnectorConfig {
             // User did not specify ratio, do nothing
             // Debezium will use its default max.queue.size from debezium.properties
             LOG.info(
-                    "Debezium {} not specified, skipping calculating and setting max.queue.size.in.bytes calculation",
+                    "Debezium {} not specified, skipping calculating and setting"
+                            + " max.queue.size.in.bytes calculation",
                     QUEUE_MAX_MEMORY_RATIO);
             return;
         }

@@ -24,6 +24,7 @@ public enum SourceTypeE {
     CITUS,
     MONGODB,
     SQL_SERVER,
+    ORACLE,
     INVALID;
 
     public static SourceTypeE valueOf(ConnectorServiceProto.SourceType type) {
@@ -38,6 +39,8 @@ public enum SourceTypeE {
                 return SourceTypeE.MONGODB;
             case SQL_SERVER:
                 return SourceTypeE.SQL_SERVER;
+            case ORACLE:
+                return SourceTypeE.ORACLE;
             default:
                 return SourceTypeE.INVALID;
         }

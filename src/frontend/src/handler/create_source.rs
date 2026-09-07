@@ -54,8 +54,8 @@ use risingwave_connector::schema::schema_registry::{
 use risingwave_connector::source::cdc::{
     CDC_MONGODB_STRONG_SCHEMA_KEY, CDC_SHARING_MODE_KEY, CDC_SNAPSHOT_BACKFILL,
     CDC_SNAPSHOT_MODE_KEY, CDC_TRANSACTIONAL_KEY, CDC_WAIT_FOR_STREAMING_START_TIMEOUT,
-    CITUS_CDC_CONNECTOR, MONGODB_CDC_CONNECTOR, MYSQL_CDC_CONNECTOR, POSTGRES_CDC_CONNECTOR,
-    SQL_SERVER_CDC_CONNECTOR,
+    CITUS_CDC_CONNECTOR, MONGODB_CDC_CONNECTOR, MYSQL_CDC_CONNECTOR, ORACLE_CDC_CONNECTOR,
+    POSTGRES_CDC_CONNECTOR, SQL_SERVER_CDC_CONNECTOR,
 };
 use risingwave_connector::source::datagen::DATAGEN_CONNECTOR;
 use risingwave_connector::source::iceberg::ICEBERG_CONNECTOR;
@@ -98,7 +98,7 @@ use crate::handler::create_table::{
 };
 use crate::handler::util::{
     SourceSchemaCompatExt, check_connector_match_connection_type, ensure_connection_type_allowed,
-    ensure_local_fs_connector_allowed,
+    ensure_local_fs_connector_allowed, ensure_oracle_cdc_connector_allowed,
 };
 use crate::optimizer::plan_node::generic::SourceNodeKind;
 use crate::optimizer::plan_node::{BackfillType, LogicalSource, ToStream, ToStreamContext};
@@ -124,6 +124,10 @@ use risingwave_common::catalog::ICEBERG_SOURCE_PREFIX;
 use risingwave_common::id::SourceId;
 
 use crate::stream_fragmenter::GraphJobType;
+
+pub(crate) fn is_valid_heartbeat_interval(interval: &str) -> bool {
+    interval.parse::<i64>().is_ok_and(|interval| interval > 0)
+}
 
 fn non_generated_sql_columns(columns: &[ColumnDef]) -> Vec<ColumnDef> {
     columns
@@ -742,6 +746,9 @@ pub fn bind_connector_props(
     is_create_source: bool,
 ) -> Result<(WithOptions, SourceRefreshMode)> {
     let mut with_properties = handler_args.with_options.clone().into_connector_props();
+    if let Some(connector) = with_properties.get_connector() {
+        ensure_oracle_cdc_connector_allowed(&handler_args.session, &connector)?;
+    }
     validate_compatibility(format_encode, &mut with_properties)?;
     let refresh_mode = {
         let refresh_mode = resolve_source_refresh_mode_in_with_option(&mut with_properties)?;
@@ -1320,6 +1327,15 @@ pub mod tests {
                 .collect::<HashMap<&str, DataType>>()
         };
 
+    #[test]
+    fn test_valid_heartbeat_interval() {
+        assert!(super::is_valid_heartbeat_interval("1"));
+        assert!(super::is_valid_heartbeat_interval("300000"));
+        assert!(!super::is_valid_heartbeat_interval("0"));
+        assert!(!super::is_valid_heartbeat_interval("-1"));
+        assert!(!super::is_valid_heartbeat_interval("invalid"));
+    }
+
     #[tokio::test]
     async fn test_create_source_handler() {
         let proto_file = create_proto_file(PROTO_FILE_DATA);
@@ -1422,6 +1438,26 @@ pub mod tests {
         assert!(
             err.to_string()
                 .contains("frontend.unsafe_enable_local_fs_connector = true"),
+            "{err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_oracle_cdc_source_requires_frontend_config() {
+        let frontend = LocalFrontend::new(Default::default()).await;
+        let err = frontend
+            .run_sql(
+                r#"CREATE SOURCE oracle_source
+                WITH (connector = 'oracle-cdc')
+                FORMAT PLAIN ENCODE JSON"#
+                    .to_owned(),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("frontend.unsafe_enable_oracle_cdc = true"),
             "{err:?}"
         );
     }

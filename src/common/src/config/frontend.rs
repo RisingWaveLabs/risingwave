@@ -50,6 +50,11 @@ pub struct FrontendConfig {
     /// frontend host. Enabled by default in debug builds for local development.
     #[serde(default = "default::frontend::unsafe_enable_local_fs_connector")]
     pub unsafe_enable_local_fs_connector: bool,
+
+    /// Whether to allow the experimental `oracle-cdc` connector.
+    /// Disabled by default while Oracle CDC support is incomplete and not yet public.
+    #[serde(default = "default::frontend::unsafe_enable_oracle_cdc")]
+    pub unsafe_enable_oracle_cdc: bool,
 }
 
 pub mod default {
@@ -77,6 +82,10 @@ pub mod default {
 
         pub fn unsafe_enable_local_fs_connector() -> bool {
             cfg!(debug_assertions)
+        }
+
+        pub fn unsafe_enable_oracle_cdc() -> bool {
+            false
         }
     }
 }

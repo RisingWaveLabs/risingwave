@@ -135,6 +135,8 @@ public class DbzChangeEventConsumer
                 return SourceType.MONGODB;
             case SQL_SERVER:
                 return SourceType.SQL_SERVER;
+            case ORACLE:
+                return SourceType.ORACLE;
             default:
                 return SourceType.UNSPECIFIED;
         }
@@ -259,6 +261,7 @@ public class DbzChangeEventConsumer
                         // - MySQL: topicPrefix.databaseName.tableName
                         // - Mongo: topicPrefix.databaseName.collectionName
                         // - SQL Server: topicPrefix.databaseName.schemaName.tableName
+                        // - Oracle: topicPrefix.schemaName.tableName
                         // We can extract the full table name from the topic
                         var fullTableName =
                                 record.topic().substring(record.topic().indexOf('.') + 1);

@@ -39,25 +39,35 @@ impl From<cdc_message::CdcMessageType> for CdcMessageType {
     }
 }
 
+/// Metadata derived from a Debezium CDC event.
+///
+/// For data events, RisingWave's Java `DbzChangeEventConsumer` extracts `full_table_name` from a
+/// Debezium change event's topic name by removing the generated `topic.prefix` and its following
+/// `.`. Despite its name, `full_table_name` is therefore a topic suffix and does not necessarily
+/// contain a database name.
 #[derive(Debug, Clone)]
 pub struct DebeziumCdcMeta {
     /// The CDC source type of this message.
     ///
-    /// This is required to disambiguate the parsing logic for `full_table_name` when it only
-    /// contains one dot (e.g. `db.table` in MySQL vs `schema.table` in Postgres/SQL Server).
+    /// This is required to disambiguate a two-part `full_table_name`: `database.table` or
+    /// `database.collection` for MySQL/MongoDB versus `schema.table` for Postgres/Citus/Oracle.
     pub source_type: SourceType,
 
     /// The end index (exclusive) of the database name in `full_table_name`.
     ///
-    /// For `db.schema.table` or `db.table`, this is the index of the first `.`.
+    /// For a suffix that starts with a database name (`db.schema.table`, `db.table`, or
+    /// `db.collection`), this is the index of the first `.`. It is `0` when the Debezium topic
+    /// omits the database name, as it does for Postgres/Citus and Oracle.
     db_name_end: usize,
 
     /// The start index of the routing table identifier in `full_table_name`.
     ///
-    /// - For Postgres/SQL Server Debezium topics: `db.schema.table` → points to `schema.table`
-    /// - For MySQL Debezium topics: `db.table` → `0` (keep `db.table` as the routing key)
+    /// - Postgres/Citus/Oracle: `schema.table` → `0` (keep the complete suffix)
+    /// - SQL Server: `db.schema.table` → points to `schema.table`
+    /// - MySQL/MongoDB: `db.table`/`db.collection` → `0` (keep the complete suffix)
     table_name_start: usize,
 
+    /// For data events, the Debezium change event topic name after removing `topic.prefix`.
     pub full_table_name: String,
     // extracted from `payload.source.ts_ms`, the time that the change event was made in the database
     pub source_ts_ms: i64,
@@ -97,28 +107,47 @@ impl DebeziumCdcMeta {
     ///
     /// # Background
     ///
-    /// Debezium sends `full_table_name` in different formats depending on the CDC source type:
+    /// RisingWave's Java `DbzChangeEventConsumer` extracts `full_table_name` from the Debezium
+    /// change event's topic name by removing everything through the first `.`. RisingWave
+    /// configures the removed first component as Debezium's `topic.prefix`. The remaining suffix
+    /// follows a connector-specific format:
     ///
-    /// - **MySQL**: `"database.table"` (1 dot, 2 parts)
+    /// - **MySQL** ([Debezium topic names](https://debezium.io/documentation/reference/3.2/connectors/mysql.html#mysql-topic-names)):
+    ///   `"database.table"` (1 dot, 2 parts)
     ///   - Example: `"risedev.orders"`
     ///   - User provides: `"risedev.orders"` (same format)
-    ///   - Result: Keep entire string → `prefix_len` = 0
+    ///   - Result: Keep entire string → `table_name_start` = 0
     ///
-    /// - **Postgres**: `"database.schema.table"` (2 dots, 3 parts)
-    ///   - Example: `"mydb.public.users"`
-    ///   - User provides: `"public.users"` (database already in source config)
-    ///   - Result: Skip "mydb." → `prefix_len` = 5
+    /// - **`MongoDB`** ([Debezium topic names](https://debezium.io/documentation/reference/3.2/connectors/mongodb.html#mongodb-topic-names)):
+    ///   `"database.collection"` (1 dot, 2 parts)
+    ///   - Example: `"inventory.customers"`
+    ///   - Result: Keep entire string → `table_name_start` = 0
     ///
-    /// - **SQL Server**: `"database.schema.table"` (2 dots, 3 parts)
+    /// - **Postgres/Citus** ([Debezium topic names](https://debezium.io/documentation/reference/3.2/connectors/postgresql.html#postgresql-topic-names)):
+    ///   `"schema.table"` (1 dot, 2 parts)
+    ///   - Example: `"public.users"`
+    ///   - User provides: `"public.users"` (same format)
+    ///   - Result: Keep entire string → `table_name_start` = 0
+    ///
+    /// - **Oracle** ([Debezium topic names](https://debezium.io/documentation/reference/3.2/connectors/oracle.html#oracle-topic-names)):
+    ///   `"schema.table"` (1 dot, 2 parts)
+    ///   - Example: `"INVENTORY.CUSTOMERS"`
+    ///   - User provides: `"INVENTORY.CUSTOMERS"` (same format)
+    ///   - Result: Keep entire string → `table_name_start` = 0
+    ///
+    /// - **SQL Server** ([Debezium topic names](https://debezium.io/documentation/reference/3.2/connectors/sqlserver.html#sqlserver-topic-names)):
+    ///   `"database.schema.table"` (2 dots, 3 parts)
     ///   - Example: `"mydb.dbo.orders"`
     ///   - User provides: `"dbo.orders"` (database already in source config)
-    ///   - Result: Skip "mydb." → `prefix_len` = 5
+    ///   - Result: Skip "mydb." → `table_name_start` = 5
     ///
     /// # Why the difference?
     ///
-    /// - **MySQL** has no schema concept, so the "table name" IS `database.table`
-    /// - **Postgres/SQL Server** have schemas, and the database is specified in the source,
-    ///   so the "table name" is just `schema.table`
+    /// - **MySQL/MongoDB** have no separate schema component, so routing keeps
+    ///   `database.table`/`database.collection`
+    /// - **Postgres/Oracle** topics omit the configured database, so the table identifier is
+    ///   already `schema.table`
+    /// - **SQL Server** topics include the database, which is stripped for `schema.table` routing
     fn derive_name_indices_from_full_table_name(
         full_table_name: &str,
         source_type: SourceType,
@@ -133,10 +162,13 @@ impl DebeziumCdcMeta {
             // MySQL/MongoDB routing key keeps the full identifier (`db.table` / `db.collection`).
             SourceType::Mysql | SourceType::Mongodb => (first_dot, 0),
 
-            // Postgres/Citus/SQL Server routing key is `schema.table` if database is present.
+            // Postgres/Citus/SQL Server/Oracle routing key is `schema.table` if database is present.
             // If `full_table_name` only contains one dot (e.g. `schema.table`), we can still route
             // correctly, but we can't derive the database name from it.
-            SourceType::Postgres | SourceType::Citus | SourceType::SqlServer => {
+            SourceType::Postgres
+            | SourceType::Citus
+            | SourceType::SqlServer
+            | SourceType::Oracle => {
                 if has_second_dot {
                     (first_dot, first_dot + 1)
                 } else {

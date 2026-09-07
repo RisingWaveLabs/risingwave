@@ -183,7 +183,8 @@ impl<T: CdcSourceTypeTrait> SplitReader for CdcSplitReader<T> {
             CdcSourceType::Mysql
             | CdcSourceType::Postgres
             | CdcSourceType::Mongodb
-            | CdcSourceType::SqlServer => Self {
+            | CdcSourceType::SqlServer
+            | CdcSourceType::Oracle => Self {
                 source_id: split.split_id() as u64,
                 start_offset: split.start_offset().clone(),
                 server_addr: None,

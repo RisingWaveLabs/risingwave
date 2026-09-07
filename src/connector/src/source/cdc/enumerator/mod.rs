@@ -40,7 +40,7 @@ use crate::sink::sqlserver::SqlServerClient;
 use crate::source::cdc::external::mysql::build_mysql_connection_pool;
 use crate::source::cdc::split::{extract_binlog_file_seq, parse_sql_server_lsn_str};
 use crate::source::cdc::{
-    CdcProperties, CdcSourceTypeTrait, Citus, DebeziumCdcSplit, Mongodb, Mysql, Postgres,
+    CdcProperties, CdcSourceTypeTrait, Citus, DebeziumCdcSplit, Mongodb, Mysql, Oracle, Postgres,
     SqlServer, table_schema_exclude_additional_columns,
 };
 use crate::source::monitor::metrics::EnumeratorMetrics;
@@ -637,6 +637,18 @@ impl ListCdcSplits for DebeziumSplitEnumerator<Mongodb> {
 
 impl ListCdcSplits for DebeziumSplitEnumerator<SqlServer> {
     type CdcSourceType = SqlServer;
+
+    fn list_cdc_splits(&mut self) -> Vec<DebeziumCdcSplit<Self::CdcSourceType>> {
+        vec![DebeziumCdcSplit::<Self::CdcSourceType>::new(
+            self.source_id.as_raw_id(),
+            None,
+            None,
+        )]
+    }
+}
+
+impl ListCdcSplits for DebeziumSplitEnumerator<Oracle> {
+    type CdcSourceType = Oracle;
 
     fn list_cdc_splits(&mut self) -> Vec<DebeziumCdcSplit<Self::CdcSourceType>> {
         vec![DebeziumCdcSplit::<Self::CdcSourceType>::new(

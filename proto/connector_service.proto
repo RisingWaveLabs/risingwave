@@ -172,7 +172,8 @@ message CdcMessage {
   string key = 7;
 
   // The CDC source type of this message. This is required to disambiguate the parsing logic for
-  // `full_table_name` (e.g. `db.table` in MySQL vs `schema.table` in Postgres/SQL Server).
+  // `full_table_name` (e.g. `db.table` in MySQL vs `schema.table` in
+  // Postgres/SQL Server/Oracle).
   SourceType source_type = 8;
 }
 
@@ -183,6 +184,7 @@ enum SourceType {
   CITUS = 3;
   MONGODB = 4;
   SQL_SERVER = 5;
+  ORACLE = 6;
 }
 
 message GetEventStreamRequest {

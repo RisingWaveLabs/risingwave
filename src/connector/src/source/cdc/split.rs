@@ -98,6 +98,11 @@ pub struct SqlServerCdcSplit {
     pub inner: CdcSplitBase,
 }
 
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Hash)]
+pub struct OracleCdcSplit {
+    pub inner: CdcSplitBase,
+}
+
 impl MySqlCdcSplit {
     pub fn new(split_id: u32, start_offset: Option<String>) -> Self {
         let split = CdcSplitBase {
@@ -372,6 +377,34 @@ impl CdcSplitTrait for SqlServerCdcSplit {
     }
 }
 
+impl OracleCdcSplit {
+    pub fn new(split_id: u32, start_offset: Option<String>) -> Self {
+        Self {
+            inner: CdcSplitBase::new(split_id, start_offset),
+        }
+    }
+}
+
+impl CdcSplitTrait for OracleCdcSplit {
+    fn split_id(&self) -> u32 {
+        self.inner.split_id
+    }
+
+    fn start_offset(&self) -> &Option<String> {
+        &self.inner.start_offset
+    }
+
+    fn is_snapshot_done(&self) -> bool {
+        self.inner.snapshot_done
+    }
+
+    fn update_offset(&mut self, last_seen_offset: String) -> ConnectorResult<()> {
+        self.inner.snapshot_done = self.extract_snapshot_flag(last_seen_offset.as_str())?;
+        self.inner.start_offset = Some(last_seen_offset);
+        Ok(())
+    }
+}
+
 /// We use this struct to wrap the specific split, which act as an interface to other modules
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Hash)]
 pub struct DebeziumCdcSplit<T: CdcSourceTypeTrait> {
@@ -382,6 +415,7 @@ pub struct DebeziumCdcSplit<T: CdcSourceTypeTrait> {
     pub citus_split: Option<PostgresCdcSplit>,
     pub mongodb_split: Option<MongoDbCdcSplit>,
     pub sql_server_split: Option<SqlServerCdcSplit>,
+    pub oracle_split: Option<OracleCdcSplit>,
 
     #[serde(skip)]
     pub _phantom: PhantomData<T>,
@@ -415,7 +449,8 @@ macro_rules! dispatch_cdc_split {
             {Postgres, postgres_split},
             {Citus, citus_split},
             {Mongodb, mongodb_split},
-            {SqlServer, sql_server_split}
+            {SqlServer, sql_server_split},
+            {Oracle, oracle_split}
         }, $body)
     }
 }
@@ -446,6 +481,7 @@ impl<T: CdcSourceTypeTrait> DebeziumCdcSplit<T> {
             citus_split: None,
             mongodb_split: None,
             sql_server_split: None,
+            oracle_split: None,
             _phantom: PhantomData,
         };
         match T::source_type() {
@@ -468,6 +504,10 @@ impl<T: CdcSourceTypeTrait> DebeziumCdcSplit<T> {
             CdcSourceType::SqlServer => {
                 let split = SqlServerCdcSplit::new(split_id, start_offset);
                 ret.sql_server_split = Some(split);
+            }
+            CdcSourceType::Oracle => {
+                let split = OracleCdcSplit::new(split_id, start_offset);
+                ret.oracle_split = Some(split);
             }
             CdcSourceType::Unspecified => {
                 unreachable!("invalid debezium split")
