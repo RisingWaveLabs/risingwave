@@ -56,7 +56,7 @@ aws-sdk-glue = { workspace = true }
 aws-sdk-kinesis = { workspace = true }
 aws-sdk-s3 = { workspace = true }
 aws-smithy-types = { workspace = true }
-aws-smithy-types-convert = { version = "0.60.1", features = ["convert-chrono"] }
+aws-smithy-types-convert = { version = "0.61.1", features = ["convert-chrono"] }
 aws-types = { workspace = true }
 base64 = "0.23"
 byteorder = "1"
