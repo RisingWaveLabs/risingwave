@@ -372,6 +372,28 @@ pub struct RedisConfig {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 #[serde(deny_unknown_fields)]
+pub struct DorisConfig {
+    #[serde(rename = "use")]
+    phantom_use: Option<String>,
+    pub id: String,
+
+    pub address: String,
+    pub http_port: u16,
+    pub query_port: u16,
+
+    pub user: String,
+    pub password: String,
+    pub database: String,
+    pub admin_user: String,
+    pub admin_password: String,
+
+    pub image: String,
+    pub user_managed: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+#[serde(deny_unknown_fields)]
 pub enum Application {
     Metastore,
     Connector,
@@ -583,6 +605,7 @@ pub enum ServiceConfig {
     Pubsub(PubsubConfig),
     Pulsar(PulsarConfig),
     Redis(RedisConfig),
+    Doris(DorisConfig),
     MySql(MySqlConfig),
     Postgres(PostgresConfig),
     SqlServer(SqlServerConfig),
@@ -611,6 +634,7 @@ pub enum TaskGroup {
     Nats,
     Mqtt,
     Redis,
+    Doris,
     Lakekeeper,
     Moat,
 }
@@ -633,6 +657,7 @@ impl ServiceConfig {
             Self::Pubsub(c) => &c.id,
             Self::Pulsar(c) => &c.id,
             Self::Redis(c) => &c.id,
+            Self::Doris(c) => &c.id,
             Self::Opendal(c) => &c.id,
             Self::MySql(c) => &c.id,
             Self::Postgres(c) => &c.id,
@@ -666,6 +691,7 @@ impl ServiceConfig {
             Self::Pubsub(c) => Some(c.port),
             Self::Pulsar(c) => Some(c.http_port),
             Self::Redis(c) => Some(c.port),
+            Self::Doris(c) => Some(c.query_port),
             Self::Opendal(_) => None,
             Self::MySql(c) => Some(c.port),
             Self::Postgres(c) => Some(c.port),
@@ -698,6 +724,7 @@ impl ServiceConfig {
             Self::Pubsub(c) => c.user_managed,
             Self::Pulsar(c) => c.user_managed,
             Self::Redis(c) => c.user_managed,
+            Self::Doris(c) => c.user_managed,
             Self::Opendal(_c) => false,
             Self::MySql(c) => c.user_managed,
             Self::Postgres(c) => c.user_managed,
@@ -731,6 +758,7 @@ impl ServiceConfig {
             ServiceConfig::Pubsub(_) => Pubsub,
             ServiceConfig::Pulsar(_) => Pulsar,
             ServiceConfig::Redis(_) => Redis,
+            ServiceConfig::Doris(_) => Doris,
             ServiceConfig::MySql(my_sql_config) => {
                 if matches!(my_sql_config.application, Application::Metastore) {
                     RisingWave

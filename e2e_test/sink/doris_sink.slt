@@ -1,3 +1,45 @@
+control substitution on
+
+statement ok
+DROP SINK IF EXISTS s6;
+
+statement ok
+DROP SINK IF EXISTS s6_variant;
+
+statement ok
+DROP MATERIALIZED VIEW IF EXISTS mv6;
+
+statement ok
+DROP MATERIALIZED VIEW IF EXISTS mv6_variant;
+
+statement ok
+DROP TABLE IF EXISTS t6;
+
+statement ok
+DROP TABLE IF EXISTS t6_variant;
+
+system ok retry 120 backoff 1s
+set -o pipefail
+doris -B --column-names -e 'SHOW BACKENDS' | awk -F '\t' '
+NR == 1 { for (i = 1; i <= NF; i++) if ($i == "Alive") alive_column = i; next }
+alive_column && (tolower($alive_column) == "true" || $alive_column == "1") { found = 1 }
+END { exit !found }'
+
+system ok
+doris -e "
+DROP DATABASE IF EXISTS ${DORIS_DATABASE};
+CREATE DATABASE ${DORIS_DATABASE};
+USE ${DORIS_DATABASE};
+CREATE TABLE demo_bhv_table(v1 int,v2 smallint,v3 bigint,v4 float,v5 double,v6 string,v7 datev2,v8 datetime,v9 boolean,v10 json) UNIQUE KEY(\`v1\`)
+DISTRIBUTED BY HASH(\`v1\`) BUCKETS 1
+PROPERTIES (\"replication_allocation\" = \"tag.location.default: 1\");
+CREATE TABLE demo_variant_table(id int, v variant) UNIQUE KEY(\`id\`)
+DISTRIBUTED BY HASH(\`id\`) BUCKETS 1
+PROPERTIES (\"replication_allocation\" = \"tag.location.default: 1\");
+CREATE USER IF NOT EXISTS '${DORIS_USER}'@'%' IDENTIFIED BY '${DORIS_PASSWORD}';
+GRANT ALL ON *.* TO '${DORIS_USER}'@'%';
+"
+
 statement ok
 set sink_decouple = false;
 
@@ -11,12 +53,8 @@ statement ok
 CREATE SINK s6
 FROM
     mv6 WITH (
-    connector = 'doris',
+    ${RISEDEV_DORIS_WITH_OPTIONS_COMMON},
     type = 'append-only',
-    doris.url = 'http://doris-server:8030',
-    doris.user = 'users',
-    doris.password = '123456',
-    doris.database = 'demo',
     doris.table='demo_bhv_table',
     force_append_only='true'
 );
@@ -26,6 +64,9 @@ INSERT INTO t6 VALUES (1, 1, 1, 1.1, 1.2, 'test', '2013-01-01', '2013-01-01 01:0
 
 statement ok
 FLUSH;
+
+system ok retry 30 backoff 1s
+doris -N -B -e "SELECT * FROM ${DORIS_DATABASE}.demo_bhv_table" | awk -F '\t' '$1 == 1 && $2 == 1 && $3 == 1 && $4 == 1.1 && $5 == 1.2 && $6 == "test" && $7 == "2013-01-01" && $8 == "2013-01-01 01:01:01" && $9 == 0 && $10 == "{\"a\":1}" { found=1 } END { exit !found }'
 
 statement ok
 CREATE TABLE t6_variant (id int primary key, v jsonb);
@@ -37,12 +78,8 @@ statement ok
 CREATE SINK s6_variant
 FROM
     mv6_variant WITH (
-    connector = 'doris',
+    ${RISEDEV_DORIS_WITH_OPTIONS_COMMON},
     type = 'append-only',
-    doris.url = 'http://doris-server:8030',
-    doris.user = 'users',
-    doris.password = '123456',
-    doris.database = 'demo',
     doris.table='demo_variant_table',
     force_append_only='true'
 );
@@ -52,6 +89,9 @@ INSERT INTO t6_variant VALUES (1, '{"nested":[1,2]}');
 
 statement ok
 FLUSH;
+
+system ok retry 30 backoff 1s
+doris -N -B -e "SELECT id, cast(v as string) FROM ${DORIS_DATABASE}.demo_variant_table" | awk -F '\t' '{ gsub(/[[:space:]]/, "", $2); if ($1 == 1 && $2 == "{\"nested\":[1,2]}") found=1 } END { exit !found }'
 
 statement ok
 DROP SINK s6;
@@ -70,3 +110,6 @@ DROP MATERIALIZED VIEW mv6_variant;
 
 statement ok
 DROP TABLE t6_variant;
+
+system ok
+doris -e "DROP DATABASE IF EXISTS ${DORIS_DATABASE};"

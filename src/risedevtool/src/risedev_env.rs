@@ -17,7 +17,10 @@
 use std::fmt::Write;
 use std::process::Command;
 
-use crate::{Application, HummockInMemoryStrategy, ServiceConfig, add_hummock_backend};
+use crate::{
+    Application, DORIS_CONTAINER_HOST, DORIS_CONTAINER_QUERY_PORT, HummockInMemoryStrategy,
+    ServiceConfig, add_hummock_backend,
+};
 
 /// Generate environment variables (put in file `.risingwave/config/risedev-env`)
 /// from the given service configurations to be used by future
@@ -113,6 +116,39 @@ pub fn generate_risedev_env(services: &Vec<ServiceConfig>) -> String {
                 writeln!(
                     env,
                     r#"RISEDEV_REDIS_WITH_OPTIONS_COMMON="connector='redis',redis.url='{url}'""#,
+                )
+                .unwrap();
+            }
+            ServiceConfig::Doris(c) => {
+                let host = &c.address;
+                let http_port = &c.http_port;
+                let query_port = &c.query_port;
+                let user = &c.user;
+                let password = &c.password;
+                let database = &c.database;
+                let admin_user = &c.admin_user;
+                let admin_password = &c.admin_password;
+                let url = format!("http://{host}:{http_port}");
+                writeln!(env, r#"DORIS_HOST="{host}""#).unwrap();
+                writeln!(env, r#"DORIS_HTTP_PORT="{http_port}""#).unwrap();
+                writeln!(env, r#"DORIS_QUERY_PORT="{query_port}""#).unwrap();
+                writeln!(env, r#"DORIS_USER="{user}""#).unwrap();
+                writeln!(env, r#"DORIS_PASSWORD="{password}""#).unwrap();
+                writeln!(env, r#"DORIS_DATABASE="{database}""#).unwrap();
+                writeln!(env, r#"DORIS_ADMIN_USER="{admin_user}""#).unwrap();
+                writeln!(env, r#"DORIS_ADMIN_PASSWORD="{admin_password}""#).unwrap();
+                if !c.user_managed {
+                    writeln!(env, r#"DORIS_CONTAINER="risedev-{}""#, c.id).unwrap();
+                    writeln!(env, r#"DORIS_CONTAINER_HOST="{DORIS_CONTAINER_HOST}""#).unwrap();
+                    writeln!(
+                        env,
+                        r#"DORIS_CONTAINER_QUERY_PORT="{DORIS_CONTAINER_QUERY_PORT}""#
+                    )
+                    .unwrap();
+                }
+                writeln!(
+                    env,
+                    r#"RISEDEV_DORIS_WITH_OPTIONS_COMMON="connector='doris',doris.url='{url}',doris.user='{user}',doris.password='{password}',doris.database='{database}'""#,
                 )
                 .unwrap();
             }

@@ -211,6 +211,7 @@ impl ConfigExpander {
                     "pubsub" => ServiceConfig::Pubsub(serde_yaml::from_str(&out_str)?),
                     "pulsar" => ServiceConfig::Pulsar(serde_yaml::from_str(&out_str)?),
                     "redis" => ServiceConfig::Redis(serde_yaml::from_str(&out_str)?),
+                    "doris" => ServiceConfig::Doris(serde_yaml::from_str(&out_str)?),
                     "mysql" => ServiceConfig::MySql(serde_yaml::from_str(&out_str)?),
                     "postgres" => ServiceConfig::Postgres(serde_yaml::from_str(&out_str)?),
                     "sqlserver" => ServiceConfig::SqlServer(serde_yaml::from_str(&out_str)?),

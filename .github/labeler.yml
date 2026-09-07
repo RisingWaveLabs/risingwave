@@ -214,8 +214,13 @@ labels:
 
 - label: "ci/run-e2e-doris-sink-tests"
   files:
+  - "ci\\/scripts\\/e2e-doris-sink-test\\.sh"
+  - "e2e_test\\/commands\\/doris"
+  - "e2e_test\\/sink\\/doris_sink\\.slt"
   - "src\\/connector\\/src\\/sink\\/doris\\.rs"
   - "src\\/connector\\/src\\/sink\\/doris_starrocks_connector\\.rs"
+  - "src\\/risedevtool\\/src\\/task\\/doris_service\\.rs"
+  - "src\\/risedevtool\\/src\\/task\\/task_doris_ready_check\\.rs"
 
 - label: "ci/run-e2e-starrocks-sink-tests"
   files:

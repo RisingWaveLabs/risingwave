@@ -1314,6 +1314,21 @@ profile:
       - use: compactor
       - use: redis
 
+  local-doris-sink-test:
+    config-path: src/config/ci.toml
+    steps:
+      - use: minio
+        id: minio-local-doris-sink-test
+      - use: sqlite
+        id: sqlite-local-doris-sink-test
+      - use: meta-node
+        meta-backend: sqlite
+      - use: compute-node
+        enable-tiered-cache: true
+      - use: frontend
+      - use: compactor
+      - use: doris
+
   local-nats-test:
     config-path: src/config/ci-recovery.toml
     steps:
@@ -1842,6 +1857,24 @@ template:
     image: "redis:7.2.14"
 
     persist-data: false
+
+  # Doris service backed by Docker.
+  doris:
+    id: doris
+
+    address: "127.0.0.1"
+    http-port: 8030
+    query-port: 9030
+
+    user: users
+    password: "123456"
+    database: demo
+    admin-user: root
+    admin-password: ""
+
+    user-managed: false
+
+    image: "apache/doris:doris-all-in-one-2.1.0"
 
   # MySQL service backed by docker.
   mysql:

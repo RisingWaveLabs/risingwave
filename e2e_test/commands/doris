@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+script_dir=$(dirname "$0")
+real_path=${PATH//"$script_dir:"/}
+connection_args=(
+  -h "${DORIS_HOST}"
+  -P "${DORIS_QUERY_PORT}"
+  -u "${DORIS_ADMIN_USER}"
+)
+
+if [[ -n "${DORIS_CONTAINER:-}" ]]; then
+  connection_args=(
+    -h "${DORIS_CONTAINER_HOST}"
+    -P "${DORIS_CONTAINER_QUERY_PORT}"
+    -u "${DORIS_ADMIN_USER}"
+  )
+  exec docker exec -i -e MYSQL_PWD="${DORIS_ADMIN_PASSWORD}" \
+    "${DORIS_CONTAINER}" mysql "${connection_args[@]}" "$@"
+fi
+
+if PATH="$real_path" command -v mysql >/dev/null 2>&1; then
+  MYSQL_PWD="${DORIS_ADMIN_PASSWORD}" PATH="$real_path" \
+    exec mysql "${connection_args[@]}" "$@"
+fi
+
+echo "mysql client is unavailable and DORIS_CONTAINER is not set" >&2
+exit 1
