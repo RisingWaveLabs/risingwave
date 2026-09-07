@@ -1399,7 +1399,9 @@ impl SessionImpl {
             info!("Cancel query request sent.");
         }
         info!("Trying to cancel query in distributed mode.");
-        self.env.query_manager().cancel_queries_in_session(self.id)
+        self.env
+            .query_manager()
+            .cancel_non_cursor_queries_in_session(self.id)
     }
 
     pub fn cancel_current_creating_job(&self) {

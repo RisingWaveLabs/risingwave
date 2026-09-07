@@ -72,9 +72,12 @@ pub struct QueryExecution {
     shutdown_tx: Sender<QueryMessage>,
     /// Identified by `process_id`, `secret_key`. Query in the same session should have same key.
     pub session_id: SessionId,
+    /// Whether a PostgreSQL `CancelRequest` for the session should cancel this query. For example,
+    /// the query for a cursor should never be canceled by the `CancelRequest` for the session.
+    can_session_cancel: bool,
     /// Permit to execute the query. Once query finishes execution, this is dropped.
     #[expect(dead_code)]
-    pub permit: Option<tokio::sync::OwnedSemaphorePermit>,
+    permit: Option<tokio::sync::OwnedSemaphorePermit>,
 }
 
 struct QueryRunner {
@@ -100,6 +103,7 @@ impl QueryExecution {
         query: Query,
         session_id: SessionId,
         permit: Option<tokio::sync::OwnedSemaphorePermit>,
+        can_session_cancel: bool,
     ) -> Self {
         let query = Arc::new(query);
         let (sender, receiver) = channel(100);
@@ -112,8 +116,14 @@ impl QueryExecution {
             state: RwLock::new(state),
             shutdown_tx: sender,
             session_id,
+            can_session_cancel,
             permit,
         }
+    }
+
+    /// Returns whether PostgreSQL session cancellation should abort this query.
+    pub fn can_session_cancel(&self) -> bool {
+        self.can_session_cancel
     }
 
     /// Start execution of this query.
@@ -462,8 +472,10 @@ impl QueryRunner {
 pub(crate) mod tests {
     use std::collections::HashMap;
     use std::sync::{Arc, RwLock};
+    use std::time::Duration;
 
     use fixedbitset::FixedBitSet;
+    use pgwire::pg_server::SessionId;
     use risingwave_batch::worker_manager::worker_node_manager::{
         WorkerNodeManager, WorkerNodeSelector,
     };
@@ -478,7 +490,9 @@ pub(crate) mod tests {
     use risingwave_pb::common::{HostAddress, WorkerNode, WorkerType};
     use risingwave_pb::plan_common::JoinType;
     use risingwave_rpc_client::ComputeClientPool;
+    use tokio::sync::mpsc::{Receiver, channel};
 
+    use super::{QueryExecution, QueryMessage, QueryState};
     use crate::TableCatalog;
     use crate::catalog::catalog_service::CatalogReader;
     use crate::catalog::root_catalog::Catalog;
@@ -490,11 +504,78 @@ pub(crate) mod tests {
         LogicalScan, ToBatch, generic,
     };
     use crate::optimizer::property::{Cardinality, Distribution, Order};
-    use crate::scheduler::distributed::QueryExecution;
     use crate::scheduler::plan_fragmenter::{BatchPlanFragmenter, Query};
     use crate::scheduler::{DistributedQueryMetrics, ExecutionContext, QueryExecutionInfo};
     use crate::session::SessionImpl;
     use crate::utils::Condition;
+
+    fn running_query_execution_with_control_receiver(
+        query: Query,
+        session_id: SessionId,
+        can_session_cancel: bool,
+    ) -> (Arc<QueryExecution>, Receiver<QueryMessage>) {
+        let (shutdown_tx, shutdown_rx) = channel(100);
+        let query_execution = Arc::new(QueryExecution {
+            query: Arc::new(query),
+            state: tokio::sync::RwLock::new(QueryState::Running),
+            shutdown_tx,
+            session_id,
+            can_session_cancel,
+            permit: None,
+        });
+        (query_execution, shutdown_rx)
+    }
+
+    async fn assert_receive_query_cancellation_message(msg_receiver: &mut Receiver<QueryMessage>) {
+        let message = tokio::time::timeout(Duration::from_secs(1), msg_receiver.recv())
+            .await
+            .expect("query cancellation message must arrive")
+            .expect("query control channel must remain open");
+        assert!(matches!(
+            message,
+            QueryMessage::CancelQuery(reason) if reason == "cancelled by user"
+        ));
+    }
+
+    async fn assert_no_query_message(msg_receiver: &mut Receiver<QueryMessage>) {
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), msg_receiver.recv())
+                .await
+                .is_err(),
+            "excluded query unexpectedly received a cancellation message"
+        );
+    }
+
+    /// Verifies that session cancellation targets only ordinary queries in that session, while
+    /// cursor-owned queries and queries in other sessions remain untouched.
+    #[tokio::test]
+    async fn test_distributed_query_cancellation_filters_by_session_and_cursor_ownership() {
+        let query_manager = SessionImpl::mock().env().query_manager().clone();
+        let target_session = (1, 2);
+
+        let cancellable_query = create_query().await;
+        let cancellable_query_id = cancellable_query.query_id().clone();
+        let (cancellable_query, mut cancellable_query_rx) =
+            running_query_execution_with_control_receiver(cancellable_query, target_session, true);
+        query_manager.add_query(cancellable_query_id.clone(), cancellable_query.clone());
+
+        let cursor_query = create_query().await;
+        let cursor_query_id = cursor_query.query_id().clone();
+        let (cursor_query, mut cursor_query_rx) =
+            running_query_execution_with_control_receiver(cursor_query, target_session, false);
+        query_manager.add_query(cursor_query_id.clone(), cursor_query.clone());
+
+        let other_session_query = create_query().await;
+        let other_session_query_id = other_session_query.query_id().clone();
+        let (other_session_query, mut other_session_query_rx) =
+            running_query_execution_with_control_receiver(other_session_query, (3, 4), true);
+        query_manager.add_query(other_session_query_id.clone(), other_session_query.clone());
+
+        query_manager.cancel_non_cursor_queries_in_session(target_session);
+        assert_receive_query_cancellation_message(&mut cancellable_query_rx).await;
+        assert_no_query_message(&mut cursor_query_rx).await;
+        assert_no_query_message(&mut other_session_query_rx).await;
+    }
 
     #[tokio::test]
     async fn test_query_should_not_hang_with_empty_worker() {
@@ -505,7 +586,7 @@ pub(crate) mod tests {
             CatalogReader::new(Arc::new(parking_lot::RwLock::new(Catalog::default())));
         let query = create_query().await;
         let query_id = query.query_id().clone();
-        let query_execution = Arc::new(QueryExecution::new(query, (0, 0), None));
+        let query_execution = Arc::new(QueryExecution::new(query, (0, 0), None, true));
         let query_execution_info = Arc::new(RwLock::new(QueryExecutionInfo::new_from_map(
             HashMap::from([(query_id, query_execution.clone())]),
         )));

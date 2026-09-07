@@ -597,6 +597,7 @@ async fn execute_risingwave_plan(
         .into())
 }
 
+/// Schedules a distributed query using the session snapshot and normal statement cancellation.
 pub async fn distribute_execute(
     session: Arc<SessionImpl>,
     query: Query,
@@ -614,7 +615,7 @@ pub async fn distribute_execute(
     let query_manager = session.env().query_manager().clone();
 
     query_manager
-        .schedule(execution_context, query)
+        .schedule(execution_context, query, true)
         .await
         .map_err(|err| err.into())
 }

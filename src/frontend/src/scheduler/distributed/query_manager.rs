@@ -114,17 +114,6 @@ impl QueryExecutionInfo {
     pub fn delete_query(&mut self, query_id: &QueryId) {
         self.query_execution_map.remove(query_id);
     }
-
-    pub fn abort_queries(&self, session_id: SessionId) {
-        for query in self.query_execution_map.values() {
-            // `QueryExecutionInfo` might have queries from different sessions.
-            if query.session_id == session_id {
-                let query = query.clone();
-                // Spawn a task to abort. Avoid await point in this function.
-                tokio::spawn(async move { query.abort("cancelled by user".to_owned()).await });
-            }
-        }
-    }
 }
 
 /// Manages execution of distributed batch queries.
@@ -186,10 +175,12 @@ impl QueryManager {
         }
     }
 
+    /// Schedules a distributed query and transfers cleanup ownership to its returned stream.
     pub async fn schedule(
         &self,
         context: ExecutionContextRef,
         mut query: Query,
+        can_session_cancel: bool,
     ) -> SchedulerResult<DistributedQueryStream> {
         // TODO: if there's no table scan, we don't need to acquire snapshot.
         let pinned_snapshot = context.session().pinned_snapshot();
@@ -206,7 +197,12 @@ impl QueryManager {
         }
         let query_id = query.query_id.clone();
         let permit = self.get_permit().await?;
-        let query_execution = Arc::new(QueryExecution::new(query, context.session().id(), permit));
+        let query_execution = Arc::new(QueryExecution::new(
+            query,
+            context.session().id(),
+            permit,
+            can_session_cancel,
+        ));
 
         // Add queries status when begin.
         context
@@ -242,9 +238,20 @@ impl QueryManager {
         Ok(query_result_fetcher.stream_from_channel())
     }
 
-    pub fn cancel_queries_in_session(&self, session_id: SessionId) {
+    /// Cancels distributed non-cursor queries in `session_id`.
+    ///
+    /// A PostgreSQL `CancelRequest` targets the session's current statement, so cursor-owned
+    /// queries are excluded: one session can have multiple cursor queries running concurrently.
+    pub fn cancel_non_cursor_queries_in_session(&self, session_id: SessionId) {
         let query_execution_info = self.query_execution_info.read().unwrap();
-        query_execution_info.abort_queries(session_id);
+        for query in query_execution_info.query_execution_map.values() {
+            // `QueryExecutionInfo` might have queries from different sessions.
+            if query.session_id == session_id && query.can_session_cancel() {
+                let query = query.clone();
+                // Spawn a task to abort. Avoid await point in this function.
+                tokio::spawn(async move { query.abort("cancelled by user".to_owned()).await });
+            }
+        }
     }
 
     pub fn add_query(&self, query_id: QueryId, query_execution: Arc<QueryExecution>) {
