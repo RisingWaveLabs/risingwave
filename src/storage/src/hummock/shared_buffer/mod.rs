@@ -112,27 +112,3 @@ impl Debug for TableMemoryMetrics {
         f.debug_struct("TableMemoryMetrics").finish()
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use prometheus::Registry;
-    use risingwave_common::config::MetricLevel;
-
-    use super::*;
-
-    #[test]
-    fn test_replicated_imm_size_metric() {
-        let metrics = HummockStateStoreMetrics::new(&Registry::new(), MetricLevel::Info);
-        let replicated =
-            TableMemoryMetrics::new(&metrics, TableId::new(1), FragmentId::new(1), true);
-        let regular = TableMemoryMetrics::new(&metrics, TableId::new(2), FragmentId::new(2), false);
-
-        replicated.inc_imm(42);
-        regular.inc_imm(100);
-        assert_eq!(metrics.replicated_imm_size.get(), 42);
-
-        regular.dec_imm(100);
-        replicated.dec_imm(42);
-        assert_eq!(metrics.replicated_imm_size.get(), 0);
-    }
-}

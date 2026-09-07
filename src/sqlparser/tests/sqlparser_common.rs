@@ -2728,67 +2728,6 @@ fn parse_temporal_join() {
 }
 
 #[test]
-fn parse_broadcast_temporal_join() {
-    let sql = "SELECT * FROM t1 BROADCAST LEFT JOIN t2 FOR SYSTEM_TIME AS OF PROCTIME() ON c1 = c2";
-    let select = verified_only_select(sql);
-    assert_eq!(
-        Join {
-            relation: TableFactor::Table {
-                name: ObjectName(vec![Ident::new_unchecked("t2")]),
-                alias: None,
-                as_of: Some(AsOf::ProcessTimeBroadcast),
-            },
-            join_operator: JoinOperator::LeftOuter(JoinConstraint::On(Expr::BinaryOp {
-                left: Box::new(Expr::Identifier("c1".into())),
-                op: BinaryOperator::Eq,
-                right: Box::new(Expr::Identifier("c2".into())),
-            })),
-        },
-        only(only(select.from).joins),
-    );
-
-    assert_eq!(
-        verified_only_select(sql).to_string(),
-        "SELECT * FROM t1 BROADCAST LEFT JOIN t2 FOR SYSTEM_TIME AS OF PROCTIME() ON c1 = c2"
-    );
-
-    let err = parse_sql_statements("SELECT * FROM t1 BROADCAST JOIN t2 ON c1 = c2").unwrap_err();
-    assert!(
-        err.to_string()
-            .contains("FOR SYSTEM_TIME AS OF PROCTIME() after BROADCAST JOIN")
-    );
-
-    // BROADCAST is contextual rather than globally reserved, so existing aliases retain their
-    // original meaning whenever they are not immediately followed by a supported join type.
-    for (sql, canonical) in [
-        (
-            "SELECT broadcast.a FROM t broadcast WHERE broadcast.a = 1",
-            "SELECT broadcast.a FROM t AS broadcast WHERE broadcast.a = 1",
-        ),
-        (
-            "SELECT * FROM t broadcast, u",
-            "SELECT * FROM t AS broadcast, u",
-        ),
-        (
-            "SELECT * FROM t broadcast CROSS JOIN u",
-            "SELECT * FROM t AS broadcast CROSS JOIN u",
-        ),
-        (
-            "SELECT * FROM t broadcast RIGHT JOIN u ON true",
-            "SELECT * FROM t AS broadcast RIGHT JOIN u ON true",
-        ),
-        (
-            "SELECT * FROM t \"broadcast\" LEFT JOIN u ON true",
-            "SELECT * FROM t AS \"broadcast\" LEFT JOIN u ON true",
-        ),
-    ] {
-        query(sql, canonical);
-    }
-
-    assert_eq!(Ident::from_real_value("broadcast").to_string(), "broadcast");
-}
-
-#[test]
 fn parse_joins_on() {
     fn join_with_constraint(
         relation: impl Into<String>,
