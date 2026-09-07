@@ -103,6 +103,7 @@ async fn get_object_store() -> Arc<ObjectStoreImpl> {
                 Arc::new(GLOBAL_OBJECT_STORE_METRICS.clone()),
                 "rw-cdc-schema-history",
                 Arc::new(ObjectStoreConfig::default()),
+                "",
             )
             .await;
             Arc::new(object_store)

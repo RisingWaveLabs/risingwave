@@ -50,6 +50,7 @@ pub async fn migrate_legacy_object(
         ObjectStoreMetrics::unused().into(),
         "migrate_legacy_object",
         config.into(),
+        "",
     )
     .await;
     let ObjectStoreImpl::Opendal(opendal) = store else {

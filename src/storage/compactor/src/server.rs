@@ -132,6 +132,7 @@ pub async fn prepare_start_parameters(
         object_metrics,
         "Hummock",
         Arc::new(config.storage.object_store.clone()),
+        &storage_opts.data_directory,
     )
     .await;
 

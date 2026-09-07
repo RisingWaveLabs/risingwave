@@ -108,6 +108,7 @@ async fn restore_hummock_version(
             Arc::new(ObjectStoreMetrics::unused()),
             "Version Checkpoint",
             Arc::new(ObjectStoreConfig::default()),
+            "",
         )
         .await,
     );
@@ -290,6 +291,7 @@ async fn validate_integrity(
             Arc::new(ObjectStoreMetrics::unused()),
             "Version Checkpoint",
             Arc::new(ObjectStoreConfig::default()),
+            "",
         )
         .await,
     );

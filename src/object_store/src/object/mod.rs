@@ -881,12 +881,13 @@ pub async fn build_remote_object_store(
     metrics: Arc<ObjectStoreMetrics>,
     ident: &str,
     config: Arc<ObjectStoreConfig>,
+    probe_prefix: &str,
 ) -> ObjectStoreImpl {
     tracing::debug!(config=?config, "object store {ident}");
     match url {
         s3 if s3.starts_with("s3://") => {
-            if config.s3.developer.use_opendal {
-                let bucket = s3.strip_prefix("s3://").unwrap();
+            let bucket = s3.strip_prefix("s3://").unwrap();
+            let store = if config.s3.developer.use_opendal {
                 tracing::info!("Using OpenDAL to access s3, bucket is {}", bucket);
                 ObjectStoreImpl::Opendal(
                     OpendalObjectStore::new_s3_engine(
@@ -895,19 +896,42 @@ pub async fn build_remote_object_store(
                         metrics.clone(),
                     )
                     .unwrap()
-                    .monitored(metrics, config),
+                    .monitored(metrics.clone(), config.clone()),
                 )
             } else {
                 ObjectStoreImpl::S3(
-                    S3ObjectStore::new_with_config(
-                        s3.strip_prefix("s3://").unwrap().to_owned(),
-                        metrics.clone(),
-                        config.clone(),
-                    )
-                    .await
-                    .monitored(metrics, config),
+                    S3ObjectStore::new_with_config(bucket.to_owned(), metrics.clone(), config.clone())
+                        .await
+                        .monitored(metrics.clone(), config.clone()),
                 )
+            };
+            // Eagerly probe the bucket with a single, cheap `list` call so that a
+            // misconfigured bucket (wrong name, wrong region, missing permissions, ...)
+            // is reported clearly at startup instead of surfacing as an opaque error on
+            // first real access. Using `list` (rather than reimplementing bucket naming
+            // rules) also works for S3 Access Point aliases and S3-compatible services
+            // (e.g. Ceph) that don't follow AWS's own bucket naming rules.
+            // The probe is scoped to `probe_prefix` (typically the configured data
+            // directory) rather than the bucket root, since cloud deployments commonly
+            // grant `s3:prefix`-restricted permissions that don't allow listing the
+            // bucket root.
+            match store.list(probe_prefix, None, Some(1)).await {
+                Ok(mut stream) => {
+                    if let Some(Err(e)) = stream.next().await {
+                        panic!(
+                            "Invalid object store configuration for bucket {bucket:?}: {}",
+                            e.as_report()
+                        );
+                    }
+                }
+                Err(e) => {
+                    panic!(
+                        "Invalid object store configuration for bucket {bucket:?}: {}",
+                        e.as_report()
+                    );
+                }
             }
+            store
         }
         #[cfg(feature = "hdfs-backend")]
         hdfs if hdfs.starts_with("hdfs://") => {

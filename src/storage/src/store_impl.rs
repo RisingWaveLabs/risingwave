@@ -948,6 +948,7 @@ impl StateStoreImpl {
                     object_store_metrics.clone(),
                     "Hummock",
                     Arc::new(opts.object_store_config.clone()),
+                    &opts.data_directory,
                 )
                 .await;
 

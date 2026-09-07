@@ -173,6 +173,7 @@ impl HummockServiceOpts {
             Arc::new(ObjectStoreMetrics::unused()),
             "Hummock",
             Arc::new(ObjectStoreConfig::default()),
+            "",
         )
         .await;
 

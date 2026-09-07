@@ -77,6 +77,7 @@ pub(crate) async fn new_hummock_java_binding_iter(
                 Arc::new(ObjectStoreMetrics::unused()),
                 "Hummock",
                 Arc::new(ObjectStoreConfig::default()),
+                "",
             )
             .await,
         );
