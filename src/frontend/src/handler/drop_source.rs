@@ -81,7 +81,7 @@ pub async fn handle_drop_source(
 
     let catalog_writer = session.catalog_writer()?;
     execute_with_long_running_notification(
-        catalog_writer.drop_source(source.id, cascade),
+        catalog_writer.drop_source(source.id, cascade, if_exists),
         &session,
         "DROP SOURCE",
         LongRunningNotificationAction::SuggestRecover,

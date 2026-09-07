@@ -69,7 +69,7 @@ pub async fn handle_drop_sink(
 
     let catalog_writer = session.catalog_writer()?;
     execute_with_long_running_notification(
-        catalog_writer.drop_sink(sink_id, cascade),
+        catalog_writer.drop_sink(sink_id, cascade, if_exists),
         &session,
         "DROP SINK",
         LongRunningNotificationAction::SuggestRecover,

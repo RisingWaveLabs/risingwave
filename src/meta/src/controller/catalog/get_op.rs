@@ -339,7 +339,7 @@ impl CatalogController {
             .into_iter()
             .map(|(subscription, obj)| ObjectModel(subscription, obj.unwrap(), None).into())
             .find_or_first(|_| true)
-            .ok_or_else(|| anyhow!("cannot find subscription with id {}", subscription_id))?;
+            .ok_or_else(|| MetaError::catalog_id_not_found("subscription", subscription_id))?;
 
         Ok(subscription)
     }

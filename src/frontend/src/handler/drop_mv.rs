@@ -76,7 +76,7 @@ pub async fn handle_drop_mv(
     let catalog_writer = session.catalog_writer()?;
 
     execute_with_long_running_notification(
-        catalog_writer.drop_materialized_view(table_id, cascade),
+        catalog_writer.drop_materialized_view(table_id, cascade, if_exists),
         &session,
         "DROP MATERIALIZED VIEW",
         LongRunningNotificationAction::SuggestRecover,

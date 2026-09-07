@@ -189,26 +189,36 @@ pub trait CatalogWriter: Send + Sync {
         source_id: Option<SourceId>,
         table_id: TableId,
         cascade: bool,
+        if_exists: bool,
     ) -> Result<()>;
 
-    async fn drop_materialized_view(&self, table_id: TableId, cascade: bool) -> Result<()>;
+    async fn drop_materialized_view(
+        &self,
+        table_id: TableId,
+        cascade: bool,
+        if_exists: bool,
+    ) -> Result<()>;
 
     async fn drop_view(&self, view_id: ViewId, cascade: bool) -> Result<()>;
 
-    async fn drop_source(&self, source_id: SourceId, cascade: bool) -> Result<()>;
+    async fn drop_source(&self, source_id: SourceId, cascade: bool, if_exists: bool) -> Result<()>;
 
     async fn reset_source(&self, source_id: SourceId) -> Result<()>;
 
-    async fn drop_sink(&self, sink_id: SinkId, cascade: bool) -> Result<()>;
+    async fn drop_sink(&self, sink_id: SinkId, cascade: bool, if_exists: bool) -> Result<()>;
 
-    async fn drop_subscription(&self, subscription_id: SubscriptionId, cascade: bool)
-    -> Result<()>;
+    async fn drop_subscription(
+        &self,
+        subscription_id: SubscriptionId,
+        cascade: bool,
+        if_exists: bool,
+    ) -> Result<()>;
 
     async fn drop_database(&self, database_id: DatabaseId) -> Result<()>;
 
     async fn drop_schema(&self, schema_id: SchemaId, cascade: bool) -> Result<()>;
 
-    async fn drop_index(&self, index_id: IndexId, cascade: bool) -> Result<()>;
+    async fn drop_index(&self, index_id: IndexId, cascade: bool, if_exists: bool) -> Result<()>;
 
     async fn drop_function(&self, function_id: FunctionId, cascade: bool) -> Result<()>;
 
@@ -594,18 +604,24 @@ impl CatalogWriter for CatalogWriterImpl {
         source_id: Option<SourceId>,
         table_id: TableId,
         cascade: bool,
+        if_exists: bool,
     ) -> Result<()> {
         let version = self
             .meta_client
-            .drop_table(source_id, table_id, cascade)
+            .drop_table(source_id, table_id, cascade, if_exists)
             .await?;
         self.wait_version(version).await
     }
 
-    async fn drop_materialized_view(&self, table_id: TableId, cascade: bool) -> Result<()> {
+    async fn drop_materialized_view(
+        &self,
+        table_id: TableId,
+        cascade: bool,
+        if_exists: bool,
+    ) -> Result<()> {
         let version = self
             .meta_client
-            .drop_materialized_view(table_id, cascade)
+            .drop_materialized_view(table_id, cascade, if_exists)
             .await?;
         self.wait_version(version).await
     }
@@ -615,8 +631,11 @@ impl CatalogWriter for CatalogWriterImpl {
         self.wait_version(version).await
     }
 
-    async fn drop_source(&self, source_id: SourceId, cascade: bool) -> Result<()> {
-        let version = self.meta_client.drop_source(source_id, cascade).await?;
+    async fn drop_source(&self, source_id: SourceId, cascade: bool, if_exists: bool) -> Result<()> {
+        let version = self
+            .meta_client
+            .drop_source(source_id, cascade, if_exists)
+            .await?;
         self.wait_version(version).await
     }
 
@@ -625,8 +644,11 @@ impl CatalogWriter for CatalogWriterImpl {
         self.wait_version(version).await
     }
 
-    async fn drop_sink(&self, sink_id: SinkId, cascade: bool) -> Result<()> {
-        let version = self.meta_client.drop_sink(sink_id, cascade).await?;
+    async fn drop_sink(&self, sink_id: SinkId, cascade: bool, if_exists: bool) -> Result<()> {
+        let version = self
+            .meta_client
+            .drop_sink(sink_id, cascade, if_exists)
+            .await?;
         self.wait_version(version).await
     }
 
@@ -634,16 +656,20 @@ impl CatalogWriter for CatalogWriterImpl {
         &self,
         subscription_id: SubscriptionId,
         cascade: bool,
+        if_exists: bool,
     ) -> Result<()> {
         let version = self
             .meta_client
-            .drop_subscription(subscription_id, cascade)
+            .drop_subscription(subscription_id, cascade, if_exists)
             .await?;
         self.wait_version(version).await
     }
 
-    async fn drop_index(&self, index_id: IndexId, cascade: bool) -> Result<()> {
-        let version = self.meta_client.drop_index(index_id, cascade).await?;
+    async fn drop_index(&self, index_id: IndexId, cascade: bool, if_exists: bool) -> Result<()> {
+        let version = self
+            .meta_client
+            .drop_index(index_id, cascade, if_exists)
+            .await?;
         self.wait_version(version).await
     }
 

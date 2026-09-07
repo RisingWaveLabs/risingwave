@@ -404,7 +404,7 @@ where
 /// # Example
 /// ```ignore
 /// execute_with_long_running_notification(
-///     catalog_writer.drop_table(source_id, table_id, cascade),
+///     catalog_writer.drop_table(source_id, table_id, cascade, if_exists),
 ///     &session,
 ///     "DROP TABLE",
 /// ).await?;

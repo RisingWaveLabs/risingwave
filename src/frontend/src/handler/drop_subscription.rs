@@ -64,7 +64,7 @@ pub async fn handle_drop_subscription(
 
     let catalog_writer = session.catalog_writer()?;
     execute_with_long_running_notification(
-        catalog_writer.drop_subscription(subscription_id, cascade),
+        catalog_writer.drop_subscription(subscription_id, cascade, if_exists),
         &session,
         "DROP SUBSCRIPTION",
         LongRunningNotificationAction::SuggestRecover,

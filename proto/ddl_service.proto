@@ -67,6 +67,7 @@ message CreateSourceResponse {
 message DropSourceRequest {
   uint32 source_id = 1;
   bool cascade = 2;
+  bool if_exists = 3;
 }
 
 message DropSourceResponse {
@@ -117,6 +118,7 @@ message DropSinkRequest {
   bool cascade = 2;
   reserved 3;
   reserved "affected_table_change";
+  bool if_exists = 4;
 }
 
 message DropSinkResponse {
@@ -136,6 +138,7 @@ message CreateSubscriptionResponse {
 message DropSubscriptionRequest {
   uint32 subscription_id = 1;
   bool cascade = 2;
+  bool if_exists = 3;
 }
 
 message DropSubscriptionResponse {
@@ -176,6 +179,7 @@ message CreateMaterializedViewResponse {
 message DropMaterializedViewRequest {
   uint32 table_id = 1;
   bool cascade = 2;
+  bool if_exists = 3;
 }
 
 message DropMaterializedViewResponse {
@@ -436,6 +440,7 @@ message DropTableRequest {
   }
   uint32 table_id = 2;
   bool cascade = 3;
+  bool if_exists = 4;
 }
 
 message DropTableResponse {
@@ -478,6 +483,7 @@ message CreateIndexResponse {
 message DropIndexRequest {
   uint32 index_id = 1;
   bool cascade = 2;
+  bool if_exists = 3;
 }
 
 message DropIndexResponse {
