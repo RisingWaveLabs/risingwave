@@ -12,5 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub mod diff;
 pub mod external;
+pub mod resnapshot;
 pub mod snapshot;
