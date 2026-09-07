@@ -65,8 +65,10 @@ pub struct ClickHouseCommon {
     #[serde(rename = "clickhouse.url")]
     pub url: String,
     #[serde(rename = "clickhouse.user")]
+    #[with_option(allow_alter_on_fly)]
     pub user: String,
     #[serde(rename = "clickhouse.password")]
+    #[with_option(allow_alter_on_fly)]
     pub password: String,
     #[serde(rename = "clickhouse.database")]
     pub database: String,

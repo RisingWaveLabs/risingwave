@@ -27,6 +27,7 @@ use risingwave_common::types::{DataType, Datum};
 use risingwave_common::util::value_encoding::DatumToProtoExt;
 use risingwave_common::util::worker_util::DEFAULT_RESOURCE_GROUP;
 use risingwave_common::{bail, hash};
+use risingwave_connector::WithOptionsSecResolved;
 use risingwave_meta_model::fragment::DistributionType;
 use risingwave_meta_model::object::ObjectType;
 use risingwave_meta_model::prelude::*;
@@ -54,10 +55,14 @@ use risingwave_pb::meta::{
 };
 use risingwave_pb::plan_common::column_desc::GeneratedOrDefaultColumn;
 use risingwave_pb::plan_common::{ColumnCatalog, DefaultColumnDesc};
+use risingwave_pb::secret::PbSecretRef;
+use risingwave_pb::secret::secret_ref::PbRefAsType;
 use risingwave_pb::stream_plan::{PbDispatchOutputMapping, PbDispatcher, PbDispatcherType};
 use risingwave_pb::user::grant_privilege::{PbActionWithGrantOption, PbObject as PbGrantObject};
 use risingwave_pb::user::{PbAction, PbGrantPrivilege, PbUserInfo};
-use risingwave_sqlparser::ast::Statement as SqlStatement;
+use risingwave_sqlparser::ast::{
+    Ident, ObjectName, SecretRefAsType, SecretRefValue, SqlOption, Statement as SqlStatement,
+};
 use risingwave_sqlparser::parser::Parser;
 use sea_orm::sea_query::{
     Alias, CommonTableExpression, Expr, OnConflict, Query, QueryStatementBuilder, SelectStatement,
@@ -544,6 +549,78 @@ where
     let cnt: i64 = res.try_get_by(0)?;
 
     Ok(cnt != 0)
+}
+
+/// Formats SQL options with secret values properly resolved
+///
+/// This function processes configuration options that may contain sensitive data:
+/// - Plaintext options are directly converted to `SqlOption`
+/// - Secret options are retrieved from the database and formatted as "SECRET {name}"
+///   without exposing the actual secret value
+///
+/// # Arguments
+/// * `txn` - Database transaction for retrieving secrets
+/// * `options_with_secret` - Container of options with both plaintext and secret values
+///
+/// # Returns
+/// * `MetaResult<Vec<SqlOption>>` - List of formatted SQL options or error
+pub async fn format_with_option_secret_resolved(
+    txn: &DatabaseTransaction,
+    options_with_secret: &WithOptionsSecResolved,
+) -> MetaResult<Vec<SqlOption>> {
+    let mut options = Vec::new();
+    for (k, v) in options_with_secret.as_plaintext() {
+        let sql_option = SqlOption::try_from((k, &v.to_owned()))
+            .map_err(|e| MetaError::invalid_parameter(e.to_report_string()))?;
+        options.push(sql_option);
+    }
+    for (name, secret_ref) in options_with_secret.as_secret() {
+        let secret_ref_value = resolve_secret_ref_value(txn, secret_ref).await?;
+        options.push(SqlOption::from_secret_ref(name, secret_ref_value));
+    }
+    Ok(options)
+}
+
+async fn resolve_secret_ref_value(
+    txn: &DatabaseTransaction,
+    secret_ref: &PbSecretRef,
+) -> MetaResult<SecretRefValue> {
+    let (secret, object) = Secret::find_by_id(secret_ref.secret_id)
+        .find_also_related(Object)
+        .one(txn)
+        .await?
+        .ok_or_else(|| MetaError::catalog_id_not_found("secret", secret_ref.secret_id))?;
+    let object =
+        object.ok_or_else(|| MetaError::catalog_id_not_found("object", secret_ref.secret_id))?;
+    let schema_id = object.schema_id.ok_or_else(|| {
+        MetaError::invalid_parameter(format!(
+            "secret {} does not belong to a schema",
+            secret_ref.secret_id
+        ))
+    })?;
+    let schema = Schema::find_by_id(schema_id)
+        .one(txn)
+        .await?
+        .ok_or_else(|| MetaError::catalog_id_not_found("schema", schema_id))?;
+
+    let ref_as = match PbRefAsType::try_from(secret_ref.ref_as) {
+        Ok(PbRefAsType::File) => SecretRefAsType::File,
+        Ok(PbRefAsType::Text | PbRefAsType::Unspecified) => SecretRefAsType::Text,
+        Err(_) => {
+            return Err(MetaError::invalid_parameter(format!(
+                "invalid reference type {} for secret {}",
+                secret_ref.ref_as, secret_ref.secret_id
+            )));
+        }
+    };
+
+    Ok(SecretRefValue {
+        secret_name: ObjectName(vec![
+            Ident::from_real_value(&schema.name),
+            Ident::from_real_value(&secret.name),
+        ]),
+        ref_as,
+    })
 }
 
 /// `ensure_object_id` ensures the existence of target object in the cluster.

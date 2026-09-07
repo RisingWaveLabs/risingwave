@@ -93,8 +93,8 @@ pub async fn handle_alter_iceberg_table_props(
         None,
     )?;
     let (changed_props, changed_secret_refs) = resolved_with_options.into_parts();
-    if !changed_secret_refs.is_empty() || connector_conn_ref.is_some() {
-        bail!("ALTER ICEBERG TABLE does not support SECRET or CONNECTION now")
+    if connector_conn_ref.is_some() {
+        bail!("ALTER ICEBERG TABLE does not support CONNECTION")
     }
     meta_client
         .alter_iceberg_table_props(

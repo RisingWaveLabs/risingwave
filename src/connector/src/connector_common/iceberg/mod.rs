@@ -63,17 +63,23 @@ pub struct IcebergCommon {
     #[serde(rename = "s3.endpoint")]
     pub s3_endpoint: Option<String>,
     #[serde(rename = "s3.access.key")]
+    #[with_option(allow_alter_on_fly)]
     pub s3_access_key: Option<String>,
     #[serde(rename = "s3.secret.key")]
+    #[with_option(allow_alter_on_fly)]
     pub s3_secret_key: Option<String>,
     #[serde(rename = "s3.iam_role_arn")]
+    #[with_option(allow_alter_on_fly)]
     pub s3_iam_role_arn: Option<String>,
 
     #[serde(rename = "glue.access.key")]
+    #[with_option(allow_alter_on_fly)]
     pub glue_access_key: Option<String>,
     #[serde(rename = "glue.secret.key")]
+    #[with_option(allow_alter_on_fly)]
     pub glue_secret_key: Option<String>,
     #[serde(rename = "glue.iam_role_arn")]
+    #[with_option(allow_alter_on_fly)]
     pub glue_iam_role_arn: Option<String>,
     #[serde(rename = "glue.region")]
     pub glue_region: Option<String>,
@@ -85,6 +91,7 @@ pub struct IcebergCommon {
     pub glue_id: Option<String>,
 
     #[serde(rename = "gcs.credential")]
+    #[with_option(allow_alter_on_fly)]
     pub gcs_credential: Option<String>,
 
     #[serde(rename = "azblob.account_name")]
@@ -97,6 +104,7 @@ pub struct IcebergCommon {
     #[serde(rename = "adlsgen2.account_name")]
     pub adlsgen2_account_name: Option<String>,
     #[serde(rename = "adlsgen2.account_key")]
+    #[with_option(allow_alter_on_fly)]
     pub adlsgen2_account_key: Option<String>,
     #[serde(rename = "adlsgen2.endpoint")]
     pub adlsgen2_endpoint: Option<String>,
@@ -121,14 +129,17 @@ pub struct IcebergCommon {
     /// Credential for accessing iceberg catalog, only applicable in rest catalog.
     /// A credential to exchange for a token in the `OAuth2` client credentials flow.
     #[serde(rename = "catalog.credential")]
+    #[with_option(allow_alter_on_fly)]
     pub catalog_credential: Option<String>,
     /// token for accessing iceberg catalog, only applicable in rest catalog.
     /// A Bearer token which will be used for interaction with the server.
     #[serde(rename = "catalog.token")]
+    #[with_option(allow_alter_on_fly)]
     pub catalog_token: Option<String>,
     /// `oauth2_server_uri` for accessing iceberg catalog, only applicable in rest catalog.
     /// Token endpoint URI to fetch token from if the Rest Catalog is not the authorization server.
     #[serde(rename = "catalog.oauth2_server_uri")]
+    #[with_option(allow_alter_on_fly)]
     pub catalog_oauth2_server_uri: Option<String>,
     /// scope for accessing iceberg catalog, only applicable in rest catalog.
     /// Additional scope for `OAuth2`.

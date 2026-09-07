@@ -96,6 +96,7 @@ pub struct BigQueryCommon {
     #[serde_as(as = "DisplayFromStr")]
     pub auto_create: bool,
     #[serde(rename = "bigquery.credentials")]
+    #[with_option(allow_alter_on_fly)]
     pub credentials: Option<String>,
 }
 

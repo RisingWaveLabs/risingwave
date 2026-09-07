@@ -96,6 +96,7 @@ pub struct GooglePubSubConfig {
     /// The provided account credential must have the
     /// `pubsub.publisher` [role](https://cloud.google.com/pubsub/docs/access-control#roles)
     #[serde(rename = "pubsub.credentials")]
+    #[with_option(allow_alter_on_fly)]
     pub credentials: Option<String>,
 
     #[serde(flatten)]

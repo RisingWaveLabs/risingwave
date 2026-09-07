@@ -69,6 +69,7 @@ pub struct PostgresConfig {
     #[serde_as(as = "DisplayFromStr")]
     pub port: u16,
     pub user: String,
+    #[with_option(allow_alter_on_fly)]
     pub password: String,
     pub database: String,
     pub table: String,
@@ -77,6 +78,7 @@ pub struct PostgresConfig {
     #[serde(default = "Default::default")]
     pub ssl_mode: SslMode,
     #[serde(rename = "ssl.root.cert")]
+    #[with_option(allow_alter_on_fly)]
     pub ssl_root_cert: Option<String>,
     #[serde(default = "default_max_batch_rows")]
     #[serde_as(as = "DisplayFromStr")]

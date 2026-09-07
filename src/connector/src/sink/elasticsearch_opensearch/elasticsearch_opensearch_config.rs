@@ -64,9 +64,11 @@ pub struct ElasticSearchOpenSearchConfig {
     pub delimiter: Option<String>,
     /// The username of elasticsearch or openserach
     #[serde(rename = "username")]
+    #[with_option(allow_alter_on_fly)]
     pub username: Option<String>,
     /// The username of elasticsearch or openserach
     #[serde(rename = "password")]
+    #[with_option(allow_alter_on_fly)]
     pub password: Option<String>,
     /// It is used for dynamic index, if it is be set, the value of this column will be used as the index. It and `index` can only set one
     #[serde(rename = "index_column")]

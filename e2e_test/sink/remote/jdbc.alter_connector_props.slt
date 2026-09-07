@@ -1,23 +1,55 @@
 statement ok
-set sink_decouple = false;
-
-statement ok
 CREATE TABLE t_jdbc_alter_src (
     id INT PRIMARY KEY,
     v1 INT
 );
 
+statement ok
+create secret jdbc_password_1 with (backend = 'meta') as 'connector';
+
+statement ok
+create secret jdbc_password_2 with (backend = 'meta') as 'connector';
+
 # NOTE: JDBC sink currently uses `user` instead of `username`.
 statement ok
 CREATE SINK s_jdbc_alter_props FROM t_jdbc_alter_src WITH (
     connector = 'jdbc',
-    jdbc.url = 'jdbc:postgresql://db:5432/test?user=test&password=connector',
+    jdbc.url = 'jdbc:postgresql://db:5432/test',
     table.name = 't_jdbc_alter_props',
+    user = 'test',
+    password = secret jdbc_password_1,
     type = 'upsert',
     primary_key = 'id'
 );
 
+statement ok retry 5 backoff 3s
+ALTER SINK s_jdbc_alter_props CONNECTOR WITH (
+    jdbc.url = 'jdbc:postgresql://db:5432/test',
+    user = 'test',
+    password = secret jdbc_password_2
+);
+
+query I
+select count(*)
+from rw_sinks
+where name = 's_jdbc_alter_props'
+  and connector_props -> 'jdbc.url' ->> 'value' = 'jdbc:postgresql://db:5432/test'
+  and connector_props -> 'user' ->> 'value' = 'test'
+  and connector_props -> 'password' ->> 'type' = 'secret'
+  and connector_props -> 'password' -> 'value' ->> 'value' = 'jdbc_password_2';
+----
+1
+
+statement error Field 'table.name' is not allowed to be altered on the fly for sink: jdbc
+ALTER SINK s_jdbc_alter_props CONNECTOR WITH (table.name = 't_jdbc_alter_props_2');
+
 statement ok
+DROP SECRET jdbc_password_1;
+
+statement error
+DROP SECRET jdbc_password_2;
+
+statement ok retry 5 backoff 3s
 ALTER SINK s_jdbc_alter_props CONNECTOR WITH (
     jdbc.url = 'jdbc:postgresql://db:5432/test',
     user = 'test',
@@ -28,14 +60,15 @@ query I
 select count(*)
 from rw_sinks
 where name = 's_jdbc_alter_props'
-  and definition ILIKE '%jdbc.url = ''jdbc:postgresql://db:5432/test''%'
-  and definition ILIKE '%"user" = ''test''%'
-  and definition ILIKE '%password = ''connector''%';
+  and connector_props -> 'jdbc.url' ->> 'value' = 'jdbc:postgresql://db:5432/test'
+  and connector_props -> 'user' ->> 'value' = 'test'
+  and connector_props -> 'password' ->> 'type' = 'plaintext'
+  and connector_props -> 'password' ->> 'value' = 'connector';
 ----
 1
 
-statement error Field 'table.name' is not allowed to be altered on the fly for sink: jdbc
-ALTER SINK s_jdbc_alter_props CONNECTOR WITH (table.name = 't_jdbc_alter_props_2');
+statement ok
+DROP SECRET jdbc_password_2;
 
 statement ok
 DROP SINK s_jdbc_alter_props;

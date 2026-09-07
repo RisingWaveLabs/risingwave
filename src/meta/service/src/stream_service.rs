@@ -729,25 +729,46 @@ impl StreamManagerService for StreamServiceImpl {
         let (new_props_plaintext, object_id) = match AlterConnectorPropsObject::try_from(
             request.object_type,
         ) {
-            Ok(AlterConnectorPropsObject::Sink) => (
-                self.metadata_manager
+            Ok(AlterConnectorPropsObject::Sink) => {
+                let options_with_secret = self
+                    .metadata_manager
+                    .catalog_controller
                     .update_sink_props_by_sink_id(
                         request.object_id.into(),
                         request.changed_props.clone().into_iter().collect(),
+                        request.changed_secret_refs.clone().into_iter().collect(),
                     )
-                    .await?,
-                request.object_id.into(),
-            ),
+                    .await?;
+                let (options, secret_refs) = options_with_secret.into_parts();
+                (
+                    secret_manager
+                        .fill_secrets(options, secret_refs)
+                        .map_err(MetaError::from)?
+                        .into_iter()
+                        .collect(),
+                    request.object_id.into(),
+                )
+            }
             Ok(AlterConnectorPropsObject::IcebergTable) => {
-                let (prop, sink_id) = self
+                let (options_with_secret, sink_id) = self
                     .metadata_manager
+                    .catalog_controller
                     .update_iceberg_table_props_by_table_id(
                         request.object_id.into(),
                         request.changed_props.clone().into_iter().collect(),
+                        request.changed_secret_refs.clone().into_iter().collect(),
                         request.extra_options,
                     )
                     .await?;
-                (prop, sink_id.as_object_id())
+                let (options, secret_refs) = options_with_secret.into_parts();
+                (
+                    secret_manager
+                        .fill_secrets(options, secret_refs)
+                        .map_err(MetaError::from)?
+                        .into_iter()
+                        .collect(),
+                    sink_id.as_object_id(),
+                )
             }
 
             Ok(AlterConnectorPropsObject::Source) => {

@@ -16,7 +16,6 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::num::NonZeroUsize;
 
 use anyhow::anyhow;
-use indexmap::IndexMap;
 use itertools::Itertools;
 use risingwave_common::catalog::{
     ColumnCatalog, FragmentTypeFlag, FragmentTypeMask, ICEBERG_SINK_PREFIX, ICEBERG_SOURCE_PREFIX,
@@ -52,7 +51,7 @@ use risingwave_pb::catalog::table::PbEngine;
 use risingwave_pb::catalog::{PbConnection, PbCreateType, PbTable};
 use risingwave_pb::common::ThrottleType;
 use risingwave_pb::ddl_service::streaming_job_resource_type;
-use risingwave_pb::meta::alter_connector_props_request::AlterIcebergTableIds;
+use risingwave_pb::meta::alter_connector_props_request::{AlterIcebergTableIds, PbExtraOptions};
 use risingwave_pb::meta::list_rate_limits_response::RateLimitInfo;
 use risingwave_pb::meta::object::PbObjectInfo;
 use risingwave_pb::meta::subscribe_response::{
@@ -68,8 +67,8 @@ use risingwave_pb::stream_plan::stream_fragment_graph::Parallelism;
 use risingwave_pb::stream_plan::stream_node::PbNodeBody;
 use risingwave_pb::stream_plan::{PbSinkLogStoreType, PbStreamNode, StreamScanType};
 use risingwave_pb::user::PbUserInfo;
-use risingwave_sqlparser::ast::{Engine, SqlOption, Statement};
-use risingwave_sqlparser::parser::{Parser, ParserError};
+use risingwave_sqlparser::ast::{Engine, Statement};
+use risingwave_sqlparser::parser::Parser;
 use sea_orm::ActiveValue::Set;
 use sea_orm::sea_query::{Expr, Query, SimpleExpr};
 use sea_orm::{
@@ -88,8 +87,8 @@ use crate::controller::fragment::FragmentTypeMaskExt;
 use crate::controller::utils::{
     PartialObject, build_object_group_for_delete, check_if_belongs_to_iceberg_table,
     check_relation_name_duplicate, check_sink_into_table_cycle, ensure_job_not_canceled,
-    ensure_object_id, ensure_user_id, fetch_target_fragments, get_belong_objects,
-    get_belong_objects_by_ids, get_referring_objects, get_table_columns,
+    ensure_object_id, ensure_user_id, fetch_target_fragments, format_with_option_secret_resolved,
+    get_belong_objects, get_belong_objects_by_ids, get_referring_objects, get_table_columns,
     grant_default_privileges_automatically, insert_fragment_relations,
     list_object_dependencies_by_object_id, list_user_info_by_ids, upsert_user_privileges,
 };
@@ -169,6 +168,13 @@ struct DependentSourceFragmentUpdate {
     with_properties: BTreeMap<String, String>,
     secret_refs: BTreeMap<String, PbSecretRef>,
     is_shared_source: bool,
+}
+
+#[derive(Debug)]
+struct DependentSinkFragmentUpdate {
+    job_id: JobId,
+    with_properties: BTreeMap<String, String>,
+    secret_refs: BTreeMap<String, PbSecretRef>,
 }
 
 #[derive(Debug)]
@@ -940,7 +946,7 @@ impl CatalogController {
             StreamingJobModel::update(job).exec(&txn).await?;
         }
 
-        let state_table_ids = fragments
+        let state_table_ids: Vec<_> = fragments
             .iter()
             .flat_map(|fragment| fragment.state_table_ids.inner_ref().clone())
             .collect_vec();
@@ -2897,11 +2903,8 @@ impl CatalogController {
 
         // Only check alter-on-fly restrictions for SQL ALTER SOURCE, not for admin risectl operations
         if !skip_alter_on_fly_check {
-            let prop_keys: Vec<String> = alter_props
-                .keys()
-                .chain(alter_secret_refs.keys())
-                .cloned()
-                .collect();
+            let prop_keys: Vec<String> =
+                build_altered_field_names(&alter_props, &alter_secret_refs);
             risingwave_connector::allow_alter_on_fly_fields::check_source_allow_alter_on_fly_fields(
                 &connector, &prop_keys,
             )?;
@@ -2944,42 +2947,6 @@ impl CatalogController {
                 .try_into()
                 .unwrap();
 
-            /// Formats SQL options with secret values properly resolved
-            ///
-            /// This function processes configuration options that may contain sensitive data:
-            /// - Plaintext options are directly converted to `SqlOption`
-            /// - Secret options are retrieved from the database and formatted as "SECRET {name}"
-            ///   without exposing the actual secret value
-            ///
-            /// # Arguments
-            /// * `txn` - Database transaction for retrieving secrets
-            /// * `options_with_secret` - Container of options with both plaintext and secret values
-            ///
-            /// # Returns
-            /// * `MetaResult<Vec<SqlOption>>` - List of formatted SQL options or error
-            async fn format_with_option_secret_resolved(
-                txn: &DatabaseTransaction,
-                options_with_secret: &WithOptionsSecResolved,
-            ) -> MetaResult<Vec<SqlOption>> {
-                let mut options = Vec::new();
-                for (k, v) in options_with_secret.as_plaintext() {
-                    let sql_option = SqlOption::try_from((k, &format!("'{}'", v)))
-                        .map_err(|e| MetaError::invalid_parameter(e.to_report_string()))?;
-                    options.push(sql_option);
-                }
-                for (k, v) in options_with_secret.as_secret() {
-                    if let Some(secret_model) = Secret::find_by_id(v.secret_id).one(txn).await? {
-                        let sql_option =
-                            SqlOption::try_from((k, &format!("SECRET {}", secret_model.name)))
-                                .map_err(|e| MetaError::invalid_parameter(e.to_report_string()))?;
-                        options.push(sql_option);
-                    } else {
-                        return Err(MetaError::catalog_id_not_found("secret", v.secret_id));
-                    }
-                }
-                Ok(options)
-            }
-
             match &mut stmt {
                 Statement::CreateSource { stmt } => {
                     stmt.with_properties.0 =
@@ -2997,33 +2964,8 @@ impl CatalogController {
             stmt.to_string()
         };
 
-        {
-            // Update secret dependencies atomically within the transaction.
-            // Add new dependencies for secrets that are newly referenced.
-            if !to_add_secret_dep.is_empty() {
-                ObjectDependency::insert_many(to_add_secret_dep.into_iter().map(|secret_id| {
-                    object_dependency::ActiveModel {
-                        oid: Set(secret_id.into()),
-                        used_by: Set(preferred_id),
-                        ..Default::default()
-                    }
-                }))
-                .exec(&txn)
-                .await?;
-            }
-            // Remove dependencies for secrets that are no longer referenced.
-            // This allows the secrets to be deleted after this source no longer uses them.
-            if !to_remove_secret_dep.is_empty() {
-                let _ = ObjectDependency::delete_many()
-                    .filter(
-                        object_dependency::Column::Oid
-                            .is_in(to_remove_secret_dep)
-                            .and(object_dependency::Column::UsedBy.eq(preferred_id)),
-                    )
-                    .exec(&txn)
-                    .await?;
-            }
-        }
+        update_secret_dependencies(&txn, to_add_secret_dep, to_remove_secret_dep, preferred_id)
+            .await?;
 
         let active_source_model = source::ActiveModel {
             source_id: Set(source_id),
@@ -3120,8 +3062,9 @@ impl CatalogController {
     pub async fn update_sink_props_by_sink_id(
         &self,
         sink_id: SinkId,
-        props: BTreeMap<String, String>,
-    ) -> MetaResult<HashMap<String, String>> {
+        alter_props: BTreeMap<String, String>,
+        alter_secret_refs: BTreeMap<String, PbSecretRef>,
+    ) -> MetaResult<WithOptionsSecResolved> {
         let inner = self.inner.read().await;
         let txn = inner.db.begin().await?;
 
@@ -3130,30 +3073,87 @@ impl CatalogController {
             .one(&txn)
             .await?
             .ok_or_else(|| MetaError::catalog_id_not_found(ObjectType::Sink.as_str(), sink_id))?;
-        validate_sink_props(&sink, &props)?;
-        let definition = sink.definition.clone();
-        let [mut stmt]: [_; 1] = Parser::parse_sql(&definition)
-            .map_err(|e| SinkError::Config(anyhow!(e)))?
-            .try_into()
-            .unwrap();
-        if let Statement::CreateSink { stmt } = &mut stmt {
-            update_stmt_with_props(&mut stmt.with_properties.0, &props)?;
-        } else {
-            panic!("definition is not a create sink statement")
-        }
-        let mut new_config = sink.properties.clone().into_inner();
-        new_config.extend(props.clone());
 
-        let definition = stmt.to_string();
+        let connector_type = sink
+            .properties
+            .inner_ref()
+            .get(CONNECTOR_TYPE_KEY)
+            .ok_or_else(|| SinkError::Config(anyhow!("connector not specified when alter sink")))?
+            .to_lowercase();
+
+        let prop_keys = build_altered_field_names(&alter_props, &alter_secret_refs);
+
+        check_sink_allow_alter_on_fly_fields(&connector_type, &prop_keys)
+            .map_err(|e| SinkError::Config(anyhow!(e)))?;
+
+        let mut options_with_secret = WithOptionsSecResolved::new(
+            sink.properties.0.clone(),
+            sink.secret_ref
+                .map(|secret_ref| secret_ref.to_protobuf())
+                .unwrap_or_default(),
+        );
+
+        let (to_add_secret_dep, to_remove_secret_dep) =
+            options_with_secret.handle_update(alter_props.clone(), alter_secret_refs)?;
+
+        // check if the alter-ed props are valid for all connector
+        validate_sink_props(&connector_type, &options_with_secret, &prop_keys)?;
+
+        tracing::info!(
+            "applying new properties to sink: sink_id={}, options_with_secret={:?}",
+            sink_id,
+            options_with_secret
+        );
+
+        // rewrite the sql for definition field
+        let rewrite_sql = {
+            let definition = sink.definition.clone();
+            let [mut stmt]: [_; 1] = Parser::parse_sql(&definition)
+                .map_err(|e| {
+                    MetaError::from(MetaErrorInner::Connector(ConnectorError::from(
+                        anyhow!(e).context("Failed to parse sink definition SQL"),
+                    )))
+                })?
+                .try_into()
+                .unwrap();
+            match &mut stmt {
+                Statement::CreateSink { stmt } => {
+                    stmt.with_properties.0 =
+                        format_with_option_secret_resolved(&txn, &options_with_secret).await?;
+                }
+                _ => {
+                    return Err(MetaError::from(MetaErrorInner::Connector(
+                        ConnectorError::from(anyhow!(
+                            "Sink definition is not a CREATE SINK statement"
+                        )),
+                    )));
+                }
+            }
+
+            stmt.to_string()
+        };
+
+        update_secret_dependencies(
+            &txn,
+            to_add_secret_dep,
+            to_remove_secret_dep,
+            sink_id.as_object_id(),
+        )
+        .await?;
+
         let active_sink = sink::ActiveModel {
             sink_id: Set(sink_id),
-            properties: Set(risingwave_meta_model::Property(new_config.clone())),
-            definition: Set(definition),
+            properties: Set(risingwave_meta_model::Property(
+                options_with_secret.as_plaintext().clone(),
+            )),
+            secret_ref: Set((!options_with_secret.as_secret().is_empty())
+                .then(|| SecretRef::from(options_with_secret.as_secret().clone()))),
+            definition: Set(rewrite_sql),
             ..Default::default()
         };
         Sink::update(active_sink).exec(&txn).await?;
 
-        update_sink_fragment_props(&txn, sink_id, new_config).await?;
+        update_sink_fragment_props(&txn, sink_id, &options_with_secret).await?;
         let (sink, obj) = Sink::find_by_id(sink_id)
             .find_also_related(Object)
             .one(&txn)
@@ -3179,19 +3179,20 @@ impl CatalogController {
             )
             .await;
 
-        Ok(props.into_iter().collect())
+        Ok(options_with_secret)
     }
 
     pub async fn update_iceberg_table_props_by_table_id(
         &self,
         table_id: TableId,
-        props: BTreeMap<String, String>,
-        alter_iceberg_table_props: Option<
-            risingwave_pb::meta::alter_connector_props_request::PbExtraOptions,
-        >,
-    ) -> MetaResult<(HashMap<String, String>, SinkId)> {
-        let risingwave_pb::meta::alter_connector_props_request::PbExtraOptions::AlterIcebergTableIds(AlterIcebergTableIds { sink_id, source_id }) = alter_iceberg_table_props.
-            ok_or_else(|| MetaError::invalid_parameter("alter_iceberg_table_props is required"))?;
+        alter_props: BTreeMap<String, String>,
+        alter_secret_refs: BTreeMap<String, PbSecretRef>,
+        alter_iceberg_table_props: Option<PbExtraOptions>,
+    ) -> MetaResult<(WithOptionsSecResolved, SinkId)> {
+        let PbExtraOptions::AlterIcebergTableIds(AlterIcebergTableIds { sink_id, source_id }) =
+            alter_iceberg_table_props.ok_or_else(|| {
+                MetaError::invalid_parameter("alter_iceberg_table_props is required")
+            })?;
         let inner = self.inner.read().await;
         let txn = inner.db.begin().await?;
 
@@ -3200,54 +3201,117 @@ impl CatalogController {
             .one(&txn)
             .await?
             .ok_or_else(|| MetaError::catalog_id_not_found(ObjectType::Sink.as_str(), sink_id))?;
-        validate_sink_props(&sink, &props)?;
 
-        let definition = sink.definition.clone();
-        let [mut stmt]: [_; 1] = Parser::parse_sql(&definition)
-            .map_err(|e| SinkError::Config(anyhow!(e)))?
-            .try_into()
-            .unwrap();
-        if let Statement::CreateTable {
-            with_options,
-            engine,
-            ..
-        } = &mut stmt
-        {
-            if !matches!(engine, Engine::Iceberg) {
-                return Err(SinkError::Config(anyhow!(
-                    "only iceberg table can be altered as sink"
-                ))
-                .into());
+        let connector_type = sink
+            .properties
+            .inner_ref()
+            .get(CONNECTOR_TYPE_KEY)
+            .ok_or_else(|| SinkError::Config(anyhow!("connector not specified when alter sink")))?
+            .to_lowercase();
+
+        let prop_keys = build_altered_field_names(&alter_props, &alter_secret_refs);
+
+        check_sink_allow_alter_on_fly_fields(&connector_type, &prop_keys)
+            .map_err(|e| SinkError::Config(anyhow!(e)))?;
+
+        let mut options_with_secret = WithOptionsSecResolved::new(
+            sink.properties.0.clone(),
+            sink.secret_ref
+                .map(|secret_ref| secret_ref.to_protobuf())
+                .unwrap_or_default(),
+        );
+
+        let (to_add_secret_dep, to_remove_secret_dep) =
+            options_with_secret.handle_update(alter_props.clone(), alter_secret_refs)?;
+
+        // check if the alter-ed props are valid for all connector
+        validate_sink_props(&connector_type, &options_with_secret, &prop_keys)?;
+
+        // rewrite the sql for definition field
+        let rewrite_sql = {
+            let definition = sink.definition.clone();
+            let [mut stmt]: [_; 1] = Parser::parse_sql(&definition)
+                .map_err(|e| {
+                    MetaError::from(MetaErrorInner::Connector(ConnectorError::from(
+                        anyhow!(e).context("Failed to parse iceberg sink definition SQL"),
+                    )))
+                })?
+                .try_into()
+                .unwrap();
+
+            match &mut stmt {
+                Statement::CreateTable {
+                    with_options,
+                    engine,
+                    ..
+                } => {
+                    if !matches!(engine, Engine::Iceberg) {
+                        return Err(SinkError::Config(anyhow!(
+                            "only iceberg table can be altered as sink"
+                        ))
+                        .into());
+                    }
+                    *with_options =
+                        format_with_option_secret_resolved(&txn, &options_with_secret).await?;
+                }
+                _ => {
+                    return Err(MetaError::from(MetaErrorInner::Connector(
+                        ConnectorError::from(anyhow!(
+                            "definition is not a create iceberg table statement"
+                        )),
+                    )));
+                }
             }
-            update_stmt_with_props(with_options, &props)?;
-        } else {
-            panic!("definition is not a create iceberg table statement")
-        }
-        let mut new_config = sink.properties.clone().into_inner();
-        new_config.extend(props.clone());
 
-        let definition = stmt.to_string();
+            stmt.to_string()
+        };
+
+        update_secret_dependencies(
+            &txn,
+            to_add_secret_dep.clone(),
+            to_remove_secret_dep.clone(),
+            source_id.as_object_id(),
+        )
+        .await?;
+
+        update_secret_dependencies(
+            &txn,
+            to_add_secret_dep,
+            to_remove_secret_dep,
+            sink_id.as_object_id(),
+        )
+        .await?;
+
         let active_sink = sink::ActiveModel {
             sink_id: Set(sink_id),
-            properties: Set(risingwave_meta_model::Property(new_config.clone())),
-            definition: Set(definition.clone()),
+            properties: Set(risingwave_meta_model::Property(
+                options_with_secret.as_plaintext().clone(),
+            )),
+            secret_ref: Set((!options_with_secret.as_secret().is_empty())
+                .then(|| SecretRef::from(options_with_secret.as_secret().clone()))),
+            definition: Set(rewrite_sql.clone()),
             ..Default::default()
         };
         let active_source = source::ActiveModel {
             source_id: Set(source_id),
-            definition: Set(definition.clone()),
+            with_properties: Set(risingwave_meta_model::Property(
+                options_with_secret.as_plaintext().clone(),
+            )),
+            secret_ref: Set((!options_with_secret.as_secret().is_empty())
+                .then(|| SecretRef::from(options_with_secret.as_secret().clone()))),
+            definition: Set(rewrite_sql.clone()),
             ..Default::default()
         };
         let active_table = table::ActiveModel {
             table_id: Set(table_id),
-            definition: Set(definition),
+            definition: Set(rewrite_sql),
             ..Default::default()
         };
         Sink::update(active_sink).exec(&txn).await?;
         Source::update(active_source).exec(&txn).await?;
         Table::update(active_table).exec(&txn).await?;
 
-        update_sink_fragment_props(&txn, sink_id, new_config).await?;
+        update_sink_fragment_props(&txn, sink_id, &options_with_secret).await?;
 
         let (sink, sink_obj) = Sink::find_by_id(sink_id)
             .find_also_related(Object)
@@ -3272,6 +3336,10 @@ impl CatalogController {
         let table_streaming_job = streaming_job::Entity::find_by_id(table.job_id())
             .one(&txn)
             .await?;
+        let mut dependencies =
+            list_object_dependencies_by_object_id(&txn, source_id.as_object_id()).await?;
+        dependencies
+            .extend(list_object_dependencies_by_object_id(&txn, sink_id.as_object_id()).await?);
         txn.commit().await?;
         let relation_infos = vec![
             PbObject {
@@ -3295,12 +3363,12 @@ impl CatalogController {
                 NotificationOperation::Update,
                 NotificationInfo::ObjectGroup(PbObjectGroup {
                     objects: relation_infos,
-                    dependencies: vec![],
+                    dependencies,
                 }),
             )
             .await;
 
-        Ok((props.into_iter().collect(), sink_id))
+        Ok((options_with_secret, sink_id))
     }
 
     /// Update connection properties and all dependent sources/sinks in a single transaction
@@ -3401,27 +3469,13 @@ impl CatalogController {
         }
 
         // Update connection secret dependencies
-        if !to_add_secret_dep.is_empty() {
-            ObjectDependency::insert_many(to_add_secret_dep.into_iter().map(|secret_id| {
-                object_dependency::ActiveModel {
-                    oid: Set(secret_id.into()),
-                    used_by: Set(connection_id.as_object_id()),
-                    ..Default::default()
-                }
-            }))
-            .exec(&txn)
-            .await?;
-        }
-        if !to_remove_secret_dep.is_empty() {
-            let _ = ObjectDependency::delete_many()
-                .filter(
-                    object_dependency::Column::Oid
-                        .is_in(to_remove_secret_dep)
-                        .and(object_dependency::Column::UsedBy.eq(connection_id.as_object_id())),
-                )
-                .exec(&txn)
-                .await?;
-        }
+        update_secret_dependencies(
+            &txn,
+            to_add_secret_dep,
+            to_remove_secret_dep,
+            connection_id.as_object_id(),
+        )
+        .await?;
 
         // Update the connection with new properties
         let updated_connection_params = risingwave_pb::catalog::ConnectionParams {
@@ -3485,27 +3539,14 @@ impl CatalogController {
                     .optional_associated_table_id
                     .map(|table_id| table_id.as_object_id())
                     .unwrap_or_else(|| source_id.as_object_id());
-                if !source_to_add_secret_dep.is_empty() {
-                    ObjectDependency::insert_many(source_to_add_secret_dep.into_iter().map(
-                        |secret_id| object_dependency::ActiveModel {
-                            oid: Set(secret_id.into()),
-                            used_by: Set(source_used_by_id),
-                            ..Default::default()
-                        },
-                    ))
-                    .exec(&txn)
-                    .await?;
-                }
-                if !source_to_remove_secret_dep.is_empty() {
-                    let _ = ObjectDependency::delete_many()
-                        .filter(
-                            object_dependency::Column::Oid
-                                .is_in(source_to_remove_secret_dep)
-                                .and(object_dependency::Column::UsedBy.eq(source_used_by_id)),
-                        )
-                        .exec(&txn)
-                        .await?;
-                }
+
+                update_secret_dependencies(
+                    &txn,
+                    source_to_add_secret_dep,
+                    source_to_remove_secret_dep,
+                    source_used_by_id,
+                )
+                .await?;
 
                 // Prepare source update
                 let active_source = source::ActiveModel {
@@ -3619,55 +3660,66 @@ impl CatalogController {
             for (sink, _obj) in sinks_with_objs {
                 let sink_id = sink.sink_id;
 
-                // Validate that sink props can be altered
-                match sink.properties.inner_ref().get(CONNECTOR_TYPE_KEY) {
-                    Some(connector) => {
-                        let connector_type = connector.to_lowercase();
-                        check_sink_allow_alter_on_fly_fields(&connector_type, &prop_keys)
-                            .map_err(|e| SinkError::Config(anyhow!(e)))?;
+                let connector_type = sink
+                    .properties
+                    .inner_ref()
+                    .get(CONNECTOR_TYPE_KEY)
+                    .ok_or_else(|| {
+                        SinkError::Config(anyhow!("connector not specified when alter sink"))
+                    })?
+                    .to_lowercase();
 
-                        match_sink_name_str!(
-                            connector_type.as_str(),
-                            SinkType,
-                            {
-                                let mut new_sink_props = sink.properties.0.clone();
-                                new_sink_props.extend(alter_props.clone());
-                                SinkType::validate_alter_config_change(
-                                    &new_sink_props,
-                                    &alter_props,
-                                )
-                            },
-                            |sink: &str| Err(SinkError::Config(anyhow!(
-                                "unsupported sink type {}",
-                                sink
-                            )))
-                        )?
-                    }
-                    None => {
-                        return Err(SinkError::Config(anyhow!(
-                            "connector not specified when alter sink"
-                        ))
-                        .into());
-                    }
-                };
+                let mut sink_options_with_secret = WithOptionsSecResolved::new(
+                    sink.properties.0.clone(),
+                    sink.secret_ref
+                        .clone()
+                        .map(|secret_ref| secret_ref.to_protobuf())
+                        .unwrap_or_default(),
+                );
 
-                let mut new_sink_props = sink.properties.0.clone();
-                new_sink_props.extend(alter_props.clone());
+                let (sink_to_add_secret_dep, sink_to_remove_secret_dep) = sink_options_with_secret
+                    .handle_update(alter_props.clone(), alter_secret_refs.clone())?;
+
+                // check if the alter-ed props are valid for all connector
+                validate_sink_props(&connector_type, &sink_options_with_secret, &prop_keys)?;
+
+                update_secret_dependencies(
+                    &txn,
+                    sink_to_add_secret_dep,
+                    sink_to_remove_secret_dep,
+                    sink_id.as_object_id(),
+                )
+                .await?;
 
                 // Prepare sink update
                 let active_sink = sink::ActiveModel {
                     sink_id: Set(sink_id),
-                    properties: Set(risingwave_meta_model::Property(new_sink_props.clone())),
+                    properties: Set(risingwave_meta_model::Property(
+                        sink_options_with_secret.as_plaintext().clone(),
+                    )),
+                    secret_ref: Set((!sink_options_with_secret.as_secret().is_empty())
+                        .then(|| SecretRef::from(sink_options_with_secret.as_secret().clone()))),
                     ..Default::default()
                 };
                 sink_updates.push(active_sink);
 
                 // Prepare fragment updates for this sink
-                sink_fragment_updates.push((sink_id, new_sink_props.clone()));
+                sink_fragment_updates.push(DependentSinkFragmentUpdate {
+                    job_id: sink_id.as_job_id(),
+                    with_properties: sink_options_with_secret.as_plaintext().clone(),
+                    secret_refs: sink_options_with_secret.as_secret().clone(),
+                });
 
                 // Collect the complete properties for runtime broadcast
-                let complete_sink_props: HashMap<String, String> =
-                    new_sink_props.into_iter().collect();
+                let complete_sink_props = LocalSecretManager::global()
+                    .fill_secrets(
+                        sink_options_with_secret.as_plaintext().clone(),
+                        sink_options_with_secret.as_secret().clone(),
+                    )
+                    .map_err(MetaError::from)?
+                    .into_iter()
+                    .collect::<HashMap<String, String>>();
+
                 updated_sinks_with_props.push((sink_id, complete_sink_props));
             }
 
@@ -3677,17 +3729,23 @@ impl CatalogController {
             }
 
             // Batch execute sink fragment updates using the reusable function
-            for (sink_id, new_sink_props) in sink_fragment_updates {
+            for DependentSinkFragmentUpdate {
+                job_id,
+                with_properties,
+                secret_refs,
+            } in sink_fragment_updates
+            {
                 update_connector_props_fragments(
                     &txn,
-                    vec![sink_id.as_job_id()],
+                    vec![job_id],
                     FragmentTypeFlag::Sink,
                     |node, found| {
                         if let PbNodeBody::Sink(node) = node
                             && let Some(sink_desc) = &mut node.sink_desc
-                            && sink_desc.id == sink_id.as_raw_id()
+                            && sink_desc.id == job_id.as_raw_id()
                         {
-                            sink_desc.properties = new_sink_props.clone();
+                            sink_desc.properties = with_properties.clone();
+                            sink_desc.secret_refs = secret_refs.clone();
                             *found = true;
                         }
                     },
@@ -3940,61 +3998,54 @@ impl CatalogController {
     }
 }
 
-fn validate_sink_props(sink: &sink::Model, props: &BTreeMap<String, String>) -> MetaResult<()> {
-    // Validate that props can be altered
-    match sink.properties.inner_ref().get(CONNECTOR_TYPE_KEY) {
-        Some(connector) => {
-            let connector_type = connector.to_lowercase();
-            let field_names: Vec<String> = props.keys().cloned().collect();
-            check_sink_allow_alter_on_fly_fields(&connector_type, &field_names)
-                .map_err(|e| SinkError::Config(anyhow!(e)))?;
+fn validate_sink_props(
+    connector_type: &str,
+    options_with_secret: &WithOptionsSecResolved,
+    altered_field_names: &[String],
+) -> MetaResult<()> {
+    check_sink_allow_alter_on_fly_fields(connector_type, altered_field_names)
+        .map_err(|e| SinkError::Config(anyhow!(e)))?;
 
-            match_sink_name_str!(
-                connector_type.as_str(),
-                SinkType,
-                {
-                    let mut new_props = sink.properties.0.clone();
-                    new_props.extend(props.clone());
-                    SinkType::validate_alter_config_change(&new_props, props)
-                },
-                |sink: &str| Err(SinkError::Config(anyhow!("unsupported sink type {}", sink)))
-            )?
-        }
-        None => {
-            return Err(
-                SinkError::Config(anyhow!("connector not specified when alter sink")).into(),
-            );
-        }
-    };
+    let resolved_props = LocalSecretManager::global()
+        .fill_secrets(
+            options_with_secret.as_plaintext().clone(),
+            options_with_secret.as_secret().clone(),
+        )
+        .map_err(MetaError::from)?;
+    let resolved_alter_props = altered_field_names
+        .iter()
+        .filter_map(|field_name| {
+            resolved_props
+                .get(field_name)
+                .map(|value| (field_name.clone(), value.clone()))
+        })
+        .collect();
+
+    match_sink_name_str!(
+        connector_type,
+        SinkType,
+        SinkType::validate_alter_config_change(&resolved_props, &resolved_alter_props),
+        |sink: &str| Err(SinkError::Config(anyhow!("unsupported sink type {}", sink)))
+    )?;
+
     Ok(())
 }
 
-fn update_stmt_with_props(
-    with_properties: &mut Vec<SqlOption>,
-    props: &BTreeMap<String, String>,
-) -> MetaResult<()> {
-    let mut new_sql_options = with_properties
-        .iter()
-        .map(|sql_option| (&sql_option.name, sql_option))
-        .collect::<IndexMap<_, _>>();
-    let add_sql_options = props
-        .iter()
-        .map(|(k, v)| SqlOption::try_from((k, v)))
-        .collect::<Result<Vec<SqlOption>, ParserError>>()
-        .map_err(|e| SinkError::Config(anyhow!(e)))?;
-    new_sql_options.extend(
-        add_sql_options
-            .iter()
-            .map(|sql_option| (&sql_option.name, sql_option)),
-    );
-    *with_properties = new_sql_options.into_values().cloned().collect();
-    Ok(())
+fn build_altered_field_names(
+    alter_props: &BTreeMap<String, String>,
+    alter_secret_refs: &BTreeMap<String, PbSecretRef>,
+) -> Vec<String> {
+    alter_props
+        .keys()
+        .chain(alter_secret_refs.keys())
+        .cloned()
+        .collect()
 }
 
 async fn update_sink_fragment_props(
     txn: &DatabaseTransaction,
     sink_id: SinkId,
-    props: BTreeMap<String, String>,
+    options_with_secret: &WithOptionsSecResolved,
 ) -> MetaResult<()> {
     let fragments: Vec<(FragmentId, i32, StreamNode)> = Fragment::find()
         .select_only()
@@ -4007,6 +4058,8 @@ async fn update_sink_fragment_props(
         .into_tuple()
         .all(txn)
         .await?;
+    let props = options_with_secret.as_plaintext();
+    let secret_refs = options_with_secret.as_secret().clone();
     let fragments = fragments
         .into_iter()
         .filter(|(_, fragment_type_mask, _)| {
@@ -4020,7 +4073,8 @@ async fn update_sink_fragment_props(
                     && let Some(sink_desc) = &mut node.sink_desc
                     && sink_desc.id == sink_id
                 {
-                    sink_desc.properties.extend(props.clone());
+                    sink_desc.properties = props.clone();
+                    sink_desc.secret_refs = secret_refs.clone();
                     found = true;
                 }
             });
@@ -4110,5 +4164,39 @@ where
         .await?;
     }
 
+    Ok(())
+}
+
+async fn update_secret_dependencies(
+    txn: &DatabaseTransaction,
+    to_add_secrets: Vec<SecretId>,
+    to_remove_secrets: Vec<SecretId>,
+    object_id: ObjectId,
+) -> MetaResult<()> {
+    // Update secret dependencies atomically within the transaction.
+    // Add new dependencies for secrets that are newly referenced.
+    if !to_add_secrets.is_empty() {
+        ObjectDependency::insert_many(to_add_secrets.into_iter().map(|secret_id| {
+            object_dependency::ActiveModel {
+                oid: Set(secret_id.into()),
+                used_by: Set(object_id),
+                ..Default::default()
+            }
+        }))
+        .exec(txn)
+        .await?;
+    }
+    // Remove dependencies for secrets that are no longer referenced.
+    // This allows the secrets to be deleted after this source/sink no longer uses them.
+    if !to_remove_secrets.is_empty() {
+        let _ = ObjectDependency::delete_many()
+            .filter(
+                object_dependency::Column::Oid
+                    .is_in(to_remove_secrets)
+                    .and(object_dependency::Column::UsedBy.eq(object_id)),
+            )
+            .exec(txn)
+            .await?;
+    }
     Ok(())
 }

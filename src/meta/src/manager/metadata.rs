@@ -19,12 +19,15 @@ use anyhow::anyhow;
 use itertools::Itertools;
 use risingwave_common::catalog::{DatabaseId, TableId, TableOption};
 use risingwave_common::id::JobId;
+use risingwave_connector::WithOptionsSecResolved;
 use risingwave_meta_model::refresh_job::{self, RefreshState};
 use risingwave_meta_model::{SinkId, SourceId, WorkerId};
 use risingwave_pb::catalog::{PbSource, PbTable};
 use risingwave_pb::common::worker_node::{PbResource, Property as AddNodeProperty, State};
 use risingwave_pb::common::{HostAddress, PbWorkerNode, PbWorkerType, WorkerNode, WorkerType};
+use risingwave_pb::meta::alter_connector_props_request::PbExtraOptions;
 use risingwave_pb::meta::list_rate_limits_response::RateLimitInfo;
+use risingwave_pb::secret::PbSecretRef;
 use risingwave_pb::stream_plan::{PbDispatcherType, PbStreamNode, PbStreamScanType};
 use sea_orm::TransactionTrait;
 use sea_orm::prelude::DateTime;
@@ -577,31 +580,23 @@ impl MetadataManager {
             .await
     }
 
-    pub async fn update_sink_props_by_sink_id(
-        &self,
-        sink_id: SinkId,
-        props: BTreeMap<String, String>,
-    ) -> MetaResult<HashMap<String, String>> {
-        let new_props = self
-            .catalog_controller
-            .update_sink_props_by_sink_id(sink_id, props)
-            .await?;
-        Ok(new_props)
-    }
-
     pub async fn update_iceberg_table_props_by_table_id(
         &self,
         table_id: TableId,
         props: BTreeMap<String, String>,
-        alter_iceberg_table_props: Option<
-            risingwave_pb::meta::alter_connector_props_request::PbExtraOptions,
-        >,
-    ) -> MetaResult<(HashMap<String, String>, SinkId)> {
-        let (new_props, sink_id) = self
+        alter_secret_refs: BTreeMap<String, PbSecretRef>,
+        alter_iceberg_table_props: Option<PbExtraOptions>,
+    ) -> MetaResult<(WithOptionsSecResolved, SinkId)> {
+        let (options_with_secret, sink_id) = self
             .catalog_controller
-            .update_iceberg_table_props_by_table_id(table_id, props, alter_iceberg_table_props)
+            .update_iceberg_table_props_by_table_id(
+                table_id,
+                props,
+                alter_secret_refs,
+                alter_iceberg_table_props,
+            )
             .await?;
-        Ok((new_props, sink_id))
+        Ok((options_with_secret, sink_id))
     }
 
     pub async fn update_fragment_rate_limit_by_fragment_id(

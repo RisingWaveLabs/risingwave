@@ -342,6 +342,25 @@ CREATE SOURCE iceberg_e2e_auto_create_table WITH (
 );
 
 statement ok
+CREATE SECRET iceberg_s3_secret_key_test WITH (
+  backend = 'meta'
+) as 'hummockadmin';
+
+statement ok retry 5 backoff 3s
+ALTER SINK s7 CONNECTOR WITH (
+    s3.secret.key = secret iceberg_s3_secret_key_test
+);
+
+query I
+select count(*)
+from rw_sinks
+where name = 's7'
+  and connector_props -> 's3.secret.key' ->> 'type' = 'secret'
+  and connector_props -> 's3.secret.key' -> 'value' ->> 'value' = 'iceberg_s3_secret_key_test';
+----
+1
+
+statement ok
 INSERT INTO t6 VALUES (1, 2, '1-2'), (2, 2, '2-2'), (3, 2, '3-2'), (5, 2, '5-2'), (8, 2, '8-2'), (13, 2, '13-2'), (21, 2, '21-2');
 
 statement ok

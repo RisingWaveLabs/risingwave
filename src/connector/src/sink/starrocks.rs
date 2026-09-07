@@ -74,9 +74,11 @@ pub struct StarrocksCommon {
     pub http_port: String,
     /// The user name used to access the `StarRocks` database.
     #[serde(rename = "starrocks.user")]
+    #[with_option(allow_alter_on_fly)]
     pub user: String,
     /// The password associated with the user.
     #[serde(rename = "starrocks.password")]
+    #[with_option(allow_alter_on_fly)]
     pub password: String,
     /// The `StarRocks` database where the target table is located
     #[serde(rename = "starrocks.database")]

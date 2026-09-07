@@ -62,6 +62,7 @@ BigQueryConfig:
   - name: bigquery.credentials
     field_type: String
     required: false
+    allow_alter_on_fly: true
   - name: aws.region
     field_type: String
     required: false
@@ -123,9 +124,11 @@ ClickHouseConfig:
   - name: clickhouse.user
     field_type: String
     required: true
+    allow_alter_on_fly: true
   - name: clickhouse.password
     field_type: String
     required: true
+    allow_alter_on_fly: true
   - name: clickhouse.database
     field_type: String
     required: true
@@ -202,6 +205,7 @@ DeltaLakeConfig:
   - name: gcs.service.account
     field_type: String
     required: false
+    allow_alter_on_fly: true
   - name: commit_checkpoint_interval
     field_type: u64
     comments: Commit every n(>0) checkpoints, default is 10.
@@ -223,9 +227,11 @@ DorisConfig:
   - name: doris.user
     field_type: String
     required: true
+    allow_alter_on_fly: true
   - name: doris.password
     field_type: String
     required: true
+    allow_alter_on_fly: true
   - name: doris.database
     field_type: String
     required: true
@@ -338,10 +344,12 @@ ElasticSearchConfig:
     field_type: String
     comments: The username of elasticsearch or openserach
     required: false
+    allow_alter_on_fly: true
   - name: password
     field_type: String
     comments: The username of elasticsearch or openserach
     required: false
+    allow_alter_on_fly: true
   - name: index_column
     field_type: String
     comments: It is used for dynamic index, if it is be set, the value of this column will be used as the index. It and `index` can only set one
@@ -451,6 +459,7 @@ GooglePubSubConfig:
       The provided account credential must have the
       `pubsub.publisher` [role](https://cloud.google.com/pubsub/docs/access-control#roles)
     required: false
+    allow_alter_on_fly: true
 HttpConfig:
   fields:
   - name: url
@@ -492,21 +501,27 @@ IcebergConfig:
   - name: s3.access.key
     field_type: String
     required: false
+    allow_alter_on_fly: true
   - name: s3.secret.key
     field_type: String
     required: false
+    allow_alter_on_fly: true
   - name: s3.iam_role_arn
     field_type: String
     required: false
+    allow_alter_on_fly: true
   - name: glue.access.key
     field_type: String
     required: false
+    allow_alter_on_fly: true
   - name: glue.secret.key
     field_type: String
     required: false
+    allow_alter_on_fly: true
   - name: glue.iam_role_arn
     field_type: String
     required: false
+    allow_alter_on_fly: true
   - name: glue.region
     field_type: String
     required: false
@@ -522,6 +537,7 @@ IcebergConfig:
   - name: gcs.credential
     field_type: String
     required: false
+    allow_alter_on_fly: true
   - name: azblob.account_name
     field_type: String
     required: false
@@ -537,6 +553,7 @@ IcebergConfig:
   - name: adlsgen2.account_key
     field_type: String
     required: false
+    allow_alter_on_fly: true
   - name: adlsgen2.endpoint
     field_type: String
     required: false
@@ -570,18 +587,21 @@ IcebergConfig:
       Credential for accessing iceberg catalog, only applicable in rest catalog.
       A credential to exchange for a token in the `OAuth2` client credentials flow.
     required: false
+    allow_alter_on_fly: true
   - name: catalog.token
     field_type: String
     comments: |-
       token for accessing iceberg catalog, only applicable in rest catalog.
       A Bearer token which will be used for interaction with the server.
     required: false
+    allow_alter_on_fly: true
   - name: catalog.oauth2_server_uri
     field_type: String
     comments: |-
       `oauth2_server_uri` for accessing iceberg catalog, only applicable in rest catalog.
       Token endpoint URI to fetch token from if the Rest Catalog is not the authorization server.
     required: false
+    allow_alter_on_fly: true
   - name: catalog.scope
     field_type: String
     comments: |-
@@ -1436,10 +1456,12 @@ OpenSearchConfig:
     field_type: String
     comments: The username of elasticsearch or openserach
     required: false
+    allow_alter_on_fly: true
   - name: password
     field_type: String
     comments: The username of elasticsearch or openserach
     required: false
+    allow_alter_on_fly: true
   - name: index_column
     field_type: String
     comments: It is used for dynamic index, if it is be set, the value of this column will be used as the index. It and `index` can only set one
@@ -1481,6 +1503,7 @@ PostgresConfig:
   - name: password
     field_type: String
     required: true
+    allow_alter_on_fly: true
   - name: database
     field_type: String
     required: true
@@ -1498,6 +1521,7 @@ PostgresConfig:
   - name: ssl.root.cert
     field_type: String
     required: false
+    allow_alter_on_fly: true
   - name: max_batch_rows
     field_type: usize
     required: false
@@ -1633,9 +1657,11 @@ RedShiftConfig:
   - name: user
     field_type: String
     required: false
+    allow_alter_on_fly: true
   - name: password
     field_type: String
     required: false
+    allow_alter_on_fly: true
   - name: schema
     field_type: String
     required: false
@@ -1813,9 +1839,11 @@ SnowflakeV2Config:
   - name: username
     field_type: String
     required: false
+    allow_alter_on_fly: true
   - name: password
     field_type: String
     required: false
+    allow_alter_on_fly: true
   - name: auth.method
     field_type: String
     required: false
@@ -1825,9 +1853,11 @@ SnowflakeV2Config:
   - name: private_key_file_pwd
     field_type: String
     required: false
+    allow_alter_on_fly: true
   - name: private_key_pem
     field_type: String
     required: false
+    allow_alter_on_fly: true
   - name: commit_checkpoint_interval
     field_type: u64
     comments: Commit every n(>0) checkpoints, default is 10.
@@ -1904,9 +1934,11 @@ SqlServerConfig:
   - name: sqlserver.user
     field_type: String
     required: true
+    allow_alter_on_fly: true
   - name: sqlserver.password
     field_type: String
     required: true
+    allow_alter_on_fly: true
   - name: sqlserver.database
     field_type: String
     required: true
@@ -1946,10 +1978,12 @@ StarrocksConfig:
     field_type: String
     comments: The user name used to access the `StarRocks` database.
     required: true
+    allow_alter_on_fly: true
   - name: starrocks.password
     field_type: String
     comments: The password associated with the user.
     required: true
+    allow_alter_on_fly: true
   - name: starrocks.database
     field_type: String
     comments: The `StarRocks` database where the target table is located

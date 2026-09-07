@@ -3314,6 +3314,16 @@ pub struct SqlOption {
     pub value: SqlOptionValue,
 }
 
+impl SqlOption {
+    /// Creates an option whose value is a typed secret reference.
+    pub fn from_secret_ref(name: &str, secret_ref: SecretRefValue) -> Self {
+        Self {
+            name: ObjectName(name.split('.').map(Ident::from_real_value).collect()),
+            value: SqlOptionValue::SecretRef(secret_ref),
+        }
+    }
+}
+
 impl fmt::Display for SqlOption {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let should_redact = REDACT_SQL_OPTION_KEYWORDS
@@ -4191,5 +4201,36 @@ mod tests {
             "CREATE FUNCTION foo(INT) RETURNS INT LANGUAGE python IMMUTABLE AS 'SELECT 1' WITH ( always_retry_on_network_error = true )",
             format!("{}", create_function)
         );
+    }
+
+    #[test]
+    fn test_sql_option_from_secret_ref() {
+        {
+            let option = SqlOption::from_secret_ref(
+                "password",
+                SecretRefValue {
+                    secret_name: ObjectName(vec![
+                        Ident::from_real_value("public"),
+                        Ident::from_real_value("s2"),
+                    ]),
+                    ref_as: SecretRefAsType::Text,
+                },
+            );
+
+            assert!(matches!(option.value, SqlOptionValue::SecretRef(_)));
+            assert_eq!(option.to_string(), "password = secret public.s2");
+        }
+
+        {
+            let option = SqlOption::from_secret_ref(
+                "certificate",
+                SecretRefValue {
+                    secret_name: ObjectName(vec![Ident::from_real_value("cert")]),
+                    ref_as: SecretRefAsType::File,
+                },
+            );
+
+            assert_eq!(option.to_string(), "certificate = secret cert AS FILE");
+        }
     }
 }

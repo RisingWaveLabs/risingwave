@@ -150,6 +150,23 @@ pub static SOURCE_ALLOW_ALTER_ON_FLY_FIELDS: LazyLock<HashMap<String, HashSet<St
             "debezium.queue.memory.ratio".to_owned(),
         ].into_iter().collect(),
     ).unwrap();
+    // IcebergProperties
+    map.try_insert(
+        std::any::type_name::<IcebergProperties>().to_owned(),
+        [
+            "s3.access.key".to_owned(),
+            "s3.secret.key".to_owned(),
+            "s3.iam_role_arn".to_owned(),
+            "glue.access.key".to_owned(),
+            "glue.secret.key".to_owned(),
+            "glue.iam_role_arn".to_owned(),
+            "gcs.credential".to_owned(),
+            "adlsgen2.account_key".to_owned(),
+            "catalog.credential".to_owned(),
+            "catalog.token".to_owned(),
+            "catalog.oauth2_server_uri".to_owned(),
+        ].into_iter().collect(),
+    ).unwrap();
     // KafkaProperties
     map.try_insert(
         std::any::type_name::<KafkaProperties>().to_owned(),
@@ -211,10 +228,19 @@ pub static SOURCE_ALLOW_ALTER_ON_FLY_FIELDS: LazyLock<HashMap<String, HashSet<St
 pub static SINK_ALLOW_ALTER_ON_FLY_FIELDS: LazyLock<HashMap<String, HashSet<String>>> = LazyLock::new(|| {
     use sink_properties::*;
     let mut map = HashMap::new();
+    // BigQueryConfig
+    map.try_insert(
+        std::any::type_name::<BigQueryConfig>().to_owned(),
+        [
+            "bigquery.credentials".to_owned(),
+        ].into_iter().collect(),
+    ).unwrap();
     // ClickHouseConfig
     map.try_insert(
         std::any::type_name::<ClickHouseConfig>().to_owned(),
         [
+            "clickhouse.user".to_owned(),
+            "clickhouse.password".to_owned(),
             "commit_checkpoint_interval".to_owned(),
         ].into_iter().collect(),
     ).unwrap();
@@ -222,6 +248,7 @@ pub static SINK_ALLOW_ALTER_ON_FLY_FIELDS: LazyLock<HashMap<String, HashSet<Stri
     map.try_insert(
         std::any::type_name::<DeltaLakeConfig>().to_owned(),
         [
+            "gcs.service.account".to_owned(),
             "commit_checkpoint_interval".to_owned(),
         ].into_iter().collect(),
     ).unwrap();
@@ -229,6 +256,8 @@ pub static SINK_ALLOW_ALTER_ON_FLY_FIELDS: LazyLock<HashMap<String, HashSet<Stri
     map.try_insert(
         std::any::type_name::<DorisConfig>().to_owned(),
         [
+            "doris.user".to_owned(),
+            "doris.password".to_owned(),
             "doris.stream_load.http.timeout.ms".to_owned(),
         ].into_iter().collect(),
     ).unwrap();
@@ -236,15 +265,35 @@ pub static SINK_ALLOW_ALTER_ON_FLY_FIELDS: LazyLock<HashMap<String, HashSet<Stri
     map.try_insert(
         std::any::type_name::<ElasticSearchConfig>().to_owned(),
         [
+            "username".to_owned(),
+            "password".to_owned(),
             "batch_num_messages".to_owned(),
             "batch_size_kb".to_owned(),
             "concurrent_requests".to_owned(),
+        ].into_iter().collect(),
+    ).unwrap();
+    // GooglePubSubConfig
+    map.try_insert(
+        std::any::type_name::<GooglePubSubConfig>().to_owned(),
+        [
+            "pubsub.credentials".to_owned(),
         ].into_iter().collect(),
     ).unwrap();
     // IcebergConfig
     map.try_insert(
         std::any::type_name::<IcebergConfig>().to_owned(),
         [
+            "s3.access.key".to_owned(),
+            "s3.secret.key".to_owned(),
+            "s3.iam_role_arn".to_owned(),
+            "glue.access.key".to_owned(),
+            "glue.secret.key".to_owned(),
+            "glue.iam_role_arn".to_owned(),
+            "gcs.credential".to_owned(),
+            "adlsgen2.account_key".to_owned(),
+            "catalog.credential".to_owned(),
+            "catalog.token".to_owned(),
+            "catalog.oauth2_server_uri".to_owned(),
             "commit_checkpoint_interval".to_owned(),
             "enable_compaction".to_owned(),
             "compaction_interval_sec".to_owned(),
@@ -311,9 +360,19 @@ pub static SINK_ALLOW_ALTER_ON_FLY_FIELDS: LazyLock<HashMap<String, HashSet<Stri
     map.try_insert(
         std::any::type_name::<OpenSearchConfig>().to_owned(),
         [
+            "username".to_owned(),
+            "password".to_owned(),
             "batch_num_messages".to_owned(),
             "batch_size_kb".to_owned(),
             "concurrent_requests".to_owned(),
+        ].into_iter().collect(),
+    ).unwrap();
+    // PostgresConfig
+    map.try_insert(
+        std::any::type_name::<PostgresConfig>().to_owned(),
+        [
+            "password".to_owned(),
+            "ssl.root.cert".to_owned(),
         ].into_iter().collect(),
     ).unwrap();
     // PulsarConfig
@@ -329,17 +388,39 @@ pub static SINK_ALLOW_ALTER_ON_FLY_FIELDS: LazyLock<HashMap<String, HashSet<Stri
             "pulsar.properties.routing_mode".to_owned(),
         ].into_iter().collect(),
     ).unwrap();
+    // RedShiftConfig
+    map.try_insert(
+        std::any::type_name::<RedShiftConfig>().to_owned(),
+        [
+            "user".to_owned(),
+            "password".to_owned(),
+        ].into_iter().collect(),
+    ).unwrap();
     // SnowflakeV2Config
     map.try_insert(
         std::any::type_name::<SnowflakeV2Config>().to_owned(),
         [
+            "username".to_owned(),
+            "password".to_owned(),
+            "private_key_file_pwd".to_owned(),
+            "private_key_pem".to_owned(),
             "commit_checkpoint_interval".to_owned(),
+        ].into_iter().collect(),
+    ).unwrap();
+    // SqlServerConfig
+    map.try_insert(
+        std::any::type_name::<SqlServerConfig>().to_owned(),
+        [
+            "sqlserver.user".to_owned(),
+            "sqlserver.password".to_owned(),
         ].into_iter().collect(),
     ).unwrap();
     // StarrocksConfig
     map.try_insert(
         std::any::type_name::<StarrocksConfig>().to_owned(),
         [
+            "starrocks.user".to_owned(),
+            "starrocks.password".to_owned(),
             "starrocks.stream_load.http.timeout.ms".to_owned(),
             "commit_checkpoint_interval".to_owned(),
             "starrocks.max_batch_size_bytes".to_owned(),
@@ -369,6 +450,23 @@ pub static SINK_ALLOW_ALTER_ON_FLY_FIELDS: LazyLock<HashMap<String, HashSet<Stri
 pub static CONNECTION_ALLOW_ALTER_ON_FLY_FIELDS: LazyLock<HashMap<String, HashSet<String>>> = LazyLock::new(|| {
     use crate::connector_common::*;
     let mut map = HashMap::new();
+    // IcebergConnection
+    map.try_insert(
+        std::any::type_name::<IcebergConnection>().to_owned(),
+        [
+            "s3.access.key".to_owned(),
+            "s3.secret.key".to_owned(),
+            "s3.iam_role_arn".to_owned(),
+            "glue.access.key".to_owned(),
+            "glue.secret.key".to_owned(),
+            "glue.iam_role_arn".to_owned(),
+            "gcs.credential".to_owned(),
+            "adlsgen2.account_key".to_owned(),
+            "catalog.credential".to_owned(),
+            "catalog.token".to_owned(),
+            "catalog.oauth2_server_uri".to_owned(),
+        ].into_iter().collect(),
+    ).unwrap();
     // KafkaConnection
     map.try_insert(
         std::any::type_name::<KafkaConnection>().to_owned(),

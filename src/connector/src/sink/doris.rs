@@ -51,8 +51,10 @@ pub struct DorisCommon {
     #[serde(rename = "doris.url")]
     pub url: String,
     #[serde(rename = "doris.user")]
+    #[with_option(allow_alter_on_fly)]
     pub user: String,
     #[serde(rename = "doris.password")]
+    #[with_option(allow_alter_on_fly)]
     pub password: String,
     #[serde(rename = "doris.database")]
     pub database: String,

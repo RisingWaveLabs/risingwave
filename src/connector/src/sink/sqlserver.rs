@@ -52,8 +52,10 @@ pub struct SqlServerConfig {
     #[serde_as(as = "DisplayFromStr")]
     pub port: u16,
     #[serde(rename = "sqlserver.user")]
+    #[with_option(allow_alter_on_fly)]
     pub user: String,
     #[serde(rename = "sqlserver.password")]
+    #[with_option(allow_alter_on_fly)]
     pub password: String,
     #[serde(rename = "sqlserver.database")]
     pub database: String,

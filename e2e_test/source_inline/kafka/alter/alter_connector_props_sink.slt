@@ -1,0 +1,177 @@
+control substitution on
+
+# ==== alter connection propagates secret rotation to dependent sink ====
+
+# prepare topic and secrets
+system ok
+rpk topic create test_alter_conn_sink_secret -X brokers=message_queue_sasl_1:19092 -X sasl.mechanism=PLAIN -X user=dev -X pass=rw
+
+statement ok
+create secret conn_sink_password_1 with ( backend = 'meta' ) as 'rw';
+
+statement ok
+create secret conn_sink_password_2 with ( backend = 'meta' ) as 'rw';
+
+statement ok
+create connection kafka_conn_sink_secret with (
+    type = 'kafka',
+    properties.bootstrap.server = 'message_queue_sasl_1:19092',
+    properties.security.protocol = 'SASL_PLAINTEXT',
+    properties.sasl.mechanism = 'PLAIN',
+    properties.sasl.username = 'dev',
+    properties.sasl.password = secret conn_sink_password_1
+);
+
+statement ok
+create table t_conn_sink_secret (
+    v1 int primary key,
+    v2 int
+);
+
+statement ok
+create materialized view mv_conn_sink_secret as
+select * from t_conn_sink_secret;
+
+statement ok
+create sink s_conn_sink_secret
+from mv_conn_sink_secret with (
+    connector = 'kafka',
+    connection = kafka_conn_sink_secret,
+    topic = 'test_alter_conn_sink_secret'
+) format plain encode json (
+    force_append_only = 'true'
+);
+
+statement ok
+insert into t_conn_sink_secret values (1, 10), (2, 20);
+
+statement ok
+flush;
+
+statement ok retry 5 backoff 3s
+alter connection kafka_conn_sink_secret connector with (
+    properties.sasl.password = secret conn_sink_password_2
+);
+
+query I
+select count(*)
+from rw_sinks
+where name = 's_conn_sink_secret'
+  and connector_props -> 'properties.sasl.password' ->> 'type' = 'secret'
+  and connector_props -> 'properties.sasl.password' -> 'value' ->> 'value' = 'conn_sink_password_2';
+----
+1
+
+statement ok
+drop secret conn_sink_password_1;
+
+statement error
+drop secret conn_sink_password_2;
+
+statement ok
+drop sink s_conn_sink_secret;
+
+statement ok
+drop connection kafka_conn_sink_secret;
+
+statement ok
+drop secret conn_sink_password_2;
+
+statement ok
+drop materialized view mv_conn_sink_secret;
+
+statement ok
+drop table t_conn_sink_secret;
+
+# ==== direct alter sink with secret rotation ====
+
+statement ok
+create secret sink_password_1 with ( backend = 'meta' ) as 'rw';
+
+statement ok
+create secret sink_password_2 with ( backend = 'meta' ) as 'rw';
+
+statement ok
+create table t_sink_secret_direct (
+    v1 int primary key,
+    v2 int
+);
+
+statement ok
+create materialized view mv_sink_secret_direct as
+select * from t_sink_secret_direct;
+
+statement ok
+create sink s_sink_secret_direct
+from mv_sink_secret_direct with (
+    connector = 'kafka',
+    topic = 'test_alter_conn_sink_secret',
+    properties.bootstrap.server = 'message_queue_sasl_1:19092',
+    properties.security.protocol = 'SASL_PLAINTEXT',
+    properties.sasl.mechanism = 'PLAIN',
+    properties.sasl.username = 'dev',
+    properties.sasl.password = secret sink_password_1
+) format plain encode json (
+    force_append_only = 'true'
+);
+
+statement ok retry 5 backoff 3s
+ALTER SINK s_sink_secret_direct CONNECTOR WITH (
+    properties.sasl.password = secret sink_password_2
+);
+
+query I
+select count(*)
+from rw_sinks
+where name = 's_sink_secret_direct'
+  and definition ILIKE '%properties.sasl.password = secret public.sink_password_2%';
+----
+1
+
+statement error
+ALTER SINK s_sink_secret_direct CONNECTOR WITH (
+    commit_checkpoint_interval = '2'
+);
+
+statement ok retry 5 backoff 3s
+ALTER SINK s_sink_secret_direct CONNECTOR WITH (
+    properties.message.timeout.ms = '3000'
+);
+
+query I
+select count(*)
+from rw_sinks
+where name = 's_sink_secret_direct'
+  and connector_props -> 'properties.sasl.password' ->> 'type' = 'secret'
+  and connector_props -> 'properties.sasl.password' -> 'value' ->> 'value' = 'sink_password_2';
+----
+1
+
+query I
+select count(*)
+from rw_sinks
+where name = 's_sink_secret_direct'
+  and connector_props -> 'properties.message.timeout.ms' ->> 'value' = '3000';
+----
+1
+
+statement ok
+drop secret sink_password_1;
+
+statement error
+drop secret sink_password_2;
+
+statement ok
+drop sink s_sink_secret_direct;
+
+statement ok
+drop secret sink_password_2;
+
+statement ok
+drop materialized view mv_sink_secret_direct;
+
+statement ok
+drop table t_sink_secret_direct;
+
+system ok
+rpk topic delete test_alter_conn_sink_secret -X brokers=message_queue_sasl_1:19092 -X sasl.mechanism=PLAIN -X user=dev -X pass=rw

@@ -101,9 +101,11 @@ pub struct SnowflakeV2Config {
     pub jdbc_url: Option<String>,
 
     #[serde(rename = "username")]
+    #[with_option(allow_alter_on_fly)]
     pub username: Option<String>,
 
     #[serde(rename = "password")]
+    #[with_option(allow_alter_on_fly)]
     pub password: Option<String>,
 
     // Authentication method control (password | key_pair_file | key_pair_object)
@@ -115,10 +117,12 @@ pub struct SnowflakeV2Config {
     pub private_key_file: Option<String>,
 
     #[serde(rename = "private_key_file_pwd")]
+    #[with_option(allow_alter_on_fly)]
     pub private_key_file_pwd: Option<String>,
 
     // Key-pair authentication via connection Properties (Option 1: object-based, PEM content)
     #[serde(rename = "private_key_pem")]
+    #[with_option(allow_alter_on_fly)]
     pub private_key_pem: Option<String>,
 
     /// Commit every n(>0) checkpoints, default is 10.

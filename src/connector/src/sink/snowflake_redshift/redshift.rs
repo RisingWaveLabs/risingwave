@@ -79,9 +79,11 @@ pub struct RedShiftConfig {
     pub jdbc_url: String,
 
     #[serde(rename = "user")]
+    #[with_option(allow_alter_on_fly)]
     pub username: Option<String>,
 
     #[serde(rename = "password")]
+    #[with_option(allow_alter_on_fly)]
     pub password: Option<String>,
 
     #[serde(rename = "schema")]

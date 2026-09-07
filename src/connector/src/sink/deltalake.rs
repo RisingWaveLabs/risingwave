@@ -68,6 +68,7 @@ pub struct DeltaLakeCommon {
     pub aws_auth_props: AwsAuthProps,
 
     #[serde(rename = "gcs.service.account")]
+    #[with_option(allow_alter_on_fly)]
     pub gcs_service_account: Option<String>,
     /// Commit every n(>0) checkpoints, default is 10.
     #[serde(default = "default_commit_checkpoint_interval")]

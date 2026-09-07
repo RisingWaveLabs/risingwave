@@ -33,7 +33,6 @@ futures-async-stream = { workspace = true }
 hex = "0.4"
 http = "1"
 iceberg = { workspace = true }
-indexmap = { workspace = true }
 itertools = { workspace = true }
 jsonbb = { workspace = true }
 lz4 = "1.28.0"

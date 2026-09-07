@@ -197,21 +197,27 @@ IcebergProperties:
   - name: s3.access.key
     field_type: String
     required: false
+    allow_alter_on_fly: true
   - name: s3.secret.key
     field_type: String
     required: false
+    allow_alter_on_fly: true
   - name: s3.iam_role_arn
     field_type: String
     required: false
+    allow_alter_on_fly: true
   - name: glue.access.key
     field_type: String
     required: false
+    allow_alter_on_fly: true
   - name: glue.secret.key
     field_type: String
     required: false
+    allow_alter_on_fly: true
   - name: glue.iam_role_arn
     field_type: String
     required: false
+    allow_alter_on_fly: true
   - name: glue.region
     field_type: String
     required: false
@@ -227,6 +233,7 @@ IcebergProperties:
   - name: gcs.credential
     field_type: String
     required: false
+    allow_alter_on_fly: true
   - name: azblob.account_name
     field_type: String
     required: false
@@ -242,6 +249,7 @@ IcebergProperties:
   - name: adlsgen2.account_key
     field_type: String
     required: false
+    allow_alter_on_fly: true
   - name: adlsgen2.endpoint
     field_type: String
     required: false
@@ -275,18 +283,21 @@ IcebergProperties:
       Credential for accessing iceberg catalog, only applicable in rest catalog.
       A credential to exchange for a token in the `OAuth2` client credentials flow.
     required: false
+    allow_alter_on_fly: true
   - name: catalog.token
     field_type: String
     comments: |-
       token for accessing iceberg catalog, only applicable in rest catalog.
       A Bearer token which will be used for interaction with the server.
     required: false
+    allow_alter_on_fly: true
   - name: catalog.oauth2_server_uri
     field_type: String
     comments: |-
       `oauth2_server_uri` for accessing iceberg catalog, only applicable in rest catalog.
       Token endpoint URI to fetch token from if the Rest Catalog is not the authorization server.
     required: false
+    allow_alter_on_fly: true
   - name: catalog.scope
     field_type: String
     comments: |-
