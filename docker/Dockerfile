@@ -1,3 +1,5 @@
+# syntax=docker/dockerfile:1.10
+
 FROM ubuntu:24.04 AS base
 
 ENV LANG en_US.utf8
@@ -70,14 +72,44 @@ ENV GIT_SHA=$GIT_SHA
 ARG CARGO_PROFILE
 ENV CARGO_PROFILE=$CARGO_PROFILE
 
+ARG ENABLE_DOCKER_SCCACHE=false
+ARG DOCKER_SCCACHE_BUCKET
+ARG DOCKER_SCCACHE_REGION
+ARG DOCKER_SCCACHE_PREFIX
+ARG SCCACHE_VERSION=0.10.0
+
+# Keep the sccache installation independent of the source tree so this layer can
+# be reused across commits.
+RUN if [[ "${ENABLE_DOCKER_SCCACHE}" == "true" ]]; then \
+    cargo install --locked "sccache@${SCCACHE_VERSION}"; \
+  fi
+
 COPY ./ /risingwave
 WORKDIR /risingwave
 
 ENV ENABLE_BUILD_DASHBOARD=1
 ENV OPENSSL_STATIC=1
 
-RUN cargo fetch && \
+RUN --mount=type=secret,id=aws_credentials,target=/root/.aws/credentials,required=false \
+  --mount=type=secret,id=aws_config,target=/root/.aws/config,required=false \
+  if [[ "${ENABLE_DOCKER_SCCACHE}" == "true" ]]; then \
+    if [[ -z "${DOCKER_SCCACHE_BUCKET}" ]]; then \
+      echo "DOCKER_SCCACHE_BUCKET must be set when ENABLE_DOCKER_SCCACHE=true" >&2; \
+      exit 1; \
+    fi; \
+    export RUSTC_WRAPPER=sccache; \
+    export SCCACHE_BUCKET="${DOCKER_SCCACHE_BUCKET}"; \
+    export SCCACHE_REGION="${DOCKER_SCCACHE_REGION}"; \
+    export SCCACHE_S3_KEY_PREFIX="${DOCKER_SCCACHE_PREFIX}"; \
+    export SCCACHE_IDLE_TIMEOUT=0; \
+    sccache --start-server; \
+  fi && \
+  cargo fetch && \
   cargo build -p risingwave_cmd_all --profile ${CARGO_PROFILE} --features "rw-static-link" --features udf --features datafusion && \
+  if [[ "${ENABLE_DOCKER_SCCACHE}" == "true" ]]; then \
+    sccache --show-stats; \
+    sccache --zero-stats; \
+  fi && \
   mkdir -p /risingwave/bin && \
   mv /risingwave/target/${CARGO_PROFILE}/risingwave /risingwave/bin/ && \
   mv /risingwave/target/${CARGO_PROFILE}/risingwave.dwp /risingwave/bin/ && \
@@ -107,7 +139,7 @@ RUN mkdir -p /risingwave
 WORKDIR /risingwave/java
 
 # 1. copy only poms
-COPY --from=java-planner /risingwave/poms /risingwave/java/
+COPY --from=java-planner /risingwave/poms /risingwave/
 
 # 2. start downloading dependencies
 RUN mvn dependency:go-offline --fail-never

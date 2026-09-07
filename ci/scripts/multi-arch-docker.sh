@@ -17,6 +17,7 @@ export PATH=$PATH:/var/lib/buildkite-agent/.local/bin
 date="$(date +%Y%m%d)"
 ghcraddr="ghcr.io/risingwavelabs/risingwave"
 dockerhubaddr="risingwavelabs/risingwave"
+PUSH_DOCKERHUB=${PUSH_DOCKERHUB:-true}
 
 
 arches=()
@@ -46,6 +47,11 @@ function pushGchr() {
 
 # push images to dockerhub
 function pushDockerhub() {
+  if [[ "${PUSH_DOCKERHUB}" != "true" ]]; then
+    echo "skip dockerhub image because PUSH_DOCKERHUB=${PUSH_DOCKERHUB}"
+    return
+  fi
+
   DOCKERTAG="${dockerhubaddr}:$1"
   echo "push to dockerhub, image tag: ${DOCKERTAG}"
   args=()
@@ -80,8 +86,10 @@ function isLatestVersion() {
 echo "--- ghcr login"
 echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USERNAME" --password-stdin
 
-echo "--- dockerhub login"
-echo "$DOCKER_TOKEN" | docker login -u "risingwavelabs" --password-stdin
+if [[ "${PUSH_DOCKERHUB}" == "true" ]]; then
+  echo "--- dockerhub login"
+  echo "$DOCKER_TOKEN" | docker login -u "risingwavelabs" --password-stdin
+fi
 
 if [[ -n "${ORIGINAL_IMAGE_TAG+x}" ]] && [[ -n "${NEW_IMAGE_TAG+x}" ]]; then
   echo "--- retag docker image"
@@ -123,18 +131,14 @@ if [ "$BUILDKITE_BRANCH" != "main" ] && [[ ! "$BUILDKITE_BRANCH" =~ "^release-.*
   pip install toml-cli
   TAG="v$(toml get --toml-path Cargo.toml workspace.package.version)-${postfix}"
   pushGchr "${TAG}"
-  if [[ "${PUSH_DOCKERHUB:-false}" == "true" ]]; then
-    pushDockerhub "${TAG}"
-  fi
+  pushDockerhub "${TAG}"
 fi
 
 if [[ -n "${IMAGE_TAG+x}" ]]; then
   # Tag the image with the $IMAGE_TAG.
   TAG="${IMAGE_TAG}"
   pushGchr "${TAG}"
-  if [[ "${PUSH_DOCKERHUB:-false}" == "true" ]]; then
-    pushDockerhub "${TAG}"
-  fi
+  pushDockerhub "${TAG}"
 fi
 
 if [[ -n "${BUILDKITE_TAG}" ]]; then
@@ -151,11 +155,15 @@ if [[ -n "${BUILDKITE_TAG}" ]]; then
   fi
 fi
 
-echo "--- delete the manifest images from dockerhub"
-args=()
-for arch in "${arches[@]}"
-do
-  args+=( "${dockerhubaddr}:${BUILDKITE_COMMIT}-${arch}" )
-done
-docker run --rm lumir/remove-dockerhub-tag \
-  --user "risingwavelabs" --password "$DOCKER_TOKEN" "${args[@]}"
+if [[ "${PUSH_DOCKERHUB}" == "true" ]]; then
+  echo "--- delete the manifest images from dockerhub"
+  args=()
+  for arch in "${arches[@]}"
+  do
+    args+=( "${dockerhubaddr}:${BUILDKITE_COMMIT}-${arch}" )
+  done
+  docker run --rm lumir/remove-dockerhub-tag \
+    --user "risingwavelabs" --password "$DOCKER_TOKEN" "${args[@]}"
+else
+  echo "--- skip dockerhub manifest cleanup because PUSH_DOCKERHUB=${PUSH_DOCKERHUB}"
+fi

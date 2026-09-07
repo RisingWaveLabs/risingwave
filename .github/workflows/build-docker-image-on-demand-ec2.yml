@@ -22,6 +22,11 @@ on:
         required: false
         type: boolean
         default: false
+      enable_docker_sccache:
+        description: 'Enable S3-backed sccache for the Docker build'
+        required: false
+        type: boolean
+        default: false
 
 jobs:
   build_image:
@@ -81,6 +86,10 @@ jobs:
           fi
           echo "PUSH_DOCKERHUB=$PUSH_DOCKERHUB"
           echo "PUSH_DOCKERHUB=$PUSH_DOCKERHUB" >> $GITHUB_ENV
+
+          ENABLE_DOCKER_SCCACHE="${{ github.event.inputs.enable_docker_sccache }}"
+          echo "ENABLE_DOCKER_SCCACHE=$ENABLE_DOCKER_SCCACHE"
+          echo "ENABLE_DOCKER_SCCACHE=$ENABLE_DOCKER_SCCACHE" >> $GITHUB_ENV
       - name: 'Trigger Docker build Workflow via Buildkite'
         uses: buildkite/trigger-pipeline-action@v2.3.0
         with:
@@ -89,4 +98,4 @@ jobs:
           branch: ${{ env.BRANCH_NAME }}
           commit: HEAD
           message: ':github: Triggering Docker build with image tag: ${{ env.IMAGE_TAG }}'
-          build_env_vars: '{ "IMAGE_TAG": "${{ env.IMAGE_TAG }}", "PUSH_DOCKERHUB": "${{ env.PUSH_DOCKERHUB }}", "SKIP_TARGET_AMD64": "${{ env.SKIP_TARGET_AMD64 }}", "CARGO_PROFILE": "${{ env.CARGO_PROFILE }}" }'
+          build_env_vars: '{ "IMAGE_TAG": "${{ env.IMAGE_TAG }}", "PUSH_DOCKERHUB": "${{ env.PUSH_DOCKERHUB }}", "SKIP_TARGET_AMD64": "${{ env.SKIP_TARGET_AMD64 }}", "CARGO_PROFILE": "${{ env.CARGO_PROFILE }}", "ENABLE_DOCKER_SCCACHE": "${{ env.ENABLE_DOCKER_SCCACHE }}" }'
