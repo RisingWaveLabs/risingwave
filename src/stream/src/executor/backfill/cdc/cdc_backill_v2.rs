@@ -22,7 +22,7 @@ use risingwave_common::bitmap::BitmapBuilder;
 use risingwave_common::catalog::{ColumnDesc, Field};
 use risingwave_common::row::RowDeserializer;
 use risingwave_common::util::iter_util::ZipEqFast;
-use risingwave_common::util::sort_util::{OrderType, cmp_datum};
+use risingwave_common::util::sort_util::OrderType;
 use risingwave_connector::source::cdc::CdcScanOptions;
 use risingwave_connector::source::cdc::external::{
     CdcOffset, ExternalCdcTableType, ExternalTableReaderImpl,
@@ -41,7 +41,9 @@ use crate::executor::backfill::cdc::upstream_table::external::ExternalStorageTab
 use crate::executor::backfill::cdc::upstream_table::snapshot::{
     SplitSnapshotReadArgs, UpstreamTableRead, UpstreamTableReader,
 };
-use crate::executor::backfill::utils::{get_cdc_chunk_last_offset, mapping_chunk, mapping_message};
+use crate::executor::backfill::utils::{
+    cmp_cdc_datum, get_cdc_chunk_last_offset, mapping_chunk, mapping_message,
+};
 use crate::executor::prelude::*;
 use crate::executor::source::get_infinite_backoff_strategy;
 use crate::task::cdc_progress::CdcProgressReporter;
@@ -727,7 +729,7 @@ fn filter_stream_chunk(
         }
         let mut is_in_range = true;
         if !is_leftmost_bound {
-            is_in_range = cmp_datum(
+            is_in_range = cmp_cdc_datum(
                 row_split_key,
                 left_split_key,
                 OrderType::ascending_nulls_first(),
@@ -735,7 +737,7 @@ fn filter_stream_chunk(
             .is_ge();
         }
         if is_in_range && !is_rightmost_bound {
-            is_in_range = cmp_datum(
+            is_in_range = cmp_cdc_datum(
                 row_split_key,
                 right_split_key,
                 OrderType::ascending_nulls_first(),
@@ -801,7 +803,7 @@ fn assert_consecutive_splits(actor_snapshot_splits: &[CdcTableSnapshotSplit]) {
             actor_snapshot_splits
         );
         assert!(
-            cmp_datum(
+            cmp_cdc_datum(
                 actor_snapshot_splits[i - 1]
                     .right_bound_exclusive
                     .datum_at(0),

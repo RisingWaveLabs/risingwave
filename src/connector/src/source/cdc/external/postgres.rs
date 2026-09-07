@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::cmp::Ordering;
+use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
 
 use anyhow::Context;
@@ -147,8 +148,21 @@ pub struct PostgresExternalTableReader {
     rw_schema: Schema,
     field_names: String,
     pk_indices: Vec<usize>,
+    /// Exact PostgreSQL `text`/`varchar` primary-key columns. Every SQL ordering and
+    /// range expression for these columns must use the built-in `pg_catalog."C"`
+    /// collation so it agrees with RisingWave's UTF-8 byte ordering.
+    binary_collated_pk_columns: HashSet<String>,
     client: tokio::sync::Mutex<tokio_postgres::Client>,
     schema_table_name: SchemaTableName,
+}
+
+#[derive(Debug, Clone)]
+struct PostgresIndexKey {
+    column_name: Option<String>,
+    collation_schema: Option<String>,
+    collation_name: Option<String>,
+    descending: bool,
+    default_opclass: bool,
 }
 
 impl ExternalTableReader for PostgresExternalTableReader {
@@ -231,6 +245,213 @@ impl ExternalTableReader for PostgresExternalTableReader {
 }
 
 impl PostgresExternalTableReader {
+    async fn discover_binary_collated_pk_columns(
+        client: &tokio_postgres::Client,
+        table_name: &SchemaTableName,
+        primary_keys: &[String],
+    ) -> ConnectorResult<HashSet<String>> {
+        if primary_keys.is_empty() {
+            return Ok(HashSet::new());
+        }
+
+        let column_type_oids = client
+            .query(
+                "SELECT a.attname, a.atttypid \
+                 FROM pg_attribute a \
+                 JOIN pg_class tbl ON tbl.oid = a.attrelid \
+                 JOIN pg_namespace ns ON ns.oid = tbl.relnamespace \
+                 WHERE ns.nspname = $1 AND tbl.relname = $2 \
+                   AND a.attnum > 0 AND NOT a.attisdropped",
+                &[&table_name.schema_name, &table_name.table_name],
+            )
+            .await?
+            .into_iter()
+            .map(|row| (row.get::<_, String>(0), row.get::<_, u32>(1)))
+            .collect::<HashMap<_, _>>();
+
+        let mut binary_collated_columns = HashSet::new();
+        for column_name in primary_keys {
+            let type_oid = column_type_oids.get(column_name).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "PostgreSQL system catalog did not return primary-key column `{column_name}` \
+                     from table {}",
+                    Self::get_normalized_table_name(table_name)
+                )
+            })?;
+            let pg_type = Self::resolve_builtin_pk_type(column_name, *type_oid)?;
+            if Self::is_binary_collated_pk_type(&pg_type) {
+                binary_collated_columns.insert(column_name.clone());
+            } else if let Some(reason) = Self::unsupported_pk_type_reason(&pg_type) {
+                return Err(anyhow::anyhow!(
+                    "PostgreSQL CDC primary-key column `{column_name}` has type {}, which is not \
+                     supported because {reason}",
+                    pg_type
+                )
+                .into());
+            }
+        }
+        Ok(binary_collated_columns)
+    }
+
+    fn resolve_builtin_pk_type(column_name: &str, type_oid: u32) -> ConnectorResult<PgType> {
+        PgType::from_oid(type_oid).ok_or_else(|| {
+            anyhow::anyhow!(
+                "PostgreSQL CDC primary-key column `{column_name}` has a user-defined, \
+                     domain, or extension type with OID {type_oid}; its decoded representation \
+                     and upstream ordering are not proven identical to RisingWave ordering"
+            )
+            .into()
+        })
+    }
+
+    fn is_binary_collated_pk_type(pg_type: &PgType) -> bool {
+        matches!(*pg_type, PgType::TEXT | PgType::VARCHAR)
+    }
+
+    fn unsupported_pk_type_reason(pg_type: &PgType) -> Option<&'static str> {
+        match *pg_type {
+            PgType::BOOL
+            | PgType::INT2
+            | PgType::INT4
+            | PgType::INT8
+            | PgType::FLOAT4
+            | PgType::FLOAT8
+            | PgType::NUMERIC
+            | PgType::DATE
+            | PgType::TIME
+            | PgType::TIMESTAMP
+            | PgType::TIMESTAMPTZ
+            | PgType::VARCHAR
+            | PgType::TEXT
+            | PgType::BYTEA
+            | PgType::UUID => None,
+            PgType::BPCHAR => Some(
+                "its blank-padding comparison semantics do not match RisingWave VARCHAR ordering",
+            ),
+            PgType::INTERVAL => Some("its cross-system ordering is not canonical"),
+            _ => Some(
+                "its decoded representation and upstream ordering are not proven identical to \
+                 RisingWave ordering",
+            ),
+        }
+    }
+
+    async fn validate_server_encoding(client: &tokio_postgres::Client) -> ConnectorResult<()> {
+        let encoding: String = client.query_one("SHOW server_encoding", &[]).await?.get(0);
+        Self::check_server_encoding(&encoding)
+    }
+
+    fn check_server_encoding(encoding: &str) -> ConnectorResult<()> {
+        if encoding.eq_ignore_ascii_case("UTF8") {
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!(
+                "PostgreSQL CDC TEXT/VARCHAR primary keys require server_encoding=UTF8 for \
+                 deterministic C/binary ordering, but the upstream server uses `{encoding}`"
+            )
+            .into())
+        }
+    }
+
+    /// Require an index that can satisfy every paginated snapshot query without rescanning and
+    /// sorting the remaining table. The explicit C-collated expressions cannot use a
+    /// locale-collated primary-key index, but a matching secondary index is sufficient.
+    async fn validate_cdc_ordering_index(
+        client: &tokio_postgres::Client,
+        table_name: &SchemaTableName,
+        primary_keys: &[String],
+        binary_collated_columns: &HashSet<String>,
+    ) -> ConnectorResult<()> {
+        let rows = client
+            .query(
+                "SELECT idx.indexrelid, a.attname, coll_ns.nspname, coll.collname, \
+                        (idx.indoption[key.pos] & 1::smallint) <> 0 AS descending, \
+                        opc.opcdefault \
+                 FROM pg_index idx \
+                 JOIN pg_class tbl ON tbl.oid = idx.indrelid \
+                 JOIN pg_namespace ns ON ns.oid = tbl.relnamespace \
+                 JOIN pg_class index_rel ON index_rel.oid = idx.indexrelid \
+                 JOIN pg_am am ON am.oid = index_rel.relam \
+                 JOIN LATERAL generate_subscripts(idx.indkey, 1) AS key(pos) ON TRUE \
+                 LEFT JOIN pg_attribute a ON a.attrelid = idx.indrelid \
+                   AND a.attnum = idx.indkey[key.pos] \
+                 JOIN pg_opclass opc ON opc.oid = idx.indclass[key.pos] \
+                 LEFT JOIN pg_collation coll \
+                   ON coll.oid = idx.indcollation[key.pos] \
+                 LEFT JOIN pg_namespace coll_ns ON coll_ns.oid = coll.collnamespace \
+                 WHERE ns.nspname = $1 AND tbl.relname = $2 \
+                   AND am.amname = 'btree' \
+                   AND idx.indisvalid AND idx.indisready AND idx.indislive \
+                   AND idx.indpred IS NULL \
+                   AND key.pos < array_lower(idx.indkey, 1) + idx.indnkeyatts \
+                 ORDER BY idx.indexrelid, key.pos",
+                &[&table_name.schema_name, &table_name.table_name],
+            )
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to validate PostgreSQL CDC ordering indexes for table {}",
+                    Self::get_normalized_table_name(table_name)
+                )
+            })?;
+
+        let mut indexes = HashMap::<u32, Vec<PostgresIndexKey>>::new();
+        for row in rows {
+            let index_oid: u32 = row.get(0);
+            indexes
+                .entry(index_oid)
+                .or_default()
+                .push(PostgresIndexKey {
+                    column_name: row.get(1),
+                    collation_schema: row.get(2),
+                    collation_name: row.get(3),
+                    descending: row.get(4),
+                    default_opclass: row.get(5),
+                });
+        }
+
+        if indexes.values().any(|index| {
+            Self::index_supports_cdc_ordering(index, primary_keys, binary_collated_columns)
+        }) {
+            return Ok(());
+        }
+
+        let table = Self::get_normalized_table_name(table_name);
+        let required_order =
+            Self::get_order_key_with_collation(primary_keys, binary_collated_columns);
+        Err(anyhow::anyhow!(
+            "PostgreSQL CDC TEXT/VARCHAR primary-key ordering requires a valid, ready, \
+             non-partial B-tree index whose leading keys are ({required_order}), but table \
+             {table} has no such index; create one before starting CDC, for example: \
+             CREATE INDEX ON {table} ({required_order})"
+        )
+        .into())
+    }
+
+    fn index_supports_cdc_ordering(
+        index: &[PostgresIndexKey],
+        primary_keys: &[String],
+        binary_collated_columns: &HashSet<String>,
+    ) -> bool {
+        let Some(index_prefix) = index.get(..primary_keys.len()) else {
+            return false;
+        };
+        let Some(first_key) = index_prefix.first() else {
+            return false;
+        };
+        index_prefix
+            .iter()
+            .zip_eq_fast(primary_keys)
+            .all(|(index_key, primary_key)| {
+                index_key.column_name.as_deref() == Some(primary_key)
+                    && index_key.default_opclass
+                    && index_key.descending == first_key.descending
+                    && (!binary_collated_columns.contains(primary_key)
+                        || (index_key.collation_schema.as_deref() == Some("pg_catalog")
+                            && index_key.collation_name.as_deref() == Some("C")))
+            })
+    }
+
     pub async fn new(
         config: ExternalTableConfig,
         rw_schema: Schema,
@@ -244,6 +465,26 @@ impl PostgresExternalTableReader {
         );
         // No TCP keepalive for CDC source
         let client = create_pg_client(&config.pg_connection_config()?, None).await?;
+        let pk_column_names = pk_indices
+            .iter()
+            .map(|index| rw_schema.fields[*index].name.clone())
+            .collect_vec();
+        let binary_collated_pk_columns = Self::discover_binary_collated_pk_columns(
+            &client,
+            &schema_table_name,
+            &pk_column_names,
+        )
+        .await?;
+        if !binary_collated_pk_columns.is_empty() {
+            Self::validate_server_encoding(&client).await?;
+            Self::validate_cdc_ordering_index(
+                &client,
+                &schema_table_name,
+                &pk_column_names,
+                &binary_collated_pk_columns,
+            )
+            .await?;
+        }
 
         // Discover user-defined composite columns and arrays of composites.
         // tokio-postgres cannot decode composite values natively, so for these
@@ -312,6 +553,7 @@ impl PostgresExternalTableReader {
             rw_schema,
             field_names,
             pk_indices,
+            binary_collated_pk_columns,
             client: tokio::sync::Mutex::new(client),
             schema_table_name,
         })
@@ -319,8 +561,9 @@ impl PostgresExternalTableReader {
 
     pub fn get_normalized_table_name(table_name: &SchemaTableName) -> String {
         format!(
-            "\"{}\".\"{}\"",
-            table_name.schema_name, table_name.table_name
+            "{}.{}",
+            Self::quote_column(&table_name.schema_name),
+            Self::quote_column(&table_name.table_name)
         )
     }
 
@@ -340,7 +583,7 @@ impl PostgresExternalTableReader {
         primary_keys: Vec<String>,
         scan_limit: u32,
     ) {
-        let order_key = Self::get_order_key(&primary_keys);
+        let order_key = self.get_order_key(&primary_keys);
         let client = self.client.lock().await;
         client.execute("set time zone '+00:00'", &[]).await?;
 
@@ -355,12 +598,12 @@ impl PostgresExternalTableReader {
                         .map(|i| self.rw_schema.fields[*i].name.clone())
                         .collect_vec();
 
-                    let order_key = Self::get_order_key(&primary_keys);
+                    let order_key = self.get_order_key(&primary_keys);
                     let scan_sql = format!(
                         "SELECT {} FROM {} WHERE {} ORDER BY {} LIMIT {scan_limit}",
                         self.field_names,
                         Self::get_normalized_table_name(&table_name),
-                        Self::filter_expression(&primary_keys),
+                        self.filter_expression(&primary_keys),
                         order_key,
                     );
                     client.prepare(&scan_sql).await?
@@ -405,7 +648,14 @@ impl PostgresExternalTableReader {
     }
 
     // row filter expression: (v1, v2, v3) > ($1, $2, $3)
-    fn filter_expression(columns: &[String]) -> String {
+    fn filter_expression(&self, columns: &[String]) -> String {
+        Self::filter_expression_with_collation(columns, &self.binary_collated_pk_columns)
+    }
+
+    fn filter_expression_with_collation(
+        columns: &[String],
+        binary_collated_columns: &HashSet<String>,
+    ) -> String {
         let mut col_expr = String::new();
         let mut arg_expr = String::new();
         for (i, column) in columns.iter().enumerate() {
@@ -413,7 +663,10 @@ impl PostgresExternalTableReader {
                 col_expr.push_str(", ");
                 arg_expr.push_str(", ");
             }
-            col_expr.push_str(&Self::quote_column(column));
+            col_expr.push_str(&Self::ordering_column_expression_with_collation(
+                column,
+                binary_collated_columns,
+            ));
             arg_expr.push_str(format!("${}", i + 1).as_str());
         }
         format!("({}) > ({})", col_expr, arg_expr)
@@ -421,9 +674,24 @@ impl PostgresExternalTableReader {
 
     // row filter expression: (v1, v2, v3) >= ($1, $2, $3) AND (v1, v2, v3) < ($1, $2, $3)
     fn split_filter_expression(
+        &self,
         columns: &[String],
         is_first_split: bool,
         is_last_split: bool,
+    ) -> String {
+        Self::split_filter_expression_with_collation(
+            columns,
+            is_first_split,
+            is_last_split,
+            &self.binary_collated_pk_columns,
+        )
+    }
+
+    fn split_filter_expression_with_collation(
+        columns: &[String],
+        is_first_split: bool,
+        is_last_split: bool,
+        binary_collated_columns: &HashSet<String>,
     ) -> String {
         let mut left_col_expr = String::new();
         let mut left_arg_expr = String::new();
@@ -436,7 +704,10 @@ impl PostgresExternalTableReader {
                     left_col_expr.push_str(", ");
                     left_arg_expr.push_str(", ");
                 }
-                left_col_expr.push_str(&Self::quote_column(column));
+                left_col_expr.push_str(&Self::ordering_column_expression_with_collation(
+                    column,
+                    binary_collated_columns,
+                ));
                 left_arg_expr.push_str(format!("${}", c).as_str());
                 c += 1;
             }
@@ -447,7 +718,10 @@ impl PostgresExternalTableReader {
                     right_col_expr.push_str(", ");
                     right_arg_expr.push_str(", ");
                 }
-                right_col_expr.push_str(&Self::quote_column(column));
+                right_col_expr.push_str(&Self::ordering_column_expression_with_collation(
+                    column,
+                    binary_collated_columns,
+                ));
                 right_arg_expr.push_str(format!("${}", c).as_str());
                 c += 1;
             }
@@ -466,25 +740,51 @@ impl PostgresExternalTableReader {
         }
     }
 
-    fn get_order_key(primary_keys: &Vec<String>) -> String {
+    fn get_order_key(&self, primary_keys: &[String]) -> String {
+        Self::get_order_key_with_collation(primary_keys, &self.binary_collated_pk_columns)
+    }
+
+    fn get_order_key_with_collation(
+        primary_keys: &[String],
+        binary_collated_columns: &HashSet<String>,
+    ) -> String {
         primary_keys
             .iter()
-            .map(|col| Self::quote_column(col))
+            .map(|column| {
+                Self::ordering_column_expression_with_collation(column, binary_collated_columns)
+            })
             .join(",")
     }
 
     fn quote_column(column: &str) -> String {
-        format!("\"{}\"", column)
+        format!("\"{}\"", column.replace('"', "\"\""))
+    }
+
+    fn ordering_column_expression(&self, column: &str) -> String {
+        Self::ordering_column_expression_with_collation(column, &self.binary_collated_pk_columns)
+    }
+
+    fn ordering_column_expression_with_collation(
+        column: &str,
+        binary_collated_columns: &HashSet<String>,
+    ) -> String {
+        let quoted = Self::quote_column(column);
+        if binary_collated_columns.contains(column) {
+            format!("{quoted} COLLATE pg_catalog.\"C\"")
+        } else {
+            quoted
+        }
     }
 
     async fn min_and_max(
         &self,
         split_column: &Field,
     ) -> ConnectorResult<Option<(ScalarImpl, ScalarImpl)>> {
+        let split_column_expr = self.ordering_column_expression(&split_column.name);
         let sql = format!(
             "SELECT MIN({}), MAX({}) FROM {}",
-            split_column.name,
-            split_column.name,
+            split_column_expr,
+            split_column_expr,
             Self::get_normalized_table_name(&self.schema_table_name),
         );
         let client = self.client.lock().await;
@@ -519,15 +819,16 @@ impl PostgresExternalTableReader {
         max_split_size: u64,
         split_column: &Field,
     ) -> ConnectorResult<Option<Datum>> {
+        let split_column_expr = self.ordering_column_expression(&split_column.name);
         let sql = format!(
             "WITH t as (SELECT {} FROM {} WHERE {} >= $1 ORDER BY {} ASC LIMIT {}) SELECT CASE WHEN MAX({}) < $2 THEN MAX({}) ELSE NULL END FROM t",
             Self::quote_column(&split_column.name),
             Self::get_normalized_table_name(&self.schema_table_name),
-            Self::quote_column(&split_column.name),
-            Self::quote_column(&split_column.name),
+            split_column_expr,
+            split_column_expr,
             max_split_size,
-            Self::quote_column(&split_column.name),
-            Self::quote_column(&split_column.name),
+            split_column_expr,
+            split_column_expr,
         );
         let client = self.client.lock().await;
         let prepared_stmt = client.prepare(&sql).await?;
@@ -566,12 +867,13 @@ impl PostgresExternalTableReader {
         max_value: &ScalarImpl,
         split_column: &Field,
     ) -> ConnectorResult<Option<Datum>> {
+        let split_column_expr = self.ordering_column_expression(&split_column.name);
         let sql = format!(
             "SELECT MIN({}) FROM {} WHERE {} > $1 AND {} <$2",
-            Self::quote_column(&split_column.name),
+            split_column_expr,
             Self::get_normalized_table_name(&self.schema_table_name),
-            Self::quote_column(&split_column.name),
-            Self::quote_column(&split_column.name),
+            split_column_expr,
+            split_column_expr,
         );
         let client = self.client.lock().await;
         let prepared_stmt = client.prepare(&sql).await?;
@@ -631,11 +933,17 @@ impl PostgresExternalTableReader {
         // prepare the scan statement, since we may need to convert the RW data type to postgres data type
         // e.g. varchar to uuid
         let prepared_scan_stmt = {
+            let primary_keys = self
+                .pk_indices
+                .iter()
+                .map(|index| self.rw_schema.fields[*index].name.clone())
+                .collect_vec();
             let scan_sql = format!(
-                "SELECT {} FROM {} WHERE {}",
+                "SELECT {} FROM {} WHERE {} ORDER BY {}",
                 self.field_names,
                 Self::get_normalized_table_name(&table_name),
-                Self::split_filter_expression(&split_column_names, is_first_split, is_last_split),
+                self.split_filter_expression(&split_column_names, is_first_split, is_last_split),
+                self.get_order_key(&primary_keys),
             );
             client.prepare(&scan_sql).await?
         };
@@ -974,7 +1282,7 @@ pub fn pg_type_to_rw_type(pg_type: &PgType) -> ConnectorResult<DataType> {
 #[cfg(test)]
 mod tests {
     use std::cmp::Ordering;
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
 
     use futures::pin_mut;
     use futures_async_stream::for_await;
@@ -982,9 +1290,12 @@ mod tests {
     use risingwave_common::catalog::{ColumnDesc, ColumnId, Field, Schema};
     use risingwave_common::row::OwnedRow;
     use risingwave_common::types::{DataType, ScalarImpl};
+    use tokio_postgres::types::Type as PgType;
 
     use crate::connector_common::PostgresExternalTable;
-    use crate::source::cdc::external::postgres::{PostgresExternalTableReader, PostgresOffset};
+    use crate::source::cdc::external::postgres::{
+        PostgresExternalTableReader, PostgresIndexKey, PostgresOffset,
+    };
     use crate::source::cdc::external::{ExternalTableConfig, ExternalTableReader, SchemaTableName};
 
     #[ignore]
@@ -1177,33 +1488,238 @@ mod tests {
 
     #[test]
     fn test_filter_expression() {
+        let no_binary_columns = HashSet::new();
         let cols = vec!["v1".to_owned()];
-        let expr = PostgresExternalTableReader::filter_expression(&cols);
+        let expr = PostgresExternalTableReader::filter_expression_with_collation(
+            &cols,
+            &no_binary_columns,
+        );
         assert_eq!(expr, "(\"v1\") > ($1)");
 
         let cols = vec!["v1".to_owned(), "v2".to_owned()];
-        let expr = PostgresExternalTableReader::filter_expression(&cols);
+        let expr = PostgresExternalTableReader::filter_expression_with_collation(
+            &cols,
+            &no_binary_columns,
+        );
         assert_eq!(expr, "(\"v1\", \"v2\") > ($1, $2)");
 
-        let cols = vec!["v1".to_owned(), "v2".to_owned(), "v3".to_owned()];
-        let expr = PostgresExternalTableReader::filter_expression(&cols);
-        assert_eq!(expr, "(\"v1\", \"v2\", \"v3\") > ($1, $2, $3)");
+        let binary_columns = HashSet::from(["v1".to_owned(), "v3".to_owned()]);
+        let cols = vec![
+            "v1".to_owned(),
+            "v2".to_owned(),
+            "quote\"inside".to_owned(),
+            "v3".to_owned(),
+        ];
+        let expr =
+            PostgresExternalTableReader::filter_expression_with_collation(&cols, &binary_columns);
+        assert_eq!(
+            expr,
+            "(\"v1\" COLLATE pg_catalog.\"C\", \"v2\", \"quote\"\"inside\", \"v3\" COLLATE \
+             pg_catalog.\"C\") > \
+             ($1, $2, $3, $4)"
+        );
     }
 
     #[test]
     fn test_split_filter_expression() {
+        let binary_columns = HashSet::from(["v1".to_owned()]);
         let cols = vec!["v1".to_owned()];
-        let expr = PostgresExternalTableReader::split_filter_expression(&cols, true, true);
+        let expr = PostgresExternalTableReader::split_filter_expression_with_collation(
+            &cols,
+            true,
+            true,
+            &binary_columns,
+        );
         assert_eq!(expr, "1 = 1");
 
-        let expr = PostgresExternalTableReader::split_filter_expression(&cols, true, false);
-        assert_eq!(expr, "(\"v1\") < ($1)");
+        let expr = PostgresExternalTableReader::split_filter_expression_with_collation(
+            &cols,
+            true,
+            false,
+            &binary_columns,
+        );
+        assert_eq!(expr, "(\"v1\" COLLATE pg_catalog.\"C\") < ($1)");
 
-        let expr = PostgresExternalTableReader::split_filter_expression(&cols, false, true);
-        assert_eq!(expr, "(\"v1\") >= ($1)");
+        let expr = PostgresExternalTableReader::split_filter_expression_with_collation(
+            &cols,
+            false,
+            true,
+            &binary_columns,
+        );
+        assert_eq!(expr, "(\"v1\" COLLATE pg_catalog.\"C\") >= ($1)");
 
-        let expr = PostgresExternalTableReader::split_filter_expression(&cols, false, false);
-        assert_eq!(expr, "(\"v1\") >= ($1) AND (\"v1\") < ($2)");
+        let expr = PostgresExternalTableReader::split_filter_expression_with_collation(
+            &cols,
+            false,
+            false,
+            &binary_columns,
+        );
+        assert_eq!(
+            expr,
+            "(\"v1\" COLLATE pg_catalog.\"C\") >= ($1) AND (\"v1\" COLLATE \
+             pg_catalog.\"C\") < ($2)"
+        );
+    }
+
+    #[test]
+    fn test_text_pk_order_key_uses_binary_collation() {
+        let cols = vec!["v1".to_owned(), "v2".to_owned(), "v3".to_owned()];
+        let binary_columns = HashSet::from(["v1".to_owned(), "v3".to_owned()]);
+        assert_eq!(
+            PostgresExternalTableReader::get_order_key_with_collation(&cols, &binary_columns),
+            "\"v1\" COLLATE pg_catalog.\"C\",\"v2\",\"v3\" COLLATE pg_catalog.\"C\""
+        );
+    }
+
+    #[test]
+    fn test_postgres_cdc_ordering_index_policy() {
+        fn key(
+            column_name: Option<&str>,
+            collation: Option<(&str, &str)>,
+            descending: bool,
+            default_opclass: bool,
+        ) -> PostgresIndexKey {
+            PostgresIndexKey {
+                column_name: column_name.map(str::to_owned),
+                collation_schema: collation.map(|(schema, _)| schema.to_owned()),
+                collation_name: collation.map(|(_, name)| name.to_owned()),
+                descending,
+                default_opclass,
+            }
+        }
+
+        let primary_keys = vec!["tenant_id".to_owned(), "id".to_owned()];
+        let binary_columns = HashSet::from(["id".to_owned()]);
+        let compatible = vec![
+            key(Some("tenant_id"), None, false, true),
+            key(Some("id"), Some(("pg_catalog", "C")), false, true),
+        ];
+        assert!(PostgresExternalTableReader::index_supports_cdc_ordering(
+            &compatible,
+            &primary_keys,
+            &binary_columns,
+        ));
+
+        let mut locale_collated = compatible.clone();
+        locale_collated[1].collation_name = Some("en-x-icu".to_owned());
+        assert!(!PostgresExternalTableReader::index_supports_cdc_ordering(
+            &locale_collated,
+            &primary_keys,
+            &binary_columns,
+        ));
+        assert!(!PostgresExternalTableReader::index_supports_cdc_ordering(
+            &compatible[..1],
+            &primary_keys,
+            &binary_columns,
+        ));
+
+        let mixed_direction = vec![
+            key(Some("tenant_id"), None, false, true),
+            key(Some("id"), Some(("pg_catalog", "C")), true, true),
+        ];
+        assert!(!PostgresExternalTableReader::index_supports_cdc_ordering(
+            &mixed_direction,
+            &primary_keys,
+            &binary_columns,
+        ));
+        let all_descending = vec![
+            key(Some("tenant_id"), None, true, true),
+            key(Some("id"), Some(("pg_catalog", "C")), true, true),
+        ];
+        assert!(PostgresExternalTableReader::index_supports_cdc_ordering(
+            &all_descending,
+            &primary_keys,
+            &binary_columns,
+        ));
+
+        let non_default_opclass = vec![
+            key(Some("tenant_id"), None, false, true),
+            key(Some("id"), Some(("pg_catalog", "C")), false, false),
+        ];
+        assert!(!PostgresExternalTableReader::index_supports_cdc_ordering(
+            &non_default_opclass,
+            &primary_keys,
+            &binary_columns,
+        ));
+        let expression_key = vec![
+            key(Some("tenant_id"), None, false, true),
+            key(None, Some(("pg_catalog", "C")), false, true),
+        ];
+        assert!(!PostgresExternalTableReader::index_supports_cdc_ordering(
+            &expression_key,
+            &primary_keys,
+            &binary_columns,
+        ));
+    }
+
+    #[test]
+    fn test_text_pk_requires_utf8_server_encoding() {
+        assert!(PostgresExternalTableReader::check_server_encoding("UTF8").is_ok());
+        assert!(PostgresExternalTableReader::check_server_encoding("utf8").is_ok());
+        let error = PostgresExternalTableReader::check_server_encoding("LATIN1").unwrap_err();
+        assert!(error.to_string().contains("server_encoding=UTF8"));
+    }
+
+    #[test]
+    fn test_postgres_pk_type_policy_is_allowlist() {
+        assert!(PostgresExternalTableReader::is_binary_collated_pk_type(
+            &PgType::TEXT
+        ));
+        assert!(PostgresExternalTableReader::is_binary_collated_pk_type(
+            &PgType::VARCHAR
+        ));
+        assert!(!PostgresExternalTableReader::is_binary_collated_pk_type(
+            &PgType::BPCHAR
+        ));
+
+        for pg_type in [
+            &PgType::BOOL,
+            &PgType::INT2,
+            &PgType::INT4,
+            &PgType::INT8,
+            &PgType::FLOAT4,
+            &PgType::FLOAT8,
+            &PgType::NUMERIC,
+            &PgType::DATE,
+            &PgType::TIME,
+            &PgType::TIMESTAMP,
+            &PgType::TIMESTAMPTZ,
+            &PgType::VARCHAR,
+            &PgType::TEXT,
+            &PgType::BYTEA,
+            &PgType::UUID,
+        ] {
+            assert!(
+                PostgresExternalTableReader::unsupported_pk_type_reason(pg_type).is_none(),
+                "{} should be accepted",
+                pg_type
+            );
+        }
+        for pg_type in [
+            &PgType::BPCHAR,
+            &PgType::INTERVAL,
+            &PgType::JSONB,
+            &PgType::INT4_ARRAY,
+            &PgType::TIMETZ,
+            &PgType::MONEY,
+        ] {
+            assert!(
+                PostgresExternalTableReader::unsupported_pk_type_reason(pg_type).is_some(),
+                "{} should be rejected",
+                pg_type
+            );
+        }
+
+        assert!(
+            PostgresExternalTableReader::resolve_builtin_pk_type("v1", PgType::TEXT.oid()).is_ok()
+        );
+        let error =
+            PostgresExternalTableReader::resolve_builtin_pk_type("v1", u32::MAX).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("user-defined, domain, or extension")
+        );
     }
 
     // manual test

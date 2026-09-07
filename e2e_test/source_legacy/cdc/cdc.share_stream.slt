@@ -383,6 +383,20 @@ psql -c "
 CREATE SCHEMA parallelized_cdc;
 CREATE TABLE parallelized_cdc.parallelized_cdc_backfill_test (id INT PRIMARY KEY, name VARCHAR);
 insert into parallelized_cdc.parallelized_cdc_backfill_test values (1,11),(2,22),(3,33),(4,44),(5,55),(6,66),(7,77),(8,88),(9,99),(10,1010),(11,1111),(15,1515);
+CREATE TABLE parallelized_cdc.text_pk_binary_ordering_test (
+    id TEXT COLLATE \"en-x-icu\",
+    seq INT,
+    payload TEXT,
+    PRIMARY KEY (id, seq)
+);
+CREATE INDEX ON parallelized_cdc.text_pk_binary_ordering_test
+    (id COLLATE \"C\", seq);
+INSERT INTO parallelized_cdc.text_pk_binary_ordering_test VALUES
+    ('B', 1, 'uppercase'),
+    ('a', 2, 'lowercase'),
+    ('z', 3, 'ascii'),
+    ('é', 4, 'precomposed'),
+    ('中', 5, 'cjk');
 "
 
 statement ok
@@ -435,6 +449,53 @@ query II retry 15 backoff 1s
 SELECT COUNT(*) FROM pg_parallelized_cdc_backfill_test_table_2
 ----
 23
+
+# A locale-aware PostgreSQL PK order differs from RisingWave's UTF-8 byte order.
+# Serial pagination and parallel split generation/scans must nevertheless use the
+# explicit C/binary contract.
+statement ok
+CREATE TABLE pg_text_pk_binary_ordering_serial (
+    id TEXT,
+    seq INT,
+    payload TEXT,
+    PRIMARY KEY (id, seq)
+)
+WITH (
+    snapshot.batch_size='2'
+)
+FROM pg_source TABLE 'parallelized_cdc.text_pk_binary_ordering_test';
+
+statement ok
+CREATE TABLE pg_text_pk_binary_ordering_parallel (
+    id TEXT,
+    seq INT,
+    payload TEXT,
+    PRIMARY KEY (id, seq)
+)
+WITH (
+    backfill.num_rows_per_split='2',
+    backfill.parallelism='3',
+    backfill.as_even_splits='false'
+)
+FROM pg_source TABLE 'parallelized_cdc.text_pk_binary_ordering_test';
+
+query TIT retry 15 backoff 1s
+SELECT id, seq, payload FROM pg_text_pk_binary_ordering_serial ORDER BY id, seq;
+----
+B 1 uppercase
+a 2 lowercase
+z 3 ascii
+é 4 precomposed
+中 5 cjk
+
+query TIT retry 15 backoff 1s
+SELECT id, seq, payload FROM pg_text_pk_binary_ordering_parallel ORDER BY id, seq;
+----
+B 1 uppercase
+a 2 lowercase
+z 3 ascii
+é 4 precomposed
+中 5 cjk
 
 # test postgres backfill data types
 statement ok

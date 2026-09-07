@@ -350,13 +350,34 @@ pub(crate) fn cmp_pk_unsigned_aware<'a>(
             }
             // Signed column, NULL, up-cast unsigned integer, or non-integer unsigned column:
             // the original comparison is already correct.
-            _ => cmp_datum(l, r, *order),
+            _ => cmp_cdc_datum(l, r, *order),
         };
         if ord != Ordering::Equal {
             return ord;
         }
     }
     Ordering::Equal
+}
+
+/// Compare CDC key datums using RisingWave's canonical cross-system ordering.
+///
+/// PostgreSQL exact `TEXT`/`VARCHAR` snapshot queries use `COLLATE pg_catalog."C"`. With
+/// `server_encoding=UTF8`, that is a bytewise comparison of the same UTF-8 bytes
+/// held by [`ScalarRefImpl::Utf8`]. Keep the byte comparison explicit here so
+/// current-position filtering and snapshot/CDC diff merging cannot accidentally
+/// inherit locale-aware string semantics.
+pub(crate) fn cmp_cdc_datum(lhs: DatumRef<'_>, rhs: DatumRef<'_>, order: OrderType) -> Ordering {
+    match (lhs, rhs) {
+        (Some(ScalarRefImpl::Utf8(lhs)), Some(ScalarRefImpl::Utf8(rhs))) => {
+            let ordering = lhs.as_bytes().cmp(rhs.as_bytes());
+            if order.is_descending() {
+                ordering.reverse()
+            } else {
+                ordering
+            }
+        }
+        _ => cmp_datum(lhs, rhs, order),
+    }
 }
 
 /// Mark chunk:
@@ -909,6 +930,35 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
+
+    #[test]
+    fn test_cdc_varchar_comparison_is_utf8_binary() {
+        let values = ["", "A", "a", "aa", "z", "é", "中", "😀"];
+        for pair in values.windows(2) {
+            let lhs = Some(ScalarRefImpl::Utf8(pair[0]));
+            let rhs = Some(ScalarRefImpl::Utf8(pair[1]));
+            assert_eq!(
+                cmp_cdc_datum(lhs, rhs, OrderType::ascending()),
+                pair[0].as_bytes().cmp(pair[1].as_bytes())
+            );
+            assert_eq!(
+                cmp_cdc_datum(lhs, rhs, OrderType::descending()),
+                pair[0].as_bytes().cmp(pair[1].as_bytes()).reverse()
+            );
+        }
+
+        // Canonically equivalent Unicode strings remain distinct under the C/binary contract.
+        let decomposed = "e\u{301}";
+        let precomposed = "é";
+        assert_eq!(
+            cmp_cdc_datum(
+                Some(ScalarRefImpl::Utf8(decomposed)),
+                Some(ScalarRefImpl::Utf8(precomposed)),
+                OrderType::ascending(),
+            ),
+            decomposed.as_bytes().cmp(precomposed.as_bytes())
+        );
+    }
 
     #[test]
     fn test_normalizing_unmatched_updates() {

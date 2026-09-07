@@ -456,9 +456,17 @@ pub struct MySqlExternalTableReader {
     pk_indices: Vec<usize>,
     field_names: String,
     pool: mysql_async::Pool,
-    upstream_mysql_pk_infos: Vec<(String, ColumnType)>, // (column_name, column_type)
+    upstream_mysql_pk_infos: Vec<MySqlPkInfo>,
     mysql_version: (u8, u8),
     is_mariadb: bool,
+}
+
+#[derive(Debug)]
+struct MySqlPkInfo {
+    column_name: String,
+    column_type: ColumnType,
+    character_set_name: Option<String>,
+    collation_name: Option<String>,
 }
 
 impl ExternalTableReader for MySqlExternalTableReader {
@@ -579,6 +587,7 @@ impl MySqlExternalTableReader {
             Self::query_upstream_pk_infos(&pool, &database, &table).await?;
         // Get MySQL version
         let (major_version, minor_version, is_mariadb) = Self::get_mysql_version(&pool).await?;
+        Self::validate_pk_ordering(&upstream_mysql_pk_infos, is_mariadb)?;
         let mysql_version = (major_version, minor_version);
         tracing::info!(
             "MySQL version detected: {}.{} (is_mariadb={})",
@@ -616,12 +625,12 @@ impl MySqlExternalTableReader {
         pool: &mysql_async::Pool,
         database: &str,
         table: &str,
-    ) -> ConnectorResult<Vec<(String, ColumnType)>> {
+    ) -> ConnectorResult<Vec<MySqlPkInfo>> {
         let mut conn = pool.get_conn().await?;
 
         // Query primary key columns and their data types
         let sql = format!(
-            "SELECT COLUMN_NAME, COLUMN_TYPE
+            "SELECT COLUMN_NAME, COLUMN_TYPE, CHARACTER_SET_NAME, COLLATION_NAME
             FROM INFORMATION_SCHEMA.COLUMNS
             WHERE TABLE_SCHEMA = '{}'
             AND TABLE_NAME = '{}'
@@ -638,12 +647,103 @@ impl MySqlExternalTableReader {
             let column_type: String = row.get(1).unwrap();
             let column_type =
                 type_name_to_mysql_type(&column_type).unwrap_or(ColumnType::Unknown(column_type));
-            column_infos.push((column_name, column_type));
+            column_infos.push(MySqlPkInfo {
+                column_name,
+                column_type,
+                character_set_name: row.get(2),
+                collation_name: row.get(3),
+            });
         }
 
         drop(conn);
 
         Ok(column_infos)
+    }
+
+    fn validate_pk_ordering(primary_keys: &[MySqlPkInfo], is_mariadb: bool) -> ConnectorResult<()> {
+        for primary_key in primary_keys {
+            if let Some(reason) = Self::unsupported_pk_ordering_reason(
+                &primary_key.column_type,
+                primary_key.character_set_name.as_deref(),
+                primary_key.collation_name.as_deref(),
+                is_mariadb,
+            ) {
+                return Err(anyhow!(
+                    "MySQL CDC primary-key column `{}` has type {:?}, which \
+                     is not supported because {reason}",
+                    primary_key.column_name,
+                    primary_key.column_type,
+                )
+                .into());
+            }
+        }
+        Ok(())
+    }
+
+    fn unsupported_pk_ordering_reason(
+        column_type: &ColumnType,
+        character_set_name: Option<&str>,
+        collation_name: Option<&str>,
+        is_mariadb: bool,
+    ) -> Option<String> {
+        match column_type {
+            ColumnType::Char(_)
+            | ColumnType::NChar(_)
+            | ColumnType::Varchar(_)
+            | ColumnType::NVarchar(_)
+            | ColumnType::Text(_)
+            | ColumnType::TinyText(_)
+            | ColumnType::MediumText(_)
+            | ColumnType::LongText(_) => {
+                if Self::mysql_text_order_matches_rw(character_set_name, collation_name, is_mariadb)
+                {
+                    None
+                } else {
+                    Some(format!(
+                        "its character set/collation `{}`/`{}` is not proven equivalent to \
+                         RisingWave UTF-8 byte ordering; use `utf8mb4_0900_bin` on MySQL or a \
+                         UTF-8 `*_nopad_bin` collation on MariaDB",
+                        character_set_name.unwrap_or("unknown"),
+                        collation_name.unwrap_or("unknown"),
+                    ))
+                }
+            }
+            ColumnType::Enum(_) => Some(
+                "MySQL orders ENUM values by declaration index while RisingWave orders their \
+                 decoded strings by UTF-8 bytes"
+                    .to_owned(),
+            ),
+            ColumnType::Unknown(_) => {
+                Some("its decoded representation and upstream ordering are not proven".to_owned())
+            }
+            _ => None,
+        }
+    }
+
+    /// MySQL's `utf8mb4_0900_bin` and `MariaDB`'s UTF-8 `*_nopad_bin`
+    /// collations compare every character by its Unicode/UTF-8 value and keep
+    /// trailing spaces significant, matching RisingWave's UTF-8 byte ordering.
+    fn mysql_text_order_matches_rw(
+        character_set_name: Option<&str>,
+        collation_name: Option<&str>,
+        is_mariadb: bool,
+    ) -> bool {
+        let Some(character_set_name) = character_set_name else {
+            return false;
+        };
+        let Some(collation_name) = collation_name else {
+            return false;
+        };
+        if !matches!(
+            character_set_name.to_ascii_lowercase().as_str(),
+            "utf8mb4" | "utf8mb3" | "utf8"
+        ) {
+            return false;
+        }
+
+        let collation_name = collation_name.to_ascii_lowercase();
+        collation_name.ends_with("_nopad_bin")
+            || (!is_mariadb && collation_name == "utf8mb4_0900_bin")
     }
 
     /// Check whether a column is `BIGINT UNSIGNED`.
@@ -655,8 +755,8 @@ impl MySqlExternalTableReader {
     fn needs_unsigned_i64_compare(&self, column_name: &str) -> ConnectorResult<bool> {
         self.upstream_mysql_pk_infos
             .iter()
-            .find(|(col_name, _)| col_name.eq_ignore_ascii_case(column_name))
-            .map(|(_, col_type)| mysql_type_is_unsigned_bigint(col_type))
+            .find(|info| info.column_name.eq_ignore_ascii_case(column_name))
+            .map(|info| mysql_type_is_unsigned_bigint(&info.column_type))
             .ok_or_else(|| {
                 anyhow!(
                     "primary key column `{column_name}` not found in upstream MySQL primary key info"
@@ -1023,6 +1123,74 @@ mod tests {
         assert_eq!(
             expr,
             "(`aa` > :aa) OR ((`aa` = :aa) AND (`bb` > :bb)) OR ((`aa` = :aa) AND (`bb` = :bb) AND (`cc` > :cc))"
+        );
+    }
+
+    #[test]
+    fn test_mysql_text_pk_ordering_checks_charset_collation_and_padding() {
+        let varchar = ColumnType::Varchar(Default::default());
+        assert!(
+            MySqlExternalTableReader::unsupported_pk_ordering_reason(
+                &varchar,
+                Some("utf8mb4"),
+                Some("utf8mb4_0900_bin"),
+                false,
+            )
+            .is_none()
+        );
+        assert!(
+            MySqlExternalTableReader::unsupported_pk_ordering_reason(
+                &varchar,
+                Some("utf8mb4"),
+                Some("utf8mb4_nopad_bin"),
+                true,
+            )
+            .is_none()
+        );
+        for (character_set, collation, is_mariadb) in [
+            (Some("utf8mb4"), Some("utf8mb4_0900_ai_ci"), false),
+            (Some("utf8mb4"), Some("utf8mb4_bin"), false),
+            (Some("utf8mb4"), Some("utf8mb4_0900_bin"), true),
+            (Some("latin1"), Some("latin1_bin"), false),
+            (None, None, false),
+        ] {
+            assert!(
+                MySqlExternalTableReader::unsupported_pk_ordering_reason(
+                    &varchar,
+                    character_set,
+                    collation,
+                    is_mariadb,
+                )
+                .is_some(),
+                "{character_set:?}/{collation:?}/mariadb={is_mariadb}"
+            );
+        }
+        assert!(
+            MySqlExternalTableReader::unsupported_pk_ordering_reason(
+                &ColumnType::Enum(Default::default()),
+                Some("utf8mb4"),
+                Some("utf8mb4_0900_bin"),
+                false,
+            )
+            .is_some()
+        );
+        assert!(
+            MySqlExternalTableReader::unsupported_pk_ordering_reason(
+                &ColumnType::Int(Default::default()),
+                None,
+                None,
+                false,
+            )
+            .is_none()
+        );
+        assert!(
+            MySqlExternalTableReader::unsupported_pk_ordering_reason(
+                &ColumnType::Varbinary(Default::default()),
+                None,
+                None,
+                false,
+            )
+            .is_none()
         );
     }
 
