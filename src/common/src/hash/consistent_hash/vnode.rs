@@ -277,4 +277,43 @@ mod tests {
             ]
         );
     }
+
+    #[track_caller]
+    fn assert_vnode(t: &DataType, s: &str, vnode: expect_test::Expect) {
+        let scalar = ScalarImpl::from_text(s, t).unwrap();
+        let row = OwnedRow::new(vec![Some(scalar)]);
+        let actual = VirtualNode::compute_row_for_test(row, &[0]);
+        vnode.assert_eq(&actual.to_string());
+    }
+
+    #[test]
+    fn test_row_hash_backward_compat() {
+        use DataType as T;
+        // See #25336
+        // The expected value is pre-computed by earlier versions of RisingWave and is persisted by storage.
+        // Hash implementations that output different values are thus backward incompatible.
+        assert_vnode(&T::Boolean, "true", expect_test::expect!["27"]);
+        assert_vnode(&T::Boolean, "false", expect_test::expect!["141"]);
+        assert_vnode(&T::Int16, "1", expect_test::expect!["190"]);
+        assert_vnode(&T::Int32, "1", expect_test::expect!["121"]);
+        assert_vnode(&T::Int64, "1", expect_test::expect!["247"]);
+        assert_vnode(&T::Varchar, "abc", expect_test::expect!["221"]);
+        assert_vnode(&T::Bytea, r#"\x616263"#, expect_test::expect!["61"]);
+        assert_vnode(&T::Date, "2006-01-02", expect_test::expect!["136"]);
+        assert_vnode(&T::Time, "15:04:05", expect_test::expect!["180"]);
+        assert_vnode(&T::Timestamp, "2006-01-02 15:04:05", expect_test::expect!["132"]);
+        assert_vnode(&T::Timestamptz, "2006-01-02 15:04:05+00:00", expect_test::expect!["255"]);
+
+        assert_vnode(&T::Jsonb, r#"{"a":"b"}"#, expect_test::expect!["201"]);
+        assert_vnode(&T::Interval, "12:34:56", expect_test::expect!["207"]);
+        assert_vnode(&T::Decimal, "1.2", expect_test::expect!["142"]);
+        assert_vnode(&T::Float32, "NaN", expect_test::expect!["113"]);
+        assert_vnode(&T::Float64, "Infinity", expect_test::expect!["128"]);
+        assert_vnode(&T::Vector(3), "[1,2,3]", expect_test::expect!["52"]);
+        // assert_vnode(&T::Struct(), "1", expect_test::expect!["27"]);
+        // assert_vnode(&T::List(), "1", expect_test::expect!["27"]);
+        // assert_vnode(&T::Map(), "1", expect_test::expect!["27"]);
+        assert_vnode(&T::Serial, "1", expect_test::expect!["0"]);
+        assert_vnode(&T::Int256, "1", expect_test::expect!["212"]);
+    }
 }
