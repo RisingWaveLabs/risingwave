@@ -14,11 +14,33 @@
 
 use pgwire::pg_response::{PgResponse, StatementType};
 use risingwave_pb::catalog::PbComment;
+use risingwave_pb::common::ObjectType;
 use risingwave_sqlparser::ast::{CommentObject, ObjectName};
 
 use super::{HandlerArgs, RwPgResponse};
 use crate::Binder;
+use crate::catalog::table_catalog::TableType;
 use crate::error::{ErrorCode, Result};
+
+/// Builds a comment request using the current object-based wire format.
+///
+/// Deprecated table-specific fields are deliberately left unset. Mixed-version `COMMENT ON`
+/// requests may fail during a rolling upgrade, but they cannot be misinterpreted as another object
+/// type or column.
+fn build_comment(
+    object_id: u32,
+    object_type: ObjectType,
+    column_index: Option<u32>,
+    description: Option<String>,
+) -> PbComment {
+    PbComment {
+        column_index,
+        description,
+        object_id,
+        object_type: object_type as i32,
+        ..Default::default()
+    }
+}
 
 pub async fn handle_comment(
     handler_args: HandlerArgs,
@@ -31,7 +53,6 @@ pub async fn handle_comment(
 
     let comment = {
         let mut binder = Binder::new_for_ddl(&session);
-        // only `Column` and `Table` object are now supported
         match object_type {
             CommentObject::Column => {
                 let [tab @ .., col] = object_name.0.as_slice() else {
@@ -41,15 +62,31 @@ pub async fn handle_comment(
                     ))
                     .into());
                 };
+                if tab.is_empty() {
+                    return Err(ErrorCode::BindError(format!(
+                        "Invalid column: {}",
+                        object_name.real_value()
+                    ))
+                    .into());
+                }
 
                 let (schema, table) = Binder::resolve_schema_qualified_name(
                     &session.database(),
                     &ObjectName(tab.to_vec()),
                 )?;
 
-                let (database_id, schema_id) =
-                    session.get_database_and_schema_id_for_create(schema.clone())?;
                 let table = binder.bind_table(schema.as_deref(), &table)?;
+                let comment_object_type = match table.table_catalog.table_type() {
+                    TableType::Table => ObjectType::Table,
+                    TableType::MaterializedView => ObjectType::Mview,
+                    _ => {
+                        return Err(ErrorCode::WrongObjectType(format!(
+                            "{} is not a table or materialized view",
+                            table.table_catalog.name
+                        ))
+                        .into());
+                    }
+                };
                 if table.table_catalog.owner != session.user_id() && !session.is_super_user() {
                     return Err(ErrorCode::PermissionDenied(format!(
                         "must be owner of relation {}",
@@ -57,24 +94,38 @@ pub async fn handle_comment(
                     ))
                     .into());
                 }
-                binder.bind_columns_to_context(col.real_value(), &table.table_catalog.columns)?;
+                let column = binder.bind_column(std::slice::from_ref(col))?;
 
-                let column = binder.bind_column(object_name.0.as_slice())?;
-
-                PbComment {
-                    table_id: table.table_id,
-                    schema_id,
-                    database_id,
-                    column_index: column.as_input_ref().map(|input_ref| input_ref.index as _),
-                    description: comment,
-                }
+                build_comment(
+                    table.table_id.as_raw_id(),
+                    comment_object_type,
+                    column.as_input_ref().map(|input_ref| input_ref.index as _),
+                    comment,
+                )
             }
-            CommentObject::Table => {
+            CommentObject::Table | CommentObject::MaterializedView => {
                 let (schema, table) =
                     Binder::resolve_schema_qualified_name(&session.database(), &object_name)?;
-                let (database_id, schema_id) =
-                    session.get_database_and_schema_id_for_create(schema.clone())?;
                 let table = binder.bind_table(schema.as_deref(), &table)?;
+
+                let (expected_table_type, expected_object_name, comment_object_type) =
+                    match object_type {
+                        CommentObject::Table => (TableType::Table, "table", ObjectType::Table),
+                        CommentObject::MaterializedView => (
+                            TableType::MaterializedView,
+                            "materialized view",
+                            ObjectType::Mview,
+                        ),
+                        CommentObject::Column => unreachable!(),
+                    };
+
+                if table.table_catalog.table_type() != expected_table_type {
+                    return Err(ErrorCode::WrongObjectType(format!(
+                        "{} is not a {}",
+                        table.table_catalog.name, expected_object_name
+                    ))
+                    .into());
+                }
                 if table.table_catalog.owner != session.user_id() && !session.is_super_user() {
                     return Err(ErrorCode::PermissionDenied(format!(
                         "must be owner of relation {}",
@@ -83,13 +134,12 @@ pub async fn handle_comment(
                     .into());
                 }
 
-                PbComment {
-                    table_id: table.table_id,
-                    schema_id,
-                    database_id,
-                    column_index: None,
-                    description: comment,
-                }
+                build_comment(
+                    table.table_id.as_raw_id(),
+                    comment_object_type,
+                    None,
+                    comment,
+                )
             }
         }
     };

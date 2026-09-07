@@ -15,7 +15,7 @@
 use std::iter;
 
 use risingwave_common::catalog::RW_CATALOG_SCHEMA_NAME;
-use risingwave_common::id::TableId;
+use risingwave_common::id::ObjectId;
 use risingwave_common::types::Fields;
 use risingwave_frontend_macro::system_catalog;
 
@@ -26,21 +26,21 @@ use crate::error::Result;
 #[primary_key(objoid, classoid, objsubid)]
 struct RwDescription {
     // table_id, view_id, function_id, etc.
-    objoid: TableId,
+    objoid: ObjectId,
     // rw_tables, rw_views, rw_functions, etc.
     classoid: i32,
-    // If `objoid` is `table_id`, then non-null `objsubid` is column number.
+    // If `objoid` is a relation id, then non-null `objsubid` is column number.
     objsubid: Option<i32>,
     description: Option<String>,
 }
 
 #[system_catalog(table, "rw_catalog.rw_description")]
 fn read(reader: &SysCatalogReaderImpl) -> Result<Vec<RwDescription>> {
-    let build_row = |table_id: TableId,
+    let build_row = |object_id: ObjectId,
                      catalog_id,
                      index: Option<i32>,
                      description: Option<Box<str>>| RwDescription {
-        objoid: table_id,
+        objoid: object_id,
         classoid: catalog_id,
         objsubid: index,
         description: description.map(|s| s.into()),
@@ -57,25 +57,47 @@ fn read(reader: &SysCatalogReaderImpl) -> Result<Vec<RwDescription>> {
         .get_system_table_by_name("rw_tables")
         .map(|st| st.id.as_raw_id())
         .unwrap_or_default() as _;
+    let rw_materialized_views_id: i32 = rw_catalog
+        .get_system_table_by_name("rw_materialized_views")
+        .map(|st| st.id.as_raw_id())
+        .unwrap_or_default() as _;
 
     Ok(schemas
         .flat_map(|schema| {
-            schema.iter_user_table().flat_map(|table| {
-                iter::once(build_row(
-                    table.id,
-                    rw_tables_id,
-                    None,
-                    table.description.as_deref().map(Into::into),
-                ))
-                .chain(table.columns.iter().map(|col| {
-                    build_row(
-                        table.id,
+            schema
+                .iter_user_table()
+                .flat_map(|table| {
+                    iter::once(build_row(
+                        table.id.as_object_id(),
                         rw_tables_id,
-                        Some(col.column_id().get_id() as _),
-                        col.column_desc.description.as_deref().map(Into::into),
-                    )
+                        None,
+                        table.description.as_deref().map(Into::into),
+                    ))
+                    .chain(table.columns.iter().map(|col| {
+                        build_row(
+                            table.id.as_object_id(),
+                            rw_tables_id,
+                            Some(col.column_id().get_id() as _),
+                            col.column_desc.description.as_deref().map(Into::into),
+                        )
+                    }))
+                })
+                .chain(schema.iter_all_mvs().flat_map(|table| {
+                    iter::once(build_row(
+                        table.id.as_object_id(),
+                        rw_materialized_views_id,
+                        None,
+                        table.description.as_deref().map(Into::into),
+                    ))
+                    .chain(table.columns.iter().map(|col| {
+                        build_row(
+                            table.id.as_object_id(),
+                            rw_materialized_views_id,
+                            Some(col.column_id().get_id() as _),
+                            col.column_desc.description.as_deref().map(Into::into),
+                        )
+                    }))
                 }))
-            })
         })
         .collect())
 }

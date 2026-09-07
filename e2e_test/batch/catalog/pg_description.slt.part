@@ -2,6 +2,44 @@ statement ok
 create table t(a int, b text, c date);
 
 statement ok
+create materialized view mv_t as select a from t;
+
+statement error is not a table
+comment on table mv_t is 'this should fail';
+
+statement error is not a materialized view
+comment on materialized view t is 'this should fail';
+
+statement error Invalid column: missing_col
+comment on column t.missing_col is 'this should fail';
+
+statement error Invalid column: a
+comment on column a is 'this should fail';
+
+statement ok
+comment on materialized view mv_t is 'Materialized view description';
+
+query TIIIT
+SELECT
+    c.relname,
+    (
+        SELECT relname FROM pg_catalog.pg_class WHERE oid = d.classoid
+    ) AS classoid,
+    d.objsubid,
+    d.description
+FROM
+    pg_catalog.pg_description d
+    JOIN pg_catalog.pg_class c
+        ON d.objoid = c.oid
+WHERE c.relname = 'mv_t'
+ORDER BY d.objsubid;
+----
+mv_t  rw_materialized_views  0  Materialized view description
+
+statement ok
+comment on materialized view mv_t is NULL
+
+statement ok
 comment on table t is 'Lorem ipsum';
 
 statement ok
@@ -62,4 +100,64 @@ t  rw_tables  1  Praesent elementum
 t  rw_tables  2  Vivamus fermentum
 
 statement ok
+drop materialized view mv_t;
+
+statement ok
 drop table t;
+
+statement ok
+create schema comment_on_schema;
+
+control substitution on
+
+statement ok
+create table $__DATABASE__.comment_on_schema.commented_table(col int);
+
+statement error cross-database references are not implemented
+comment on column another_database.comment_on_schema.commented_table.col is 'cross-database column comment';
+
+statement ok
+comment on column $__DATABASE__.comment_on_schema.commented_table.col is 'database-qualified column comment';
+
+query T
+SELECT d.description
+FROM pg_catalog.pg_description d
+JOIN pg_catalog.pg_class c ON d.objoid = c.oid
+JOIN pg_catalog.pg_namespace n ON c.relnamespace = n.oid
+WHERE n.nspname = 'comment_on_schema'
+    AND c.relname = 'commented_table'
+    AND d.objsubid = 1;
+----
+database-qualified column comment
+
+statement ok
+create materialized view $__DATABASE__.comment_on_schema.commented_mv as
+select col from $__DATABASE__.comment_on_schema.commented_table;
+
+statement error cross-database references are not implemented
+comment on column another_database.comment_on_schema.commented_mv.col is 'cross-database materialized view column comment';
+
+statement ok
+comment on column $__DATABASE__.comment_on_schema.commented_mv.col is 'materialized view column comment';
+
+query T
+SELECT d.description
+FROM pg_catalog.pg_description d
+JOIN pg_catalog.pg_class c ON d.objoid = c.oid
+JOIN pg_catalog.pg_namespace n ON c.relnamespace = n.oid
+WHERE n.nspname = 'comment_on_schema'
+    AND c.relname = 'commented_mv'
+    AND d.objsubid = 1;
+----
+materialized view column comment
+
+statement ok
+drop materialized view $__DATABASE__.comment_on_schema.commented_mv;
+
+statement ok
+drop table $__DATABASE__.comment_on_schema.commented_table;
+
+control substitution off
+
+statement ok
+drop schema comment_on_schema;

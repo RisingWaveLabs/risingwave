@@ -229,7 +229,7 @@ impl DdlCommand {
             DdlCommand::CreateSecret(secret) => Left(secret.name.clone()),
             DdlCommand::AlterSecret(secret) => Left(secret.name.clone()),
             DdlCommand::DropSecret(id, _) => Right(id.as_object_id()),
-            DdlCommand::CommentOn(comment) => Right(comment.table_id.into()),
+            DdlCommand::CommentOn(comment) => Right(ObjectId::new(comment.object_id)),
             DdlCommand::CreateSubscription(subscription) => Left(subscription.name.clone()),
             DdlCommand::DropSubscription(id, _) => Right(id.as_object_id()),
             DdlCommand::AlterSubscriptionRetention {

@@ -154,6 +154,8 @@ pub enum ErrorCode {
     InvalidReference(String),
     #[error("Item not found: {0}")]
     ItemNotFound(String),
+    #[error("Wrong object type: {0}")]
+    WrongObjectType(#[message] String),
     #[error("Duplicate Relation Name: {0}")]
     DuplicateRelationName(String),
     #[error("Invalid insert operation: {0}")]

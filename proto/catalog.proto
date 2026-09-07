@@ -621,11 +621,15 @@ message Database {
 }
 
 message Comment {
-  uint32 table_id = 1;
-  uint32 schema_id = 2;
-  uint32 database_id = 3;
+  // Retained temporarily for compatibility with mixed-version clusters.
+  uint32 table_id = 1 [deprecated = true];
+  uint32 schema_id = 2 [deprecated = true];
+  uint32 database_id = 3 [deprecated = true];
   optional uint32 column_index = 4;
   optional string description = 5;
+
+  uint32 object_id = 6;
+  common.ObjectType object_type = 7;
 }
 
 message Secret {

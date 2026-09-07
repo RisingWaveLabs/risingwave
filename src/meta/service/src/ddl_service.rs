@@ -38,7 +38,7 @@ use risingwave_meta::{MetaResult, bail_invalid_parameter, bail_unavailable};
 use risingwave_meta_model::StreamingParallelism;
 use risingwave_pb::catalog::connection::Info as ConnectionInfo;
 use risingwave_pb::catalog::table::{CdcTableType as PbCdcTableType, OptionalAssociatedSourceId};
-use risingwave_pb::catalog::{Comment, Connection, PbCreateType, Secret, Table};
+use risingwave_pb::catalog::{Connection, PbCreateType, Secret, Table};
 use risingwave_pb::common::WorkerType;
 use risingwave_pb::common::worker_node::State;
 use risingwave_pb::ddl_service::create_iceberg_table_request::{PbSinkJobInfo, PbTableJobInfo};
@@ -1094,13 +1094,7 @@ impl DdlService for DdlServiceImpl {
 
         let version = self
             .ddl_controller
-            .run_command(DdlCommand::CommentOn(Comment {
-                table_id: comment.table_id,
-                schema_id: comment.schema_id,
-                database_id: comment.database_id,
-                column_index: comment.column_index,
-                description: comment.description,
-            }))
+            .run_command(DdlCommand::CommentOn(comment))
             .await?;
 
         Ok(Response::new(CommentOnResponse {
