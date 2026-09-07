@@ -65,6 +65,100 @@ pub struct TableScan {
     pub ctx: OptimizerContextRef,
 }
 
+#[derive(Clone, Copy)]
+enum UnmappedInputRefBehavior {
+    Panic,
+    RewriteWithOffset(usize),
+}
+
+/// Rewrites expressions from primary-table column indices to index-table column indices.
+pub(crate) struct IndexExprRewriter<'a> {
+    primary_to_secondary_mapping: &'a BTreeMap<usize, usize>,
+    function_mapping: &'a HashMap<FunctionCall, usize>,
+    unmapped_input_ref_behavior: UnmappedInputRefBehavior,
+    covered_by_index: bool,
+    used_materialized_expression: bool,
+}
+
+impl<'a> IndexExprRewriter<'a> {
+    pub(crate) fn new_strict(
+        primary_to_secondary_mapping: &'a BTreeMap<usize, usize>,
+        function_mapping: &'a HashMap<FunctionCall, usize>,
+    ) -> Self {
+        Self::new(
+            primary_to_secondary_mapping,
+            function_mapping,
+            UnmappedInputRefBehavior::Panic,
+        )
+    }
+
+    pub(crate) fn new_with_unmapped_input_offset(
+        primary_to_secondary_mapping: &'a BTreeMap<usize, usize>,
+        function_mapping: &'a HashMap<FunctionCall, usize>,
+        offset: usize,
+    ) -> Self {
+        Self::new(
+            primary_to_secondary_mapping,
+            function_mapping,
+            UnmappedInputRefBehavior::RewriteWithOffset(offset),
+        )
+    }
+
+    fn new(
+        primary_to_secondary_mapping: &'a BTreeMap<usize, usize>,
+        function_mapping: &'a HashMap<FunctionCall, usize>,
+        unmapped_input_ref_behavior: UnmappedInputRefBehavior,
+    ) -> Self {
+        Self {
+            primary_to_secondary_mapping,
+            function_mapping,
+            unmapped_input_ref_behavior,
+            covered_by_index: true,
+            used_materialized_expression: false,
+        }
+    }
+
+    pub(crate) fn covered_by_index(&self) -> bool {
+        self.covered_by_index
+    }
+
+    pub(crate) fn used_materialized_expression(&self) -> bool {
+        self.used_materialized_expression
+    }
+}
+
+impl ExprRewriter for IndexExprRewriter<'_> {
+    fn rewrite_input_ref(&mut self, input_ref: InputRef) -> ExprImpl {
+        let index = match self.primary_to_secondary_mapping.get(&input_ref.index()) {
+            Some(index) => *index,
+            None => match self.unmapped_input_ref_behavior {
+                UnmappedInputRefBehavior::Panic => {
+                    panic!("primary column must be covered by index")
+                }
+                UnmappedInputRefBehavior::RewriteWithOffset(offset) => {
+                    self.covered_by_index = false;
+                    input_ref.index() + offset
+                }
+            },
+        };
+        InputRef::new(index, input_ref.return_type()).into()
+    }
+
+    fn rewrite_function_call(&mut self, func_call: FunctionCall) -> ExprImpl {
+        if let Some(index) = self.function_mapping.get(&func_call) {
+            self.used_materialized_expression = true;
+            return InputRef::new(*index, func_call.return_type()).into();
+        }
+
+        let (func_type, inputs, ret) = func_call.decompose();
+        let inputs = inputs
+            .into_iter()
+            .map(|expr| self.rewrite_expr(expr))
+            .collect();
+        FunctionCall::new_unchecked(func_type, inputs, ret).into()
+    }
+}
+
 impl TableScan {
     pub(crate) fn rewrite_exprs(&mut self, r: &mut dyn ExprRewriter) {
         self.predicate = self.predicate.clone().rewrite_expr(r);
@@ -247,39 +341,8 @@ impl TableScan {
             .map(|col_idx| *primary_to_secondary_mapping.get(col_idx).unwrap())
             .collect();
 
-        struct Rewriter<'a> {
-            primary_to_secondary_mapping: &'a BTreeMap<usize, usize>,
-            function_mapping: &'a HashMap<FunctionCall, usize>,
-        }
-        impl ExprRewriter for Rewriter<'_> {
-            fn rewrite_input_ref(&mut self, input_ref: InputRef) -> ExprImpl {
-                InputRef::new(
-                    *self
-                        .primary_to_secondary_mapping
-                        .get(&input_ref.index)
-                        .unwrap(),
-                    input_ref.return_type(),
-                )
-                .into()
-            }
-
-            fn rewrite_function_call(&mut self, func_call: FunctionCall) -> ExprImpl {
-                if let Some(index) = self.function_mapping.get(&func_call) {
-                    return InputRef::new(*index, func_call.return_type()).into();
-                }
-
-                let (func_type, inputs, ret) = func_call.decompose();
-                let inputs = inputs
-                    .into_iter()
-                    .map(|expr| self.rewrite_expr(expr))
-                    .collect();
-                FunctionCall::new_unchecked(func_type, inputs, ret).into()
-            }
-        }
-        let mut rewriter = Rewriter {
-            primary_to_secondary_mapping,
-            function_mapping,
-        };
+        let mut rewriter =
+            IndexExprRewriter::new_strict(primary_to_secondary_mapping, function_mapping);
 
         let new_predicate = self.predicate.clone().rewrite_expr(&mut rewriter);
 

@@ -481,6 +481,34 @@
     select * from t where j->>'k1' = 'abc';
   expected_outputs:
   - batch_plan
+- name: narrow expression index covers projection
+  sql: |
+    create table t (j jsonb, v1 int, v2 int, payload1 jsonb, payload2 jsonb);
+    create index idx1 on t(j->>'k1') include(v1);
+    select j->>'k1' from t;
+  expected_outputs:
+  - batch_plan
+- name: expression index projection still respects cost
+  sql: |
+    create table t (j jsonb, v1 int, v2 int);
+    create index idx1 on t(j->>'k1') include(v1);
+    select j->>'k1' from t;
+  expected_outputs:
+  - batch_plan
+- name: expression index covers projection and predicate
+  sql: |
+    create table t (j jsonb, v1 int, v2 int);
+    create index idx1 on t(j->>'k1') include(v1);
+    select j->>'k1' from t where j->>'k1' = 'abc';
+  expected_outputs:
+  - batch_plan
+- name: expression index does not cover another projected column
+  sql: |
+    create table t (j jsonb, v1 int, v2 int);
+    create index idx1 on t(j->>'k1') include(v1);
+    select j->>'k1', v2 from t where j->>'k1' = 'abc';
+  expected_outputs:
+  - batch_plan
 - sql: |
     create table t (j jsonb, v1 int, v2 int);
     create index idx1 on t(j->>'k1') include(v1);

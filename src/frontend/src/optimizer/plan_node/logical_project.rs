@@ -33,6 +33,7 @@ use crate::optimizer::plan_node::{
     ColumnPruningContext, PredicatePushdownContext, RewriteStreamContext, ToStreamContext,
 };
 use crate::optimizer::property::{Distribution, Order, RequiredDist, StreamKind};
+use crate::optimizer::rule::IndexSelectionRule;
 use crate::session::current;
 use crate::utils::{ColIndexMapping, ColIndexMappingRewriteExt, Condition, Substitute};
 
@@ -101,6 +102,23 @@ impl LogicalProject {
 
     pub fn decompose(self) -> (Vec<ExprImpl>, PlanRef) {
         self.core.decompose()
+    }
+
+    pub(crate) fn clone_with_input_and_exprs(&self, input: PlanRef, exprs: Vec<ExprImpl>) -> Self {
+        let mut core = self.core.clone_with_input(input);
+        core.exprs = exprs;
+        // Replacing a computed expression with an input ref must not rename the output to the
+        // physical index column.
+        core.field_names = self
+            .schema()
+            .fields()
+            .iter()
+            .enumerate()
+            .map(|(index, field)| (index, field.name.clone()))
+            .collect();
+        let project = Self::with_core(core);
+        debug_assert_eq!(project.schema(), self.schema());
+        project
     }
 
     pub fn is_all_inputref(&self) -> bool {
@@ -225,6 +243,19 @@ impl ToBatch for LogicalProject {
     }
 
     fn to_batch_with_order_required(&self, required_order: &Order) -> Result<BatchPlanRef> {
+        if self
+            .base
+            .ctx()
+            .session_ctx()
+            .config()
+            .enable_index_selection()
+            && let Some(project) = IndexSelectionRule::select_expression_index_for_project(self)
+        {
+            // The rewritten input is an index-table scan without its own indexes, so the
+            // recursive conversion cannot select another expression index.
+            return project.to_batch_with_order_required(required_order);
+        }
+
         let input_order = self
             .o2i_col_mapping()
             .rewrite_provided_order(required_order);

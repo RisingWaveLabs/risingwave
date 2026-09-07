@@ -835,6 +835,44 @@
     └─BatchLookupJoin { type: Inner, predicate: idx1.t._row_id IS NOT DISTINCT FROM t._row_id, output: [t.j, t.v1, t.v2], lookup table: t }
       └─BatchExchange { order: [], dist: UpstreamHashShard(idx1.t._row_id) }
         └─BatchScan { table: idx1, columns: [idx1.t._row_id], scan_ranges: [idx1.JSONB_ACCESS_STR = Utf8("abc")], distribution: SomeShard }
+- name: narrow expression index covers projection
+  sql: |
+    create table t (j jsonb, v1 int, v2 int, payload1 jsonb, payload2 jsonb);
+    create index idx1 on t(j->>'k1') include(v1);
+    select j->>'k1' from t;
+  batch_plan: |-
+    BatchExchange { order: [], dist: Single }
+    └─BatchProject { exprs: [idx1.JSONB_ACCESS_STR] }
+      └─BatchScan { table: idx1, columns: [idx1.JSONB_ACCESS_STR], distribution: UpstreamHashShard(idx1.JSONB_ACCESS_STR) }
+- name: expression index projection still respects cost
+  sql: |
+    create table t (j jsonb, v1 int, v2 int);
+    create index idx1 on t(j->>'k1') include(v1);
+    select j->>'k1' from t;
+  batch_plan: |-
+    BatchExchange { order: [], dist: Single }
+    └─BatchProject { exprs: [JsonbAccessStr(t.j, 'k1':Varchar) as $expr1] }
+      └─BatchScan { table: t, columns: [t.j], distribution: SomeShard }
+- name: expression index covers projection and predicate
+  sql: |
+    create table t (j jsonb, v1 int, v2 int);
+    create index idx1 on t(j->>'k1') include(v1);
+    select j->>'k1' from t where j->>'k1' = 'abc';
+  batch_plan: |-
+    BatchExchange { order: [], dist: Single }
+    └─BatchProject { exprs: [idx1.JSONB_ACCESS_STR] }
+      └─BatchScan { table: idx1, columns: [idx1.JSONB_ACCESS_STR], scan_ranges: [idx1.JSONB_ACCESS_STR = Utf8("abc")], distribution: UpstreamHashShard(idx1.JSONB_ACCESS_STR) }
+- name: expression index does not cover another projected column
+  sql: |
+    create table t (j jsonb, v1 int, v2 int);
+    create index idx1 on t(j->>'k1') include(v1);
+    select j->>'k1', v2 from t where j->>'k1' = 'abc';
+  batch_plan: |-
+    BatchExchange { order: [], dist: Single }
+    └─BatchProject { exprs: [JsonbAccessStr(t.j, 'k1':Varchar) as $expr1, t.v2] }
+      └─BatchLookupJoin { type: Inner, predicate: idx1.t._row_id IS NOT DISTINCT FROM t._row_id, output: [t.j, t.v2], lookup table: t }
+        └─BatchExchange { order: [], dist: UpstreamHashShard(idx1.t._row_id) }
+          └─BatchScan { table: idx1, columns: [idx1.t._row_id], scan_ranges: [idx1.JSONB_ACCESS_STR = Utf8("abc")], distribution: SomeShard }
 - sql: |
     create table t (j jsonb, v1 int, v2 int);
     create index idx1 on t(j->>'k1') include(v1);
@@ -890,8 +928,8 @@
     select ts::timestamptz from t where ts > now();
   batch_plan: |-
     BatchExchange { order: [], dist: Single }
-    └─BatchProject { exprs: [AtTimeZone(i.ts, 'UTC':Varchar) as $expr1] }
-      └─BatchScan { table: i, columns: [i.ts], scan_ranges: [i.AT_TIME_ZONE > Timestamptz(Timestamptz(1617235200000000))], distribution: SomeShard }
+    └─BatchProject { exprs: [i.AT_TIME_ZONE] }
+      └─BatchScan { table: i, columns: [i.AT_TIME_ZONE], scan_ranges: [i.AT_TIME_ZONE > Timestamptz(Timestamptz(1617235200000000))], distribution: UpstreamHashShard(i.AT_TIME_ZONE) }
 - name: funtional index with timezone2
   sql: |
     create table t (a int, ts timestamp without time zone);

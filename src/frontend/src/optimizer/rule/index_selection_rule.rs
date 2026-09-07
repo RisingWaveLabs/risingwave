@@ -47,8 +47,8 @@
 //! For index order key length > 5, we just ignore the rest.
 
 use std::cmp::min;
+use std::collections::HashMap;
 use std::collections::hash_map::Entry::{Occupied, Vacant};
-use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use itertools::Itertools;
@@ -64,16 +64,16 @@ use risingwave_sqlparser::ast::AsOf;
 use super::prelude::{PlanRef, *};
 use crate::catalog::index_catalog::TableIndex;
 use crate::expr::{
-    Expr, ExprImpl, ExprRewriter, ExprType, ExprVisitor, FunctionCall, InputRef, to_conjunctions,
-    to_disjunctions,
+    Expr, ExprImpl, ExprRewriter, ExprType, ExprVisitor, FunctionCall, InputRef,
+    collect_input_refs, to_conjunctions, to_disjunctions,
 };
 use crate::optimizer::optimizer_context::OptimizerContextRef;
 use crate::optimizer::plan_node::generic::GenericPlanRef;
 use crate::optimizer::plan_node::{
-    ColumnPruningContext, LogicalJoin, LogicalScan, LogicalUnion, PlanTreeNode, PlanTreeNodeBinary,
-    PredicatePushdown, PredicatePushdownContext, generic,
+    ColumnPruningContext, LogicalJoin, LogicalProject, LogicalScan, LogicalUnion, PlanTreeNode,
+    PlanTreeNodeBinary, PlanTreeNodeUnary, PredicatePushdown, PredicatePushdownContext, generic,
 };
-use crate::utils::Condition;
+use crate::utils::{ColIndexMapping, Condition};
 
 const INDEX_MAX_LEN: usize = 5;
 const INDEX_COST_MATRIX: [[usize; INDEX_MAX_LEN]; 5] = [
@@ -92,9 +92,21 @@ pub struct IndexSelectionRule {}
 impl Rule<Logical> for IndexSelectionRule {
     fn apply(&self, plan: PlanRef) -> Option<PlanRef> {
         let logical_scan: &LogicalScan = plan.as_logical_scan()?;
+        self.select_index_access_path(logical_scan).0
+    }
+}
+
+impl IndexSelectionRule {
+    fn select_index_access_path(&self, logical_scan: &LogicalScan) -> (Option<PlanRef>, IndexCost) {
         let indexes = logical_scan.table_indexes();
         if indexes.is_empty() {
-            return None;
+            return (
+                None,
+                self.estimate_table_scan_cost(
+                    logical_scan,
+                    TableScanIoEstimator::estimate_row_size(logical_scan),
+                ),
+            );
         }
         let primary_table_row_size = TableScanIoEstimator::estimate_row_size(logical_scan);
         let primary_cost = min(
@@ -104,11 +116,11 @@ impl Rule<Logical> for IndexSelectionRule {
 
         // If it is a primary lookup plan, avoid checking other indexes.
         if primary_cost.primary_lookup {
-            return None;
+            return (None, primary_cost);
         }
 
-        let mut final_plan: PlanRef = logical_scan.clone().into();
-        let mut min_cost = primary_cost.clone();
+        let mut final_plan = None;
+        let mut min_cost = primary_cost;
 
         for index in indexes {
             if let Some(index_scan) = logical_scan.to_index_scan_if_index_covered(index) {
@@ -119,14 +131,14 @@ impl Rule<Logical> for IndexSelectionRule {
 
                 if index_cost.le(&min_cost) {
                     min_cost = index_cost;
-                    final_plan = index_scan.into();
+                    final_plan = Some(index_scan.into());
                 }
             } else {
                 // non-covering index selection
                 let (index_lookup, lookup_cost) = self.gen_index_lookup(logical_scan, index);
                 if lookup_cost.le(&min_cost) {
                     min_cost = lookup_cost;
-                    final_plan = index_lookup;
+                    final_plan = Some(index_lookup);
                 }
             }
         }
@@ -135,69 +147,110 @@ impl Rule<Logical> for IndexSelectionRule {
             && merge_index_cost.le(&min_cost)
         {
             min_cost = merge_index_cost;
-            final_plan = merge_index;
+            final_plan = Some(merge_index);
         }
 
-        if min_cost == primary_cost {
-            None
-        } else {
-            Some(final_plan)
+        (final_plan, min_cost)
+    }
+
+    pub(crate) fn select_expression_index_for_project(
+        logical_project: &LogicalProject,
+    ) -> Option<LogicalProject> {
+        // Scan-level index selection can only rewrite the predicate. Consider a covering index
+        // access path here so expressions materialized by an expression index can also replace
+        // matching function calls in the projection.
+        let input = logical_project.input();
+        let logical_scan = input.as_logical_scan()?;
+        if logical_scan.table_indexes().is_empty() {
+            return None;
         }
-    }
-}
 
-struct IndexPredicateRewriter<'a> {
-    p2s_mapping: &'a BTreeMap<usize, usize>,
-    function_mapping: &'a HashMap<FunctionCall, usize>,
-    offset: usize,
-    covered_by_index: bool,
-}
+        let rule = Self {};
+        let (_, mut min_cost) = rule.select_index_access_path(logical_scan);
+        let mut output_to_primary = ColIndexMapping::new(
+            logical_scan
+                .output_col_idx()
+                .iter()
+                .map(|index| Some(*index))
+                .collect(),
+            logical_scan.table().columns.len(),
+        );
+        let primary_exprs = logical_project
+            .exprs()
+            .iter()
+            .cloned()
+            .map(|expr| output_to_primary.rewrite_expr(expr))
+            .collect_vec();
 
-impl<'a> IndexPredicateRewriter<'a> {
-    fn new(
-        p2s_mapping: &'a BTreeMap<usize, usize>,
-        function_mapping: &'a HashMap<FunctionCall, usize>,
-        offset: usize,
-    ) -> Self {
-        Self {
-            p2s_mapping,
-            function_mapping,
-            offset,
-            covered_by_index: true,
-        }
-    }
+        let mut selected_project = None;
+        for index in logical_scan.table_indexes() {
+            let mut project_rewriter = generic::IndexExprRewriter::new_with_unmapped_input_offset(
+                index.primary_to_secondary_mapping(),
+                index.function_mapping(),
+                0,
+            );
+            let index_exprs = primary_exprs
+                .iter()
+                .cloned()
+                .map(|expr| project_rewriter.rewrite_expr(expr))
+                .collect_vec();
+            if !project_rewriter.covered_by_index()
+                || !project_rewriter.used_materialized_expression()
+            {
+                continue;
+            }
 
-    fn covered_by_index(&self) -> bool {
-        self.covered_by_index
-    }
-}
+            let mut predicate_rewriter = generic::IndexExprRewriter::new_with_unmapped_input_offset(
+                index.primary_to_secondary_mapping(),
+                index.function_mapping(),
+                0,
+            );
+            let index_predicate = logical_scan
+                .predicate()
+                .clone()
+                .rewrite_expr(&mut predicate_rewriter);
+            if !predicate_rewriter.covered_by_index() {
+                continue;
+            }
 
-impl ExprRewriter for IndexPredicateRewriter<'_> {
-    fn rewrite_input_ref(&mut self, input_ref: InputRef) -> ExprImpl {
-        // transform primary predicate to index predicate if it can
-        if self.p2s_mapping.contains_key(&input_ref.index) {
-            InputRef::new(
-                *self.p2s_mapping.get(&input_ref.index()).unwrap(),
-                input_ref.return_type(),
+            let output_col_idx =
+                collect_input_refs(index.index_table.columns.len(), index_exprs.iter())
+                    .ones()
+                    .collect_vec();
+            let mut index_to_output = ColIndexMapping::with_remaining_columns(
+                &output_col_idx,
+                index.index_table.columns.len(),
+            );
+            let project_exprs = index_exprs
+                .into_iter()
+                .map(|expr| index_to_output.rewrite_expr(expr))
+                .collect_vec();
+            let index_scan: LogicalScan = generic::TableScan::new(
+                output_col_idx,
+                index.index_table.clone(),
+                vec![],
+                vec![],
+                logical_scan.ctx(),
+                index_predicate,
+                logical_scan.as_of(),
             )
-            .into()
-        } else {
-            self.covered_by_index = false;
-            InputRef::new(input_ref.index() + self.offset, input_ref.return_type()).into()
-        }
-    }
+            .into();
 
-    fn rewrite_function_call(&mut self, func_call: FunctionCall) -> ExprImpl {
-        if let Some(index) = self.function_mapping.get(&func_call) {
-            return InputRef::new(*index, func_call.return_type()).into();
+            let index_cost = rule.estimate_table_scan_cost(
+                &index_scan,
+                TableScanIoEstimator::estimate_row_size(&index_scan),
+            );
+            if index_cost.le(&min_cost)
+                || (index_cost.same_cost(&min_cost) && selected_project.is_none())
+            {
+                min_cost = index_cost;
+                selected_project = Some(
+                    logical_project.clone_with_input_and_exprs(index_scan.into(), project_exprs),
+                );
+            }
         }
 
-        let (func_type, inputs, ret) = func_call.decompose();
-        let inputs = inputs
-            .into_iter()
-            .map(|expr| self.rewrite_expr(expr))
-            .collect();
-        FunctionCall::new_unchecked(func_type, inputs, ret).into()
+        selected_project
     }
 }
 
@@ -226,7 +279,7 @@ impl IndexSelectionRule {
         );
 
         let predicate = logical_scan.predicate().clone();
-        let mut rewriter = IndexPredicateRewriter::new(
+        let mut rewriter = generic::IndexExprRewriter::new_with_unmapped_input_offset(
             index.primary_to_secondary_mapping(),
             index.function_mapping(),
             offset,
@@ -619,7 +672,7 @@ impl IndexSelectionRule {
         ctx: OptimizerContextRef,
         as_of: Option<AsOf>,
     ) -> Option<PlanRef> {
-        let mut rewriter = IndexPredicateRewriter::new(
+        let mut rewriter = generic::IndexExprRewriter::new_with_unmapped_input_offset(
             index.primary_to_secondary_mapping(),
             index.function_mapping(),
             0,
@@ -968,6 +1021,10 @@ impl IndexCost {
 
     pub(crate) fn le(&self, other: &IndexCost) -> bool {
         self.cost < other.cost
+    }
+
+    fn same_cost(&self, other: &IndexCost) -> bool {
+        self.cost == other.cost
     }
 }
 
