@@ -19,7 +19,11 @@ use itertools::Itertools;
 use mysql_async::consts::ColumnType as MySqlColumnType;
 use mysql_async::prelude::*;
 use risingwave_common::array::arrow::IcebergArrowConvert;
+use risingwave_common::secret::LocalSecretManager;
 use risingwave_common::types::{DataType, ScalarImpl, StructType};
+use risingwave_connector::connector_common::sql_server::{
+    MssqlConnectionConfig, describe_mssql_query,
+};
 use risingwave_connector::connector_common::{PgConnectionConfig, create_pg_client};
 use risingwave_connector::source::iceberg::{
     FileScanBackend, extract_bucket_and_file_name, get_parquet_fields, list_data_directory,
@@ -30,10 +34,38 @@ pub use risingwave_pb::expr::table_function::PbType as TableFunctionType;
 use tokio_postgres::types::Type as TokioPgType;
 
 use super::{Expr, ExprImpl, ExprRewriter, Literal, RwResult, infer_type};
+use crate::catalog::catalog_service::CatalogReadGuard;
 use crate::catalog::function_catalog::{FunctionCatalog, FunctionKind};
+use crate::catalog::root_catalog::SchemaPath;
 use crate::error::ErrorCode::BindError;
 use crate::expr::reject_impure;
 use crate::utils::FRONTEND_RUNTIME;
+
+const INLINE_ARG_LEN: usize = 6;
+/// Inline arg length for the SQL Server flavor of `_query` TVFs, which appends
+/// `encrypt` and `trust_cert` (8 total) on top of the standard 6.
+const MSSQL_INLINE_ARG_LEN: usize = 8;
+const CDC_SOURCE_ARG_LEN: usize = 2;
+
+/// Parse a strict boolean TVF argument. Returns the default when the argument
+/// is absent (e.g. the 2-arg source-reference form) and an error when the user
+/// supplies a value that is not a case-insensitive `true` / `false`. We avoid
+/// `s.parse::<bool>().unwrap_or(default)` because that would silently coerce
+/// typos like `yes` or `1` — and a typo on a security-critical flag like
+/// `trust_cert` would weaken transport security without any user-visible error.
+fn parse_strict_bool_arg(value: Option<&String>, default: bool) -> anyhow::Result<bool> {
+    match value {
+        None => Ok(default),
+        Some(s) => match s.trim().to_ascii_lowercase().as_str() {
+            "true" => Ok(true),
+            "false" => Ok(false),
+            other => Err(anyhow::anyhow!(
+                "expected 'true' or 'false', got {:?}",
+                other
+            )),
+        },
+    }
+}
 
 /// A table function takes a row as input and returns a table. It is also known as Set-Returning
 /// Function.
@@ -292,6 +324,107 @@ impl TableFunction {
         })
     }
 
+    fn handle_postgres_or_mysql_query_args(
+        catalog_reader: &CatalogReadGuard,
+        db_name: &str,
+        schema_path: SchemaPath<'_>,
+        args: Vec<ExprImpl>,
+        expect_connector_name: &str,
+    ) -> RwResult<Vec<ExprImpl>> {
+        let is_mssql = expect_connector_name.eq_ignore_ascii_case("sqlserver-cdc");
+        let cast_args = match args.len() {
+            INLINE_ARG_LEN if !is_mssql => {
+                let mut cast_args = Vec::with_capacity(INLINE_ARG_LEN);
+                for arg in args {
+                    let arg = arg.cast_implicit(&DataType::Varchar)?;
+                    cast_args.push(arg);
+                }
+                cast_args
+            }
+            MSSQL_INLINE_ARG_LEN if is_mssql => {
+                let mut cast_args = Vec::with_capacity(MSSQL_INLINE_ARG_LEN);
+                for arg in args {
+                    let arg = arg.cast_implicit(&DataType::Varchar)?;
+                    cast_args.push(arg);
+                }
+                cast_args
+            }
+            CDC_SOURCE_ARG_LEN => {
+                let source_name = expr_impl_to_string_fn(&args[0])?;
+                let source_catalog = catalog_reader
+                    .get_source_by_name(db_name, schema_path, &source_name)?
+                    .0;
+                if !source_catalog
+                    .connector_name()
+                    .eq_ignore_ascii_case(expect_connector_name)
+                {
+                    return Err(BindError(format!("TVF function only accepts `mysql-cdc`, `postgres-cdc` and `sqlserver-cdc` source. Expected: {}, but got: {}", expect_connector_name, source_catalog.connector_name())).into());
+                }
+
+                let (props, secret_refs) = source_catalog.with_properties.clone().into_parts();
+                let secret_resolved =
+                    LocalSecretManager::global().fill_secrets(props, secret_refs)?;
+
+                let mut args_vec = vec![
+                    ExprImpl::literal_varchar(secret_resolved["hostname"].clone()),
+                    ExprImpl::literal_varchar(secret_resolved["port"].clone()),
+                    ExprImpl::literal_varchar(secret_resolved["username"].clone()),
+                    ExprImpl::literal_varchar(secret_resolved["password"].clone()),
+                    ExprImpl::literal_varchar(secret_resolved["database.name"].clone()),
+                    args.get(1)
+                        .unwrap()
+                        .clone()
+                        .cast_implicit(&DataType::Varchar)?,
+                ];
+
+                if expect_connector_name.eq_ignore_ascii_case("postgres-cdc") {
+                    args_vec.push(ExprImpl::literal_varchar(
+                        secret_resolved.get("ssl.mode").cloned().unwrap_or_default(),
+                    ));
+                    args_vec.push(ExprImpl::literal_varchar(
+                        secret_resolved
+                            .get("ssl.root.cert")
+                            .cloned()
+                            .unwrap_or_default(),
+                    ));
+                } else if expect_connector_name.eq_ignore_ascii_case("sqlserver-cdc") {
+                    // The CDC source is the source of truth for whether the
+                    // SQL Server connection requires SSL. The executor treats
+                    // anything other than the literal string `"true"` as
+                    // "no encryption" (matching the CDC source-side default
+                    // handling in `connector_common::sql_server::create_mssql_client`).
+                    // The "true" / "false" string is passed through to the
+                    // executor; if the source defined `database.encrypt =
+                    // "true"`, propagate that — otherwise default to "false".
+                    let encrypt = secret_resolved
+                        .get("database.encrypt")
+                        .map(|v| v.eq_ignore_ascii_case("true").to_string())
+                        .unwrap_or_else(|| "false".to_owned());
+                    args_vec.push(ExprImpl::literal_varchar(encrypt));
+                    // The CDC implementation sets `trust_cert` unconditionally
+                    // (see `connector::sink::sqlserver::SqlServerClient::new`),
+                    // so the source-reference form mirrors that.
+                    args_vec.push(ExprImpl::literal_varchar("true".to_owned()));
+                }
+
+                args_vec
+            }
+            _ => {
+                return Err(BindError(
+                    "postgres_query / mysql_query / mssql_query accept either \
+                    2 arguments: (cdc_source_name varchar, query varchar) or \
+                    6 arguments (postgres_query / mysql_query only): \
+                    (hostname varchar, port varchar, username varchar, password varchar, database_name varchar, query varchar); \
+                    mssql_query requires 8 arguments in the inline form, with `encrypt` and `trust_cert` after the query"
+                        .to_owned(),
+                )
+                .into());
+            }
+        };
+
+        Ok(cast_args)
+    }
+
     pub fn new_postgres_query(args: Vec<ExprImpl>) -> RwResult<Self> {
         let evaled_args = args
             .iter()
@@ -513,6 +646,100 @@ impl TableFunction {
         }
     }
 
+    /// Bind a `mssql_query(...)` table function call. Supports both calling
+    /// forms:
+    ///
+    /// * **2-arg source-reference form**: `mssql_query(<cdc_source_name>, <query>)`.
+    ///   The connection parameters (host, port, user, password, database)
+    ///   are looked up from the named `connector = 'sqlserver-cdc'` source.
+    ///   The `encrypt` argument is taken from the source's
+    ///   `database.encrypt` property (with `true` / non-`true` mapping to
+    ///   `"true"` / `"false"`); `trust_cert` is forced to `"true"` because
+    ///   the CDC implementation sets it unconditionally.
+    /// * **8-arg inline form**: `mssql_query(<host>, <port>, <user>, <password>,
+    ///   <database>, <query>, <encrypt>, <trust_cert>)`. All eight arguments
+    ///   are required; the 6-arg form is *not* supported.
+    ///
+    /// Returns a `TableFunction` whose `return_type` is a `DataType::Struct`
+    /// discovered at bind time by calling `describe_mssql_query` against the
+    /// user-provided query. The `encrypt` and `trust_cert` flags are parsed
+    /// strictly (any value other than case-insensitive `true` / `false` is
+    /// a bind error).
+    pub fn new_mssql_query(
+        catalog_reader: &CatalogReadGuard,
+        db_name: &str,
+        schema_path: SchemaPath<'_>,
+        args: Vec<ExprImpl>,
+    ) -> RwResult<Self> {
+        let args = Self::handle_postgres_or_mysql_query_args(
+            catalog_reader,
+            db_name,
+            schema_path,
+            args,
+            "sqlserver-cdc",
+        )?;
+        let evaled_args = args
+            .iter()
+            .map(expr_impl_to_string_fn)
+            .collect::<RwResult<Vec<_>>>()?;
+
+        #[cfg(madsim)]
+        {
+            return Err(crate::error::ErrorCode::BindError(
+                "mssql_query can't be used in the madsim mode".to_string(),
+            )
+            .into());
+        }
+
+        #[cfg(not(madsim))]
+        {
+            let schema = tokio::task::block_in_place(|| {
+                FRONTEND_RUNTIME.block_on(async {
+                    let port: u16 = evaled_args[1]
+                        .parse()
+                        .with_context(|| format!("invalid sql server port `{}`", evaled_args[1]))?;
+                    // Inline (8-arg) form carries encrypt/trust_cert; CDC
+                    // source (2-arg) form omits them and we fall back to
+                    // conservative defaults (off encryption, trust cert).
+                    // Both options must parse cleanly to a boolean; if the
+                    // user supplies an invalid value (e.g. "yes" or "1"),
+                    // reject the query rather than silently coercing it —
+                    // otherwise a typo could open a plaintext connection or
+                    // bypass certificate validation.
+                    let encrypt = parse_strict_bool_arg(evaled_args.get(6), false).context(
+                        "invalid `encrypt` value for mssql_query: expected 'true' or 'false'",
+                    )?;
+                    let trust_cert = parse_strict_bool_arg(evaled_args.get(7), true).context(
+                        "invalid `trust_cert` value for mssql_query: expected 'true' or 'false'",
+                    )?;
+
+                    let conn_config = MssqlConnectionConfig {
+                        host: evaled_args[0].clone(),
+                        port,
+                        user: evaled_args[2].clone(),
+                        password: evaled_args[3].clone(),
+                        database: evaled_args[4].clone(),
+                        encrypt,
+                        trust_cert,
+                    };
+
+                    let rw_types = describe_mssql_query(&conn_config, &evaled_args[5]).await?;
+
+                    Ok::<risingwave_common::types::DataType, anyhow::Error>(DataType::Struct(
+                        StructType::new(rw_types),
+                    ))
+                })
+            })?;
+
+            Ok(TableFunction {
+                args,
+                return_type: schema,
+                function_type: TableFunctionType::MssqlQuery,
+                user_defined: None,
+            })
+        }
+    }
+
     /// This is a highly specific _internal_ table function meant to scan and aggregate
     /// `backfill_table_id`, `row_count` for all MVs which are still being created.
     pub fn new_internal_backfill_progress() -> Self {
@@ -644,7 +871,7 @@ pub(crate) fn expr_impl_to_string_fn(arg: &ExprImpl) -> RwResult<String> {
         Some(Ok(value)) => {
             let Some(scalar) = value else {
                 return Err(BindError(
-                    "postgres_query function and mysql_query function do not accept null arguments"
+                    "postgres_query / mysql_query / mssql_query do not accept null arguments"
                         .to_owned(),
                 )
                 .into());
@@ -653,8 +880,7 @@ pub(crate) fn expr_impl_to_string_fn(arg: &ExprImpl) -> RwResult<String> {
         }
         Some(Err(err)) => Err(err),
         None => Err(BindError(
-            "postgres_query function and mysql_query function only accept constant arguments"
-                .to_owned(),
+            "postgres_query / mysql_query / mssql_query only accept constant arguments".to_owned(),
         )
         .into()),
     }

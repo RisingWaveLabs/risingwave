@@ -36,6 +36,7 @@ mod iceberg;
 #[cfg(not(madsim))]
 mod maybe_tls_connector;
 pub mod postgres;
+pub mod sql_server;
 
 pub use iceberg::{
     IcebergCatalogKind, IcebergCatalogRuntime, IcebergCommon, IcebergTableIdentifier,

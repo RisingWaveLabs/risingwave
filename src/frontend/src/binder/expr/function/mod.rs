@@ -21,6 +21,7 @@ use itertools::Itertools;
 use risingwave_common::acl::AclMode;
 use risingwave_common::bail_not_implemented;
 use risingwave_common::catalog::INFORMATION_SCHEMA_SCHEMA_NAME;
+use risingwave_common::license::Feature;
 use risingwave_common::secret::LocalSecretManager;
 use risingwave_common::types::{DataType, MapType, StructType};
 use risingwave_common::util::iter_util::ZipEqFast;
@@ -494,6 +495,26 @@ impl Binder {
                 return Ok(TableFunction::new_mysql_query(args)
                     .context("mysql_query error")?
                     .into());
+            }
+            // `mssql_query` table function (enterprise feature)
+            if func_name.eq("mssql_query") {
+                reject_syntax!(
+                    arg_list.variadic,
+                    "`VARIADIC` is not allowed in table function call"
+                );
+                self.ensure_table_function_allowed()?;
+
+                // Enterprise feature gating
+                Feature::MssqlQuery.check_available()?;
+
+                return Ok(TableFunction::new_mssql_query(
+                    &self.catalog,
+                    &self.db_name,
+                    self.bind_schema_path(schema_name.as_deref()),
+                    args,
+                )
+                .context("mssql_query error")?
+                .into());
             }
             // `internal_backfill_progress` table function
             if func_name.eq("internal_backfill_progress") {

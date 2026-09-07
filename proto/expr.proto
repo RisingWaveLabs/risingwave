@@ -431,6 +431,8 @@ message TableFunction {
     POSTGRES_QUERY = 20;
     // mysql query
     MYSQL_QUERY = 21;
+    // mssql query
+    MSSQL_QUERY = 22;
     // Internal backfill table function
     INTERNAL_BACKFILL_PROGRESS = 30;
     // Internal source backfill table function

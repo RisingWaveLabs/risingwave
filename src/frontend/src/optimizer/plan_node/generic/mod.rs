@@ -103,6 +103,10 @@ mod mysql_query;
 
 pub use mysql_query::*;
 
+mod mssql_query;
+
+pub use mssql_query::*;
+
 mod locality_provider;
 pub use locality_provider::*;
 

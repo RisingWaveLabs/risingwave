@@ -1,0 +1,110 @@
+# Minimal test of mssql_query that bypasses the CDC source creation
+# This tests the 8-arg inline form only (no sqlserver-cdc source needed)
+
+control substitution on
+
+# Create test database and data
+system ok
+sqlcmd -C -d master -Q "IF DB_ID('mssql_minimal_test') IS NOT NULL BEGIN ALTER DATABASE mssql_minimal_test SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE mssql_minimal_test; END; CREATE DATABASE mssql_minimal_test;" -b
+
+system ok
+sqlcmd -C -d mssql_minimal_test -Q "
+CREATE TABLE test (id INT PRIMARY KEY, name VARCHAR(50), score INT);
+INSERT INTO test VALUES (1, 'alice', 95), (2, 'bob', 82), (3, 'carol', 91), (4, 'dave', 77), (5, 'eve', 88);
+" -b
+
+# Test 1: 8-arg form - simple COUNT with alias
+query I
+SELECT * FROM mssql_query(
+    '${SQLCMDSERVER:sqlserver-server}',
+    '${SQLCMDPORT:1433}',
+    '${SQLCMDUSER:SA}',
+    '${SQLCMDPASSWORD}',
+    'mssql_minimal_test',
+    'SELECT COUNT(*) AS c FROM test',
+    'false',
+    'true'
+);
+----
+5
+
+# Test 2: 8-arg form - WHERE clause
+query IT
+SELECT * FROM mssql_query(
+    '${SQLCMDSERVER:sqlserver-server}',
+    '${SQLCMDPORT:1433}',
+    '${SQLCMDUSER:SA}',
+    '${SQLCMDPASSWORD}',
+    'mssql_minimal_test',
+    'SELECT id, name FROM test WHERE score >= 85 ORDER BY id',
+    'false',
+    'true'
+);
+----
+1 alice
+3 carol
+5 eve
+
+# Test 3: 8-arg form - multiple column types
+query IIT
+SELECT * FROM mssql_query(
+    '${SQLCMDSERVER:sqlserver-server}',
+    '${SQLCMDPORT:1433}',
+    '${SQLCMDUSER:SA}',
+    '${SQLCMDPASSWORD}',
+    'mssql_minimal_test',
+    'SELECT id, score, name FROM test WHERE id = 1',
+    'false',
+    'true'
+);
+----
+1 95 alice
+
+# Test 4: 8-arg form - system catalog query (no table needed)
+query T
+SELECT * FROM mssql_query(
+    '${SQLCMDSERVER:sqlserver-server}',
+    '${SQLCMDPORT:1433}',
+    '${SQLCMDUSER:SA}',
+    '${SQLCMDPASSWORD}',
+    'master',
+    'SELECT name FROM sys.databases WHERE database_id = 1',
+    'false',
+    'true'
+);
+----
+master
+
+# Test 5: 8-arg form - aggregate function
+query I
+SELECT * FROM mssql_query(
+    '${SQLCMDSERVER:sqlserver-server}',
+    '${SQLCMDPORT:1433}',
+    '${SQLCMDUSER:SA}',
+    '${SQLCMDPASSWORD}',
+    'mssql_minimal_test',
+    'SELECT MAX(score) AS max_score FROM test',
+    'false',
+    'true'
+);
+----
+95
+
+# Test 6: 8-arg form - CAST conversion (verify type system)
+query II
+SELECT * FROM mssql_query(
+    '${SQLCMDSERVER:sqlserver-server}',
+    '${SQLCMDPORT:1433}',
+    '${SQLCMDUSER:SA}',
+    '${SQLCMDPASSWORD}',
+    'mssql_minimal_test',
+    'SELECT CAST(SUM(score) AS INT) AS total, CAST(AVG(score) AS INT) AS avg_s FROM test',
+    'false',
+    'true'
+);
+----
+433 86
+
+# Cleanup
+system ok
+sqlcmd -C -d master -Q "ALTER DATABASE mssql_minimal_test SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE mssql_minimal_test;" -b

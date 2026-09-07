@@ -153,6 +153,8 @@ static TABLE_FUNCTION_CONVERT: LazyLock<OptimizationStage> = LazyLock::new(|| {
             TableFunctionToPostgresQueryRule::create(),
             // Apply mysql query rule next
             TableFunctionToMySqlQueryRule::create(),
+            // Apply mssql query rule next
+            TableFunctionToMssqlQueryRule::create(),
             // Apply project set rule last
             TableFunctionToProjectSetRule::create(),
         ],
@@ -180,6 +182,14 @@ static TABLE_FUNCTION_TO_MYSQL_QUERY: LazyLock<OptimizationStage> = LazyLock::ne
     OptimizationStage::new(
         "Table Function To MySQL",
         vec![TableFunctionToMySqlQueryRule::create()],
+        ApplyOrder::TopDown,
+    )
+});
+
+static TABLE_FUNCTION_TO_MSSQL_QUERY: LazyLock<OptimizationStage> = LazyLock::new(|| {
+    OptimizationStage::new(
+        "TableFunctionToMssqlQueryRule",
+        vec![TableFunctionToMssqlQueryRule::create()],
         ApplyOrder::TopDown,
     )
 });
@@ -861,6 +871,7 @@ impl LogicalOptimizer {
         plan = plan.optimize_by_rules(&TABLE_FUNCTION_TO_FILE_SCAN)?;
         plan = plan.optimize_by_rules(&TABLE_FUNCTION_TO_POSTGRES_QUERY)?;
         plan = plan.optimize_by_rules(&TABLE_FUNCTION_TO_MYSQL_QUERY)?;
+        plan = plan.optimize_by_rules(&TABLE_FUNCTION_TO_MSSQL_QUERY)?;
         plan = plan.optimize_by_rules(&TABLE_FUNCTION_TO_INTERNAL_BACKFILL_PROGRESS)?;
         plan = plan.optimize_by_rules(&TABLE_FUNCTION_TO_INTERNAL_GET_CHANNEL_DELTA_STATS)?;
         plan = plan.optimize_by_rules(&TABLE_FUNCTION_TO_INTERNAL_SOURCE_BACKFILL_PROGRESS)?;

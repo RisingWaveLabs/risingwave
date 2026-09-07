@@ -184,6 +184,13 @@ impl SqlServerExternalTable {
     }
 }
 
+/// Map a SQL Server column type string (as returned by
+/// `INFORMATION_SCHEMA.COLUMNS.DATA_TYPE`) to a RisingWave [`DataType`].
+/// Case-insensitive. Includes aliases for both the modern names
+/// (`integer`, `smallmoney`) and the legacy names (`int`, `money`) so
+/// the CDC source accepts the same set of aliases as the planning-time
+/// mapping in `connector_common::sql_server::mssql_type_to_rw_type_str`.
+/// Unknown types yield `ConnectorError`.
 fn mssql_type_to_rw_type(col_type: &str, col_name: &str) -> ConnectorResult<DataType> {
     let dtype = match col_type.to_lowercase().as_str() {
         "bit" => DataType::Boolean,
@@ -200,7 +207,7 @@ fn mssql_type_to_rw_type(col_type: &str, col_name: &str) -> ConnectorResult<Data
         "datetimeoffset" => DataType::Timestamptz,
         "char" | "nchar" | "varchar" | "nvarchar" | "text" | "ntext" | "xml"
         | "uniqueidentifier" => DataType::Varchar,
-        "money" => DataType::Decimal,
+        "money" | "smallmoney" => DataType::Decimal,
         mssql_type => {
             return Err(anyhow!(
                 "Unsupported Sql Server data type: {:?}, column name: {}",

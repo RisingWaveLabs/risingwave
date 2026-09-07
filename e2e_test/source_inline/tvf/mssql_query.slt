@@ -1,0 +1,194 @@
+control substitution on
+
+# ------------ data prepare stage ------------
+# Recreate the test database so the SLT can run repeatedly without manual cleanup.
+# SET SINGLE_USER / ROLLBACK IMMEDIATE force-kills any active connections before DROP.
+system ok
+sqlcmd -C -d master -Q "IF DB_ID('mssql_tvf_test') IS NOT NULL BEGIN ALTER DATABASE mssql_tvf_test SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE mssql_tvf_test; END; CREATE DATABASE mssql_tvf_test;" -b
+
+system ok
+sqlcmd -C -d mssql_tvf_test -Q "
+CREATE TABLE test (
+    id INT PRIMARY KEY,
+    v_int INT,
+    v_bigint BIGINT,
+    v_varchar VARCHAR(100),
+    v_nvarchar NVARCHAR(100),
+    v_bit BIT,
+    v_decimal DECIMAL(10, 2),
+    v_date DATE,
+    v_time TIME,
+    v_datetime2 DATETIME2
+);
+INSERT INTO test VALUES
+    (1,  100,  1000000000,  'varchar1',  N'nvarchar1',  1, 100,    '2021-01-01', '12:00:00', '2021-01-01 12:00:00'),
+    (2,  200,  2000000000,  'varchar2',  N'nvarchar2',  0, 200,    '2022-02-02', '13:00:00', '2022-02-02 13:00:00'),
+    (3,  300,  3000000000,  'varchar3',  N'nvarchar3',  1, 300,    '2023-03-03', '14:00:00', '2023-03-03 14:00:00'),
+    (4,  400,  4000000000,  'varchar4',  N'nvarchar4',  0, 400,    '2024-04-04', '15:00:00', '2024-04-04 15:00:00'),
+    (5,  500,  5000000000,  'varchar5',  N'nvarchar5',  1, 500,    '2025-05-05', '16:00:00', '2025-05-05 16:00:00'),
+    (6,  600,  6000000000,  'varchar6',  N'nvarchar6',  0, 600,    '2026-06-06', '17:00:00', '2026-06-06 17:00:00'),
+    (7,  700,  7000000000,  'varchar7',  N'nvarchar7',  1, 700,    '2027-07-07', '18:00:00', '2027-07-07 18:00:00'),
+    (8,  800,  8000000000,  'varchar8',  N'nvarchar8',  0, 800,    '2028-08-08', '19:00:00', '2028-08-08 19:00:00'),
+    (9,  900,  9000000000,  'varchar9',  N'nvarchar9',  1, 900,    '2029-09-09', '20:00:00', '2029-09-09 20:00:00'),
+    (10, 1000, 10000000000, 'varchar10', N'nvarchar10', 0, 1000,   '2030-10-10', '21:00:00', '2030-10-10 21:00:00');
+" -b
+
+# Enable CDC on the database (required before any sqlserver-cdc source can be created in RisingWave)
+system ok
+sqlcmd -C -d mssql_tvf_test -Q "EXEC sys.sp_cdc_enable_db;" -b
+
+# Enable CDC on the `test` table so it can be tracked by the source
+system ok
+sqlcmd -C -d mssql_tvf_test -Q "
+EXEC sys.sp_cdc_enable_table
+    @source_schema = 'dbo',
+    @source_name = 'test',
+    @role_name = NULL;
+" -b
+
+# ------------ create CDC source stage ------------
+# The 2-arg form of `mssql_query` reuses the connection details from a sqlserver-cdc source,
+# so we create one first. We use the ${SQLCMD*} env vars exposed by risedev / CI so the test
+# works both locally and in CI without hard-coded credentials.
+statement ok
+CREATE SOURCE mssql_tvf_source WITH (
+    connector = 'sqlserver-cdc',
+    hostname = '${SQLCMDSERVER:sqlserver-server}',
+    port = '${SQLCMDPORT:1433}',
+    username = '${SQLCMDUSER:SA}',
+    password = '${SQLCMDPASSWORD}',
+    database.name = 'mssql_tvf_test'
+);
+
+# ------------ 8-arg direct form: trivial scalar query ------------
+query I
+SELECT * FROM mssql_query(
+    '${SQLCMDSERVER:sqlserver-server}',
+    '${SQLCMDPORT:1433}',
+    '${SQLCMDUSER:SA}',
+    '${SQLCMDPASSWORD}',
+    'mssql_tvf_test',
+    'SELECT COUNT(*) FROM test',
+    'false',
+    'true'
+);
+----
+10
+
+# ------------ 8-arg direct form: WHERE clause filters rows ------------
+query IIIT
+SELECT * FROM mssql_query(
+    '${SQLCMDSERVER:sqlserver-server}',
+    '${SQLCMDPORT:1433}',
+    '${SQLCMDUSER:SA}',
+    '${SQLCMDPASSWORD}',
+    'mssql_tvf_test',
+    'SELECT id, v_int, v_bigint, v_varchar FROM test WHERE id > 5 ORDER BY id',
+    'false',
+    'true'
+);
+----
+6 600 6000000000 varchar6
+7 700 7000000000 varchar7
+8 800 8000000000 varchar8
+9 900 9000000000 varchar9
+10 1000 10000000000 varchar10
+
+# ------------ 8-arg direct form: NVARCHAR (unicode-safe) column ------------
+query T
+SELECT * FROM mssql_query(
+    '${SQLCMDSERVER:sqlserver-server}',
+    '${SQLCMDPORT:1433}',
+    '${SQLCMDUSER:SA}',
+    '${SQLCMDPASSWORD}',
+    'mssql_tvf_test',
+    'SELECT v_nvarchar FROM test WHERE id = 1',
+    'false',
+    'true'
+);
+----
+nvarchar1
+
+# ------------ 8-arg direct form: schema discovery (all column types in a single row) ------------
+# BIT, INT, BIGINT, DECIMAL, DATE, TIME, DATETIME2, VARCHAR, NVARCHAR
+query TTTTTTTTTT
+SELECT * FROM mssql_query(
+    '${SQLCMDSERVER:sqlserver-server}',
+    '${SQLCMDPORT:1433}',
+    '${SQLCMDUSER:SA}',
+    '${SQLCMDPASSWORD}',
+    'mssql_tvf_test',
+    'SELECT id, v_bit, v_int, v_bigint, v_decimal, v_date, v_time, v_datetime2, v_varchar, v_nvarchar FROM test WHERE id = 1',
+    'false',
+    'true'
+);
+----
+1 t 100 1000000000 100 2021-01-01 12:00:00 2021-01-01 12:00:00 varchar1 nvarchar1
+
+# ------------ 8-arg direct form: arbitrary WHERE expressions ------------
+# Different operator + outer-side projection
+query II
+SELECT id, v_int * 2 AS doubled
+FROM mssql_query(
+    '${SQLCMDSERVER:sqlserver-server}',
+    '${SQLCMDPORT:1433}',
+    '${SQLCMDUSER:SA}',
+    '${SQLCMDPASSWORD}',
+    'mssql_tvf_test',
+    'SELECT id, v_int FROM test WHERE v_int >= 800',
+    'false',
+    'true'
+)
+ORDER BY id;
+----
+8  1600
+9  1800
+10 2000
+
+# ------------ 8-arg direct form: system catalog query (no source table needed) ------------
+# Verifies the function can run queries that don't reference any user table.
+query T
+SELECT * FROM mssql_query(
+    '${SQLCMDSERVER:sqlserver-server}',
+    '${SQLCMDPORT:1433}',
+    '${SQLCMDUSER:SA}',
+    '${SQLCMDPASSWORD}',
+    'mssql_tvf_test',
+    'SELECT name FROM sys.databases WHERE database_id <= 4 ORDER BY name',
+    'false',
+    'true'
+);
+----
+master
+model
+msdb
+tempdb
+
+# ------------ 2-arg source-reference form: WHERE filter ------------
+query I
+SELECT * FROM mssql_query(
+    'mssql_tvf_source',
+    'SELECT id FROM test WHERE id > 5 ORDER BY id'
+);
+----
+6
+7
+8
+9
+10
+
+# ------------ 2-arg source-reference form: aggregate query ------------
+query I
+SELECT * FROM mssql_query(
+    'mssql_tvf_source',
+    'SELECT COUNT(*) FROM test'
+);
+----
+10
+
+# ------------ cleanup stage ------------
+statement ok
+DROP SOURCE mssql_tvf_source CASCADE;
+
+system ok
+sqlcmd -C -d master -Q "ALTER DATABASE mssql_tvf_test SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE mssql_tvf_test;" -b

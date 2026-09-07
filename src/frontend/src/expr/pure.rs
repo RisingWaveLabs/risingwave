@@ -76,6 +76,7 @@ impl ExprVisitor for ImpureAnalyzer {
             Type::FileScan
             | Type::PostgresQuery
             | Type::MysqlQuery
+            | Type::MssqlQuery
             | Type::InternalBackfillProgress
             | Type::InternalSourceBackfillProgress
             | Type::InternalGetChannelDeltaStats

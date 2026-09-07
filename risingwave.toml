@@ -1,0 +1,31 @@
+[system]
+state_store = "hummock+memory"
+data_directory = "hummock_001"
+backup_storage_url = "memory"
+backup_storage_directory = "hummock_001/backup"
+
+[meta]
+state_store = "hummock+memory"
+data_directory = "hummock_001"
+
+[storage]
+state_store = "hummock+memory"
+data_directory = "hummock_001"
+shared_buffer_capacity_mb = 4096
+block_cache_capacity_mb = 1024
+meta_cache_capacity_mb = 512
+
+[server]
+heartbeat_interval_ms = 100
+metrics_level = "Disabled"
+telemetry_enabled = false
+
+[streaming]
+in_flight_barrier_nums = 10000
+
+[batch]
+chunk_size = 1024
+statement_timeout_in_sec = 3600
+
+[meta.meta_store_config]
+max_connections = 10

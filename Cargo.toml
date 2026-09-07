@@ -125,12 +125,12 @@ aws-credential-types = { version = "1", default-features = false, features = [
 ] }
 aws-endpoint = "0.60"
 aws-sdk-dynamodb = { version = "1", default-features = false, features = [
-    "rt-tokio",
     "default-https-client",
+    "rt-tokio",
 ] }
 aws-sdk-glue = { version = "1", default-features = false, features = [
-    "rt-tokio",
     "default-https-client",
+    "rt-tokio",
 ] }
 aws-sdk-kinesis = { version = "1", default-features = false, features = [
     "default-https-client",
@@ -285,8 +285,8 @@ rw_resource_util = { path = "src/utils/resource_util" }
 # Pin sea-orm & sqlx to a specific version as we are using a patched version of sqlx
 # for compatibility with madsim.
 sea-orm = { version = "=1.1.1", features = [
-    "sqlx-all",
     "runtime-tokio-native-tls",
+    "sqlx-all",
     "with-uuid",
 ] }
 sea-orm-migration = "=1.1.1"
@@ -312,16 +312,16 @@ tikv-jemallocator = { git = "https://github.com/risingwavelabs/jemallocator.git"
     "stats",
 ], rev = "64a2d988d687a94cd859855e19241cd8b0705466" }
 tokio = { package = "madsim-tokio", git = "https://github.com/risingwavelabs/madsim.git", rev = "595455fd05058b3b48bf281bea3ada1bca3d6646", features = [
+    "macros",
     "rt",
     "rt-multi-thread",
-    "sync",
-    "macros",
-    "time",
     "signal",
+    "sync",
+    "time",
 ] }
 tokio-stream = { git = "https://github.com/madsim-rs/tokio.git", rev = "0dd1055", features = [
-    "net",
     "fs",
+    "net",
 ] }
 tokio-util = "0.7"
 toml = "1.0"
@@ -466,8 +466,8 @@ getrandom = { git = "https://github.com/madsim-rs/getrandom.git", rev = "e79a7ae
 # Don't patch `tokio-stream`, but only use the madsim version for **direct** dependencies.
 # Imagine an unpatched dependency depends on the original `tokio` and the patched `tokio-stream`.
 # tokio-stream = { git = "https://github.com/madsim-rs/tokio.git", rev = "0dd1055" }
-tokio-retry = { git = "https://github.com/madsim-rs/rust-tokio-retry.git", rev = "95e2fd3" }
 tokio-postgres = { git = "https://github.com/madsim-rs/rust-postgres.git", rev = "ac00d88" }
+tokio-retry = { git = "https://github.com/madsim-rs/rust-tokio-retry.git", rev = "95e2fd3" }
 # sqlx version: v0.8.2
 # patch diffs: https://github.com/madsim-rs/sqlx/pull/4, https://github.com/madsim-rs/sqlx/pull/5
 sqlx = { git = "https://github.com/madsim-rs/sqlx.git", rev = "d43f1f28c0a2ec28144d81fdf78706ce30002b59" }

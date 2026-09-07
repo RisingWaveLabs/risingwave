@@ -117,6 +117,11 @@
             "description": "Ingest data into tables through the WebSocket API.",
             "type": "string",
             "const": "WebSocketIngest"
+        },
+        {
+            "description": "Run arbitrary SELECT queries against SQL Server via the mssql_query table function.",
+            "type": "string",
+            "const": "MssqlQuery"
         }
     ]
 }
