@@ -502,7 +502,7 @@ KafkaProperties:
     allow_alter_on_fly: true
   - name: properties.sasl.mechanism
     field_type: String
-    comments: SASL mechanism if SASL is enabled. Currently support PLAIN, SCRAM, GSSAPI, and `AWS_MSK_IAM`.
+    comments: SASL mechanism if SASL is enabled. Currently support PLAIN, SCRAM, GSSAPI, OAUTHBEARER, and `AWS_MSK_IAM`.
     required: false
     allow_alter_on_fly: true
   - name: properties.sasl.username
@@ -519,26 +519,62 @@ KafkaProperties:
     field_type: String
     comments: Kafka server's Kerberos principal name under SASL/GSSAPI, not including /hostname@REALM.
     required: false
+    allow_alter_on_fly: true
   - name: properties.sasl.kerberos.keytab
     field_type: String
     comments: Path to client's Kerberos keytab file under SASL/GSSAPI.
     required: false
+    allow_alter_on_fly: true
   - name: properties.sasl.kerberos.principal
     field_type: String
     comments: Client's Kerberos principal name under SASL/GSSAPI.
     required: false
+    allow_alter_on_fly: true
   - name: properties.sasl.kerberos.kinit.cmd
     field_type: String
     comments: Shell command to refresh or acquire the client's Kerberos ticket under SASL/GSSAPI.
     required: false
+    allow_alter_on_fly: true
   - name: properties.sasl.kerberos.min.time.before.relogin
     field_type: String
     comments: Minimum time in milliseconds between key refresh attempts under SASL/GSSAPI.
     required: false
+    allow_alter_on_fly: true
   - name: properties.sasl.oauthbearer.config
     field_type: String
     comments: Configurations for SASL/OAUTHBEARER.
     required: false
+    allow_alter_on_fly: true
+  - name: properties.sasl.oauthbearer.method
+    field_type: String
+    comments: SASL/OAUTHBEARER token acquisition method. Set to "oidc" to use the OIDC client credentials flow.
+    required: false
+    allow_alter_on_fly: true
+  - name: properties.sasl.oauthbearer.client.id
+    field_type: String
+    comments: Client ID for SASL/OAUTHBEARER OIDC provider.
+    required: false
+    allow_alter_on_fly: true
+  - name: properties.sasl.oauthbearer.client.secret
+    field_type: String
+    comments: Client secret for SASL/OAUTHBEARER OIDC provider.
+    required: false
+    allow_alter_on_fly: true
+  - name: properties.sasl.oauthbearer.token.endpoint.url
+    field_type: String
+    comments: OIDC token endpoint URL for SASL/OAUTHBEARER.
+    required: false
+    allow_alter_on_fly: true
+  - name: properties.sasl.oauthbearer.scope
+    field_type: String
+    comments: OIDC scope for SASL/OAUTHBEARER.
+    required: false
+    allow_alter_on_fly: true
+  - name: properties.sasl.oauthbearer.extensions
+    field_type: String
+    comments: SASL/OAUTHBEARER extensions for broker-facing claims (e.g. Confluent Cloud logicalCluster, identityPoolId).
+    required: false
+    allow_alter_on_fly: true
   - name: properties.message.max.bytes
     field_type: usize
     comments: |-

@@ -139,6 +139,7 @@ rdkafka = { workspace = true, features = [
     "ssl",
     "gssapi",
     "zstd",
+    "curl",
 ] }
 redis = { workspace = true, features = [
     "aio",

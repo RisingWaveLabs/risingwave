@@ -3561,6 +3561,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "curl-sys"
+version = "0.4.87+curl-8.19.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "61a460380f0ef783703dcbe909107f39c162adeac050d73c850055118b5b6327"
+dependencies = [
+ "cc",
+ "libc",
+ "libz-sys",
+ "openssl-sys",
+ "pkg-config",
+ "vcpkg",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
 name = "curve25519-dalek"
 version = "4.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -12048,6 +12063,7 @@ version = "4.9.0+2.10.0"
 source = "git+https://github.com/risingwavelabs/rust-rdkafka?branch=downgrade-zstd#4b4ebb15290e067b53f76fb278cd1e358061e0f8"
 dependencies = [
  "cmake",
+ "curl-sys",
  "libc",
  "libz-sys",
  "num_enum",
