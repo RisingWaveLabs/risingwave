@@ -107,7 +107,7 @@ libraries = [{ path = "./lints" }]
 
 [workspace.dependencies]
 
-adbc_core = { version = "0.23" }
+adbc_core = { version = "0.24" }
 adbc_snowflake = { version = "0.23", default-features = false }
 apache-avro = { git = "https://github.com/risingwavelabs/avro-rs", rev = "1f2723802d4fb77b97fa084f7bb81e3b60b9e03f" }
 arc-swap = "1"
