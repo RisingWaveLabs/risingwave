@@ -2320,8 +2320,12 @@ impl GrpcMetaClientCore {
             DdlServiceClient::new(channel.clone()).max_decoding_message_size(usize::MAX);
         let hummock_client =
             HummockManagerServiceClient::new(channel.clone()).max_decoding_message_size(usize::MAX);
-        let notification_client =
-            NotificationServiceClient::new(channel.clone()).max_decoding_message_size(usize::MAX);
+        // Accept zstd-compressed notifications: the initial `MetaSnapshot` on `Subscribe`
+        // carries the full hummock version, and a single uncompressed gRPC message larger
+        // than `i32::MAX` bytes is silently reset by hyper/h2 and can never be delivered.
+        let notification_client = NotificationServiceClient::new(channel.clone())
+            .accept_compressed(tonic::codec::CompressionEncoding::Zstd)
+            .max_decoding_message_size(usize::MAX);
         let stream_client =
             StreamManagerServiceClient::new(channel.clone()).max_decoding_message_size(usize::MAX);
         let user_client = UserServiceClient::new(channel.clone());

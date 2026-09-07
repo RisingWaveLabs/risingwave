@@ -807,7 +807,14 @@ pub async fn start_service_as_election_leader(
         .add_service(
             HummockManagerServiceServer::new(hummock_srv).max_decoding_message_size(usize::MAX),
         )
-        .add_service(NotificationServiceServer::new(notification_srv))
+        // Compress notifications with zstd for clients that accept it (older clients still
+        // get uncompressed responses). The initial `MetaSnapshot` carries the full hummock
+        // version; uncompressed messages larger than `i32::MAX` bytes are silently reset by
+        // hyper/h2, so compression keeps large snapshots deliverable.
+        .add_service(
+            NotificationServiceServer::new(notification_srv)
+                .send_compressed(tonic::codec::CompressionEncoding::Zstd),
+        )
         .add_service(MetaMemberServiceServer::new(meta_member_srv))
         .add_service(DdlServiceServer::new(ddl_srv).max_decoding_message_size(usize::MAX))
         .add_service(UserServiceServer::new(user_srv))
