@@ -13,14 +13,47 @@
 // limitations under the License.
 
 use risingwave_common::acl::AclMode;
+use risingwave_common::catalog::{DEFAULT_SUPER_USER, DEFAULT_SUPER_USER_FOR_PG};
 use risingwave_pb::user::PbAction;
 use risingwave_pb::user::grant_privilege::PbObject;
+use risingwave_sqlparser::ast::Ident;
 
-use crate::catalog::OwnedByUserCatalog;
+use crate::Binder;
+use crate::catalog::{CatalogError, OwnedByUserCatalog};
 use crate::error::ErrorCode::PermissionDenied;
 use crate::error::Result;
 use crate::session::SessionImpl;
 use crate::user::UserId;
+use crate::user::user_catalog::UserCatalog;
+
+/// Resolve the target users of `DROP OWNED BY` / `REASSIGN OWNED BY`, rejecting the default
+/// superusers. `check` is run on each resolved user for the statement-specific permission
+/// checks, and `action` names the statement in error messages (e.g. "drop", "reassign").
+pub(crate) fn resolve_owned_by_users(
+    session: &SessionImpl,
+    owners: Vec<Ident>,
+    action: &str,
+    check: impl Fn(&UserCatalog) -> Result<()>,
+) -> Result<Vec<UserId>> {
+    let user_reader = session.env().user_info_reader().read_guard();
+    let mut owner_ids = Vec::with_capacity(owners.len());
+    for owner in owners {
+        let user_name = Binder::resolve_user_name(vec![owner].into())?;
+        let user = user_reader
+            .get_user_by_name(&user_name)
+            .ok_or_else(|| CatalogError::not_found("user", user_name.clone()))?;
+        if user.name == DEFAULT_SUPER_USER || user.name == DEFAULT_SUPER_USER_FOR_PG {
+            return Err(PermissionDenied(format!(
+                "cannot {} objects owned by {} because they are required by the database system",
+                action, user.name
+            ))
+            .into());
+        }
+        check(user)?;
+        owner_ids.push(user.id);
+    }
+    Ok(owner_ids)
+}
 
 #[derive(Debug)]
 pub struct ObjectCheckItem {

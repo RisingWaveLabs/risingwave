@@ -23,3 +23,12 @@
 - input: REVOKE ALL PRIVILEGES ON ALL SOURCES IN SCHEMA schema FROM user1
   formatted_sql: REVOKE ALL PRIVILEGES ON ALL SOURCES IN SCHEMA schema FROM user1 RESTRICT
   formatted_ast: 'Revoke { privileges: All { with_privileges_keyword: true }, objects: AllSourcesInSchema { schemas: [ObjectName([Ident { value: "schema", quote_style: None }])] }, grantees: [Ident { value: "user1", quote_style: None }], granted_by: None, revoke_grant_option: false, cascade: false }'
+- input: REASSIGN OWNED BY user1, user2 TO user3
+  formatted_sql: REASSIGN OWNED BY user1, user2 TO user3
+  formatted_ast: 'ReassignOwned { old_owners: [Ident { value: "user1", quote_style: None }, Ident { value: "user2", quote_style: None }], new_owner: Ident { value: "user3", quote_style: None } }'
+- input: DROP OWNED BY user1, user2
+  formatted_sql: DROP OWNED BY user1, user2 RESTRICT
+  formatted_ast: 'DropOwned { owners: [Ident { value: "user1", quote_style: None }, Ident { value: "user2", quote_style: None }], cascade: false }'
+- input: DROP OWNED BY user1 CASCADE
+  formatted_sql: DROP OWNED BY user1 CASCADE
+  formatted_ast: 'DropOwned { owners: [Ident { value: "user1", quote_style: None }], cascade: true }'

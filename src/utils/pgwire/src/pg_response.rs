@@ -94,6 +94,8 @@ pub enum StatementType {
     ALTER_FRAGMENT,
     ALTER_COMPACTION_GROUP,
     REVOKE_PRIVILEGE,
+    REASSIGN_OWNED,
+    DROP_OWNED,
     // Introduce ORDER_BY statement type cuz Calcite unvalidated AST has SqlKind.ORDER_BY. Note
     // that Statement Type is not designed to be one to one mapping with SqlKind.
     ORDER_BY,
@@ -307,6 +309,8 @@ impl StatementType {
             Statement::Rollback { .. } => Ok(StatementType::ROLLBACK),
             Statement::Grant { .. } => Ok(StatementType::GRANT_PRIVILEGE),
             Statement::Revoke { .. } => Ok(StatementType::REVOKE_PRIVILEGE),
+            Statement::ReassignOwned { .. } => Ok(StatementType::REASSIGN_OWNED),
+            Statement::DropOwned { .. } => Ok(StatementType::DROP_OWNED),
             Statement::Describe { .. } => Ok(StatementType::DESCRIBE),
             Statement::ShowCreateObject { .. } | Statement::ShowObjects { .. } => {
                 Ok(StatementType::SHOW_COMMAND)

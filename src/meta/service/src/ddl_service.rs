@@ -970,6 +970,52 @@ impl DdlService for DdlServiceImpl {
         }))
     }
 
+    async fn reassign_owned(
+        &self,
+        request: Request<ReassignOwnedRequest>,
+    ) -> Result<Response<ReassignOwnedResponse>, Status> {
+        let ReassignOwnedRequest {
+            old_owner_ids,
+            new_owner_id,
+            database_id,
+        } = request.into_inner();
+        let version = self
+            .ddl_controller
+            .run_command(DdlCommand::ReassignOwned {
+                old_owner_ids,
+                new_owner_id,
+                database_id,
+            })
+            .await?;
+        Ok(Response::new(ReassignOwnedResponse {
+            status: None,
+            version,
+        }))
+    }
+
+    async fn drop_owned(
+        &self,
+        request: Request<DropOwnedRequest>,
+    ) -> Result<Response<DropOwnedResponse>, Status> {
+        let DropOwnedRequest {
+            owner_ids,
+            database_id,
+            cascade,
+        } = request.into_inner();
+        let version = self
+            .ddl_controller
+            .run_command(DdlCommand::DropOwned {
+                owner_ids,
+                database_id,
+                cascade,
+            })
+            .await?;
+        Ok(Response::new(DropOwnedResponse {
+            status: None,
+            version,
+        }))
+    }
+
     async fn alter_subscription_retention(
         &self,
         request: Request<AlterSubscriptionRetentionRequest>,

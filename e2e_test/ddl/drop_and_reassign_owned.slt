@@ -1,0 +1,328 @@
+# Tests for `REASSIGN OWNED BY ... TO ...` and `DROP OWNED BY ... [CASCADE | RESTRICT]`.
+# Both statements are scoped to the current database. Unlike PostgreSQL, `DROP OWNED BY`
+# only revokes privileges (and default privileges); it fails if the users still own any
+# objects, which should be transferred with `REASSIGN OWNED BY` (or dropped) first.
+
+statement ok
+SET RW_IMPLICIT_FLUSH TO true;
+
+##### REASSIGN OWNED BY #####
+
+statement ok
+CREATE USER reassign_u1;
+
+statement ok
+CREATE USER reassign_u2;
+
+statement ok
+CREATE TABLE reassign_t (v INT PRIMARY KEY);
+
+statement ok
+CREATE INDEX reassign_t_idx ON reassign_t (v);
+
+statement ok
+CREATE MATERIALIZED VIEW reassign_mv AS SELECT v FROM reassign_t;
+
+statement ok
+ALTER TABLE reassign_t OWNER TO reassign_u1;
+
+statement ok
+ALTER MATERIALIZED VIEW reassign_mv OWNER TO reassign_u1;
+
+statement error user not found
+REASSIGN OWNED BY nonexistent_user TO reassign_u2;
+
+statement error required by the database system
+REASSIGN OWNED BY root TO reassign_u2;
+
+statement ok
+REASSIGN OWNED BY reassign_u1 TO reassign_u2;
+
+query TT rowsort
+SELECT pg_class.relname, pg_roles.rolname
+FROM pg_class
+JOIN pg_roles ON pg_roles.oid = pg_class.relowner
+WHERE pg_class.relname IN ('reassign_t', 'reassign_t_idx', 'reassign_mv');
+----
+reassign_mv reassign_u2
+reassign_t reassign_u2
+reassign_t_idx reassign_u2
+
+# The internal state tables of the owned streaming jobs are transferred as well.
+query T
+SELECT DISTINCT rw_users.name
+FROM rw_internal_tables
+JOIN rw_users ON rw_users.id = rw_internal_tables.owner
+WHERE rw_internal_tables.name LIKE '%reassign_mv%';
+----
+reassign_u2
+
+# Reassigning from a user that owns nothing is a no-op.
+statement ok
+REASSIGN OWNED BY reassign_u1 TO reassign_u2;
+
+# The old owner no longer owns anything and can be dropped.
+statement ok
+DROP USER reassign_u1;
+
+statement ok
+DROP MATERIALIZED VIEW reassign_mv;
+
+statement ok
+DROP TABLE reassign_t;
+
+statement ok
+DROP USER reassign_u2;
+
+##### DROP OWNED BY: blocked by owned objects #####
+
+statement ok
+CREATE USER dropped_owner;
+
+statement ok
+CREATE TABLE owned_t (v INT PRIMARY KEY);
+
+statement ok
+ALTER TABLE owned_t OWNER TO dropped_owner;
+
+statement error user not found
+DROP OWNED BY nonexistent_user;
+
+statement error required by the database system
+DROP OWNED BY root;
+
+# The user still owns objects: DROP OWNED refuses and points to REASSIGN OWNED.
+statement error only revokes privileges and does not drop objects
+DROP OWNED BY dropped_owner;
+
+# Grant a privilege TO the user on an object owned by others; DROP OWNED revokes it.
+statement ok
+CREATE TABLE root_t (v INT PRIMARY KEY);
+
+statement ok
+GRANT SELECT ON root_t TO dropped_owner;
+
+query I
+SELECT has_table_privilege('dropped_owner', 'root_t', 'SELECT');
+----
+t
+
+statement ok
+REASSIGN OWNED BY dropped_owner TO root;
+
+statement ok
+DROP OWNED BY dropped_owner;
+
+# The reassigned table survives, now owned by root.
+query TT
+SELECT pg_class.relname, pg_roles.rolname
+FROM pg_class
+JOIN pg_roles ON pg_roles.oid = pg_class.relowner
+WHERE pg_class.relname = 'owned_t';
+----
+owned_t root
+
+# The privileges granted to the user are revoked.
+query I
+SELECT has_table_privilege('dropped_owner', 'root_t', 'SELECT');
+----
+f
+
+statement ok
+DROP USER dropped_owner;
+
+statement ok
+DROP TABLE owned_t;
+
+# DROP OWNED by a user that owns nothing and has no privileges is a no-op.
+statement ok
+CREATE USER empty_owner;
+
+statement ok
+DROP OWNED BY empty_owner;
+
+statement ok
+DROP USER empty_owner;
+
+##### DROP OWNED BY: privileges granted by the user and default privileges #####
+
+statement ok
+CREATE USER dob_owner WITH PASSWORD 'password';
+
+statement ok
+CREATE USER dob_grantee;
+
+skipif madsim
+system ok
+bash -c 'set -euo pipefail; psql -h "$SLT_HOST" -p "$SLT_PORT" -U root -d "$SLT_DB" -c "GRANT CONNECT ON DATABASE \"$SLT_DB\" TO dob_owner"'
+
+statement ok
+GRANT CREATE ON SCHEMA public TO dob_owner;
+
+# Default privileges: tables created by dob_owner are auto-granted to dob_grantee.
+# Executed by dob_owner themselves so that they are recorded as the grantor (the
+# grantor of a default privilege is the user who runs ALTER DEFAULT PRIVILEGES).
+skipif madsim
+system ok
+bash -c 'set -euo pipefail; PGPASSWORD=password psql -h "$SLT_HOST" -p "$SLT_PORT" -U dob_owner -d "$SLT_DB" -c "ALTER DEFAULT PRIVILEGES GRANT SELECT ON TABLES TO dob_grantee;"'
+
+skipif madsim
+system ok
+bash -c 'set -euo pipefail; PGPASSWORD=password psql -h "$SLT_HOST" -p "$SLT_PORT" -U dob_owner -d "$SLT_DB" -c "CREATE TABLE dob_t (v INT PRIMARY KEY);"'
+
+skipif madsim
+query I
+SELECT has_table_privilege('dob_grantee', 'dob_t', 'SELECT');
+----
+t
+
+# The user owns an object and has granted privileges to others (via the default
+# privileges), so both DROP USER and DROP OWNED are blocked.
+skipif madsim
+statement error is not allowed
+DROP USER dob_owner;
+
+skipif madsim
+statement error only revokes privileges and does not drop objects
+DROP OWNED BY dob_owner;
+
+# Transfer the ownership first; the privileges granted by the user stay in place.
+statement ok
+REASSIGN OWNED BY dob_owner TO root;
+
+skipif madsim
+query I
+SELECT has_table_privilege('dob_grantee', 'dob_t', 'SELECT');
+----
+t
+
+statement ok
+DROP OWNED BY dob_owner;
+
+# The grants BY the user (the auto-granted SELECT on dob_t) and TO the user are revoked.
+skipif madsim
+query I
+SELECT has_table_privilege('dob_grantee', 'dob_t', 'SELECT');
+----
+f
+
+query I
+SELECT has_schema_privilege('dob_owner', 'public', 'CREATE');
+----
+f
+
+# The user's default privileges were removed as well: a new table created by the user
+# is no longer auto-granted to dob_grantee. Note that DROP OWNED also revoked the
+# CONNECT privilege, so grant it back first.
+statement ok
+GRANT CREATE ON SCHEMA public TO dob_owner;
+
+skipif madsim
+system ok
+bash -c 'set -euo pipefail; psql -h "$SLT_HOST" -p "$SLT_PORT" -U root -d "$SLT_DB" -c "GRANT CONNECT ON DATABASE \"$SLT_DB\" TO dob_owner"'
+
+skipif madsim
+system ok
+bash -c 'set -euo pipefail; PGPASSWORD=password psql -h "$SLT_HOST" -p "$SLT_PORT" -U dob_owner -d "$SLT_DB" -c "CREATE TABLE dob_t2 (v INT PRIMARY KEY);"'
+
+skipif madsim
+query I
+SELECT has_table_privilege('dob_grantee', 'dob_t2', 'SELECT');
+----
+f
+
+# After reassigning the new table and a final DROP OWNED, the user can be dropped.
+statement ok
+REASSIGN OWNED BY dob_owner TO root;
+
+statement ok
+DROP OWNED BY dob_owner;
+
+statement ok
+DROP USER dob_owner;
+
+statement ok
+DROP USER dob_grantee;
+
+skipif madsim
+statement ok
+DROP TABLE dob_t;
+
+skipif madsim
+statement ok
+DROP TABLE dob_t2;
+
+statement ok
+DROP TABLE root_t;
+
+##### DROP OWNED BY: dependent privilege chains (RESTRICT vs CASCADE) #####
+
+# Build a grant-option chain: root -> chain_u1 -> chain_u2 -> chain_u3. The re-grant by
+# chain_u2 depends on chain_u1's grant, but is neither granted by nor to chain_u1, so it
+# blocks `DROP OWNED BY chain_u1` in restrict mode and is revoked by cascade.
+
+statement ok
+CREATE USER chain_u1 WITH PASSWORD 'password';
+
+statement ok
+CREATE USER chain_u2 WITH PASSWORD 'password';
+
+statement ok
+CREATE USER chain_u3;
+
+statement ok
+CREATE TABLE chain_t (v INT PRIMARY KEY);
+
+statement ok
+GRANT SELECT ON chain_t TO chain_u1 WITH GRANT OPTION;
+
+skipif madsim
+system ok
+bash -c 'set -euo pipefail; psql -h "$SLT_HOST" -p "$SLT_PORT" -U root -d "$SLT_DB" -c "GRANT CONNECT ON DATABASE \"$SLT_DB\" TO chain_u1, chain_u2"'
+
+skipif madsim
+system ok
+bash -c 'set -euo pipefail; PGPASSWORD=password psql -h "$SLT_HOST" -p "$SLT_PORT" -U chain_u1 -d "$SLT_DB" -c "GRANT SELECT ON chain_t TO chain_u2 WITH GRANT OPTION;"'
+
+skipif madsim
+system ok
+bash -c 'set -euo pipefail; PGPASSWORD=password psql -h "$SLT_HOST" -p "$SLT_PORT" -U chain_u2 -d "$SLT_DB" -c "GRANT SELECT ON chain_t TO chain_u3;"'
+
+skipif madsim
+query I
+SELECT has_table_privilege('chain_u3', 'chain_t', 'SELECT');
+----
+t
+
+skipif madsim
+statement error dependent privileges exist, use CASCADE to revoke them too
+DROP OWNED BY chain_u1;
+
+statement ok
+DROP OWNED BY chain_u1 CASCADE;
+
+# The whole chain is revoked: chain_u2's grant depended on chain_u1's, and chain_u3's
+# on chain_u2's.
+skipif madsim
+query I
+SELECT has_table_privilege('chain_u2', 'chain_t', 'SELECT');
+----
+f
+
+skipif madsim
+query I
+SELECT has_table_privilege('chain_u3', 'chain_t', 'SELECT');
+----
+f
+
+statement ok
+DROP USER chain_u1;
+
+statement ok
+DROP USER chain_u2;
+
+statement ok
+DROP USER chain_u3;
+
+statement ok
+DROP TABLE chain_t;

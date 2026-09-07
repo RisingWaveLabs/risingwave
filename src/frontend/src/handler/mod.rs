@@ -98,6 +98,7 @@ mod drop_database;
 pub mod drop_function;
 mod drop_index;
 pub mod drop_mv;
+pub mod drop_owned;
 mod drop_schema;
 pub mod drop_secret;
 pub mod drop_sink;
@@ -116,6 +117,7 @@ pub mod kill_process;
 mod prepared_statement;
 pub mod privilege;
 pub mod query;
+pub mod reassign_owned;
 mod recover;
 mod refresh;
 mod reset_source;
@@ -530,6 +532,13 @@ pub async fn handle(
         }
         Statement::Revoke { .. } => {
             handle_privilege::handle_revoke_privilege(handler_args, stmt).await
+        }
+        Statement::ReassignOwned {
+            old_owners,
+            new_owner,
+        } => reassign_owned::handle_reassign_owned(handler_args, old_owners, new_owner).await,
+        Statement::DropOwned { owners, cascade } => {
+            drop_owned::handle_drop_owned(handler_args, owners, cascade).await
         }
         Statement::Describe { name, kind } => match kind {
             DescribeKind::Fragments => {

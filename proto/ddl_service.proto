@@ -380,6 +380,33 @@ message AlterOwnerResponse {
   WaitVersion version = 2;
 }
 
+// Transfer ownership of all objects in the given database (plus databases themselves)
+// owned by `old_owner_ids` to `new_owner_id`.
+message ReassignOwnedRequest {
+  repeated uint32 old_owner_ids = 1;
+  uint32 new_owner_id = 2;
+  uint32 database_id = 3;
+}
+
+message ReassignOwnedResponse {
+  common.Status status = 1;
+  WaitVersion version = 2;
+}
+
+// Revoke all privileges granted by or to `owner_ids` on objects in the given database (or
+// on databases themselves), along with their default privileges in the database. Unlike
+// PostgreSQL, objects owned by the users are not dropped: the statement fails if any exist.
+message DropOwnedRequest {
+  repeated uint32 owner_ids = 1;
+  uint32 database_id = 2;
+  bool cascade = 3;
+}
+
+message DropOwnedResponse {
+  common.Status status = 1;
+  WaitVersion version = 2;
+}
+
 message AlterSubscriptionRetentionRequest {
   uint32 subscription_id = 1;
   uint64 retention_seconds = 2;
@@ -766,6 +793,8 @@ service DdlService {
   rpc AlterSource(AlterSourceRequest) returns (AlterSourceResponse);
   rpc ResetSource(ResetSourceRequest) returns (ResetSourceResponse);
   rpc AlterOwner(AlterOwnerRequest) returns (AlterOwnerResponse);
+  rpc ReassignOwned(ReassignOwnedRequest) returns (ReassignOwnedResponse);
+  rpc DropOwned(DropOwnedRequest) returns (DropOwnedResponse);
   rpc AlterSubscriptionRetention(AlterSubscriptionRetentionRequest) returns (AlterSubscriptionRetentionResponse);
   rpc AlterSetSchema(AlterSetSchemaRequest) returns (AlterSetSchemaResponse);
   rpc AlterParallelism(AlterParallelismRequest) returns (AlterParallelismResponse);

@@ -181,6 +181,16 @@ pub enum DdlCommand {
     ReplaceStreamJob(ReplaceStreamJobInfo),
     AlterNonSharedSource(Source),
     AlterObjectOwner(Object, UserId),
+    ReassignOwned {
+        old_owner_ids: Vec<UserId>,
+        new_owner_id: UserId,
+        database_id: DatabaseId,
+    },
+    DropOwned {
+        owner_ids: Vec<UserId>,
+        database_id: DatabaseId,
+        cascade: bool,
+    },
     AlterSetSchema(alter_set_schema_request::Object, SchemaId),
     CreateConnection(Connection),
     DropConnection(ConnectionId, DropMode),
@@ -223,6 +233,12 @@ impl DdlCommand {
             DdlCommand::ReplaceStreamJob(info) => Left(info.streaming_job.name()),
             DdlCommand::AlterNonSharedSource(source) => Left(source.name.clone()),
             DdlCommand::AlterObjectOwner(object, _) => Left(format!("{object:?}")),
+            DdlCommand::ReassignOwned { old_owner_ids, .. } => {
+                Left(format!("owned by users {old_owner_ids:?}"))
+            }
+            DdlCommand::DropOwned { owner_ids, .. } => {
+                Left(format!("owned by users {owner_ids:?}"))
+            }
             DdlCommand::AlterSetSchema(object, _) => Left(format!("{object:?}")),
             DdlCommand::CreateConnection(connection) => Left(connection.name.clone()),
             DdlCommand::DropConnection(id, _) => Right(id.as_object_id()),
@@ -254,6 +270,8 @@ impl DdlCommand {
             | DdlCommand::DropSubscription(_, _)
             | DdlCommand::AlterName(_, _)
             | DdlCommand::AlterObjectOwner(_, _)
+            | DdlCommand::ReassignOwned { .. }
+            | DdlCommand::DropOwned { .. }
             | DdlCommand::AlterSetSchema(_, _)
             | DdlCommand::CreateDatabase(_)
             | DdlCommand::CreateSchema(_)
@@ -508,6 +526,19 @@ impl DdlController {
                 DdlCommand::AlterObjectOwner(object, owner_id) => {
                     ctrl.alter_owner(object, owner_id).await
                 }
+                DdlCommand::ReassignOwned {
+                    old_owner_ids,
+                    new_owner_id,
+                    database_id,
+                } => {
+                    ctrl.reassign_owned(old_owner_ids, new_owner_id, database_id)
+                        .await
+                }
+                DdlCommand::DropOwned {
+                    owner_ids,
+                    database_id,
+                    cascade,
+                } => ctrl.drop_owned(owner_ids, database_id, cascade).await,
                 DdlCommand::AlterSetSchema(object, new_schema_id) => {
                     ctrl.alter_set_schema(object, new_schema_id).await
                 }
@@ -1573,6 +1604,30 @@ impl DdlController {
             LocalSecretManager::global().remove_secret(secret);
         }
         Ok(version)
+    }
+
+    async fn reassign_owned(
+        &self,
+        old_owner_ids: Vec<UserId>,
+        new_owner_id: UserId,
+        database_id: DatabaseId,
+    ) -> MetaResult<NotificationVersion> {
+        self.metadata_manager
+            .catalog_controller
+            .reassign_owned(old_owner_ids, new_owner_id, database_id)
+            .await
+    }
+
+    async fn drop_owned(
+        &self,
+        owner_ids: Vec<UserId>,
+        database_id: DatabaseId,
+        cascade: bool,
+    ) -> MetaResult<NotificationVersion> {
+        self.metadata_manager
+            .catalog_controller
+            .drop_owned(owner_ids, database_id, cascade)
+            .await
     }
 
     /// This is used for `ALTER TABLE ADD/DROP COLUMN` / `ALTER SOURCE ADD COLUMN`.

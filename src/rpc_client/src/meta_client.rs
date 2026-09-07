@@ -580,6 +580,40 @@ impl MetaClient {
             .ok_or_else(|| anyhow!("wait version not set"))?)
     }
 
+    pub async fn reassign_owned(
+        &self,
+        old_owner_ids: Vec<UserId>,
+        new_owner_id: UserId,
+        database_id: DatabaseId,
+    ) -> Result<WaitVersion> {
+        let request = ReassignOwnedRequest {
+            old_owner_ids,
+            new_owner_id,
+            database_id,
+        };
+        let resp = self.inner.reassign_owned(request).await?;
+        Ok(resp
+            .version
+            .ok_or_else(|| anyhow!("wait version not set"))?)
+    }
+
+    pub async fn drop_owned(
+        &self,
+        owner_ids: Vec<UserId>,
+        database_id: DatabaseId,
+        cascade: bool,
+    ) -> Result<WaitVersion> {
+        let request = DropOwnedRequest {
+            owner_ids,
+            database_id,
+            cascade,
+        };
+        let resp = self.inner.drop_owned(request).await?;
+        Ok(resp
+            .version
+            .ok_or_else(|| anyhow!("wait version not set"))?)
+    }
+
     pub async fn alter_subscription_retention(
         &self,
         subscription_id: SubscriptionId,
@@ -2735,6 +2769,8 @@ macro_rules! for_all_meta_rpc {
             ,{ ddl_client, create_table, CreateTableRequest, CreateTableResponse }
             ,{ ddl_client, alter_name, AlterNameRequest, AlterNameResponse }
             ,{ ddl_client, alter_owner, AlterOwnerRequest, AlterOwnerResponse }
+            ,{ ddl_client, reassign_owned, ReassignOwnedRequest, ReassignOwnedResponse }
+            ,{ ddl_client, drop_owned, DropOwnedRequest, DropOwnedResponse }
             ,{ ddl_client, alter_subscription_retention, AlterSubscriptionRetentionRequest, AlterSubscriptionRetentionResponse }
             ,{ ddl_client, alter_set_schema, AlterSetSchemaRequest, AlterSetSchemaResponse }
             ,{ ddl_client, alter_parallelism, AlterParallelismRequest, AlterParallelismResponse }

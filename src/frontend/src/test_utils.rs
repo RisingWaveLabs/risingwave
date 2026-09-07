@@ -713,6 +713,24 @@ impl CatalogWriter for MockCatalogWriter {
         Err(ErrorCode::ItemNotFound(format!("object not found: {:?}", object)).into())
     }
 
+    async fn reassign_owned(
+        &self,
+        _old_owner_ids: Vec<UserId>,
+        _new_owner_id: UserId,
+        _database_id: DatabaseId,
+    ) -> Result<()> {
+        unreachable!()
+    }
+
+    async fn drop_owned(
+        &self,
+        _owner_ids: Vec<UserId>,
+        _database_id: DatabaseId,
+        _cascade: bool,
+    ) -> Result<()> {
+        unreachable!()
+    }
+
     async fn alter_subscription_retention(
         &self,
         subscription_id: SubscriptionId,

@@ -245,6 +245,24 @@ pub trait CatalogWriter: Send + Sync {
         owner_id: UserId,
     ) -> Result<()>;
 
+    /// Transfer ownership of all objects in the database owned by `old_owner_ids` to
+    /// `new_owner_id`.
+    async fn reassign_owned(
+        &self,
+        old_owner_ids: Vec<UserId>,
+        new_owner_id: UserId,
+        database_id: DatabaseId,
+    ) -> Result<()>;
+
+    /// Revoke the privileges granted by or to `owner_ids` in the database, along with
+    /// their default privileges. Fails if the users still own any objects.
+    async fn drop_owned(
+        &self,
+        owner_ids: Vec<UserId>,
+        database_id: DatabaseId,
+        cascade: bool,
+    ) -> Result<()>;
+
     /// Replace the source in the catalog.
     async fn alter_source(&self, source: PbSource) -> Result<()>;
 
@@ -690,6 +708,32 @@ impl CatalogWriter for CatalogWriterImpl {
         owner_id: UserId,
     ) -> Result<()> {
         let version = self.meta_client.alter_owner(object, owner_id).await?;
+        self.wait_version(version).await
+    }
+
+    async fn reassign_owned(
+        &self,
+        old_owner_ids: Vec<UserId>,
+        new_owner_id: UserId,
+        database_id: DatabaseId,
+    ) -> Result<()> {
+        let version = self
+            .meta_client
+            .reassign_owned(old_owner_ids, new_owner_id, database_id)
+            .await?;
+        self.wait_version(version).await
+    }
+
+    async fn drop_owned(
+        &self,
+        owner_ids: Vec<UserId>,
+        database_id: DatabaseId,
+        cascade: bool,
+    ) -> Result<()> {
+        let version = self
+            .meta_client
+            .drop_owned(owner_ids, database_id, cascade)
+            .await?;
         self.wait_version(version).await
     }
 

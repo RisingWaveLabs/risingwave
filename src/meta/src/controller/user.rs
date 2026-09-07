@@ -32,8 +32,8 @@ use risingwave_pb::user::{PbAction, PbGrantPrivilege, PbUserInfo};
 use sea_orm::ActiveValue::Set;
 use sea_orm::sea_query::{OnConflict, SimpleExpr, Value};
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, EntityTrait, IntoActiveModel, PaginatorTrait, QueryFilter,
-    QuerySelect, TransactionTrait,
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, IntoActiveModel, JoinType,
+    PaginatorTrait, QueryFilter, QuerySelect, RelationTrait, TransactionTrait,
 };
 
 use crate::controller::catalog::CatalogController;
@@ -741,6 +741,141 @@ impl CatalogController {
         txn.commit().await?;
         Ok(())
     }
+}
+
+impl CatalogController {
+    /// `DROP OWNED BY`: revoke all privileges granted by or to the given users on objects in
+    /// the given database or on `Database` objects themselves (PG "shared objects"
+    /// semantics), and delete their default privileges in the database.
+    ///
+    /// Unlike PostgreSQL, objects owned by the users are NOT dropped: the statement fails if
+    /// any exist, and their ownership should be transferred with `REASSIGN OWNED BY` (or the
+    /// objects dropped) first.
+    pub async fn drop_owned(
+        &self,
+        user_ids: Vec<UserId>,
+        database_id: DatabaseId,
+        cascade: bool,
+    ) -> MetaResult<NotificationVersion> {
+        let inner = self.inner.write().await;
+        let txn = inner.db.begin().await?;
+        for user_id in &user_ids {
+            ensure_user_id(*user_id, &txn).await?;
+        }
+
+        let owned_count = Object::find()
+            .filter(
+                object::Column::OwnerId.is_in(user_ids.clone()).and(
+                    object::Column::DatabaseId
+                        .eq(database_id)
+                        .or(object::Column::ObjType.eq(ObjectType::Database)),
+                ),
+            )
+            .count(&txn)
+            .await?;
+        if owned_count != 0 {
+            return Err(MetaError::permission_denied(format!(
+                "DROP OWNED in RisingWave only revokes privileges and does not drop \
+                 objects, but the specified user(s) still own {owned_count} object(s) \
+                 in the current database (or own databases); use REASSIGN OWNED BY to \
+                 transfer the ownership or drop the objects first"
+            )));
+        }
+
+        let updated_user_ids = drop_owned_privileges(&user_ids, database_id, cascade, &txn).await?;
+        let user_infos = list_user_info_by_ids(updated_user_ids, &txn).await?;
+
+        txn.commit().await?;
+
+        // Returns `IGNORED_NOTIFICATION_VERSION` when there's no user to notify.
+        Ok(self.notify_users_update(user_infos).await)
+    }
+}
+
+/// For `DROP OWNED BY`: delete all privileges granted by or to the given users on objects in
+/// the given database or on `Database` objects themselves (PG "shared objects" semantics),
+/// along with the users' default privileges in that database.
+///
+/// With `cascade = false`, returns an error if any privilege to delete has been re-granted
+/// to a user outside the deleted set.
+///
+/// Returns the ids of users whose privilege sets changed.
+async fn drop_owned_privileges<C>(
+    user_ids: &[UserId],
+    database_id: DatabaseId,
+    cascade: bool,
+    db: &C,
+) -> MetaResult<Vec<UserId>>
+where
+    C: ConnectionTrait,
+{
+    let root_privileges: Vec<(PrivilegeId, UserId)> = UserPrivilege::find()
+        .select_only()
+        .columns([user_privilege::Column::Id, user_privilege::Column::UserId])
+        .join(JoinType::InnerJoin, user_privilege::Relation::Object.def())
+        .filter(
+            user_privilege::Column::UserId
+                .is_in(user_ids.iter().cloned())
+                .or(user_privilege::Column::GrantedBy.is_in(user_ids.iter().cloned())),
+        )
+        .filter(
+            object::Column::DatabaseId
+                .eq(database_id)
+                .or(object::Column::ObjType.eq(ObjectType::Database)),
+        )
+        .into_tuple()
+        .all(db)
+        .await?;
+
+    let root_privilege_ids = root_privileges.iter().map(|(id, _)| *id).collect_vec();
+    let mut updated_user_ids: HashSet<UserId> = root_privileges
+        .iter()
+        .map(|(_, user_id)| *user_id)
+        .collect();
+
+    if !root_privilege_ids.is_empty() {
+        if !cascade {
+            let outside_count = UserPrivilege::find()
+                .filter(
+                    user_privilege::Column::DependentId
+                        .is_in(root_privilege_ids.clone())
+                        .and(user_privilege::Column::Id.is_not_in(root_privilege_ids.clone())),
+                )
+                .count(db)
+                .await?;
+            if outside_count != 0 {
+                return Err(MetaError::permission_denied(format!(
+                    "{} dependent privileges exist, use CASCADE to revoke them too",
+                    outside_count
+                )));
+            }
+        } else {
+            let all_privileges =
+                get_referring_privileges_cascade(root_privilege_ids.clone(), db).await?;
+            updated_user_ids.extend(all_privileges.iter().map(|p| p.user_id));
+        }
+
+        // Dependent privileges are deleted by cascade.
+        UserPrivilege::delete_many()
+            .filter(user_privilege::Column::Id.is_in(root_privilege_ids))
+            .exec(db)
+            .await?;
+    }
+
+    // Drop the users' default privileges in the database, including those where they are
+    // the grantee or the grantor, so that no new privileges referencing them are generated.
+    UserDefaultPrivilege::delete_many()
+        .filter(user_default_privilege::Column::DatabaseId.eq(database_id))
+        .filter(
+            user_default_privilege::Column::UserId
+                .is_in(user_ids.iter().cloned())
+                .or(user_default_privilege::Column::Grantee.is_in(user_ids.iter().cloned()))
+                .or(user_default_privilege::Column::GrantedBy.is_in(user_ids.iter().cloned())),
+        )
+        .exec(db)
+        .await?;
+
+    Ok(updated_user_ids.into_iter().collect())
 }
 
 #[cfg(test)]

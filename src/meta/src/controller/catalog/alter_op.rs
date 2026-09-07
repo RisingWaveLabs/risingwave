@@ -21,6 +21,7 @@ use risingwave_common::id::JobId;
 use risingwave_common::system_param::{OverrideValidate, Validate};
 use risingwave_common::util::worker_util::DEFAULT_RESOURCE_GROUP;
 use risingwave_meta_model::refresh_job::{self, RefreshState};
+use risingwave_pb::catalog::subscription::PbSubscriptionState;
 use sea_orm::ActiveValue::{NotSet, Set};
 use sea_orm::prelude::DateTime;
 use sea_orm::sea_query::Expr;
@@ -299,7 +300,6 @@ impl CatalogController {
         obj.owner_id = Set(new_owner);
         let obj = obj.update(&txn).await?;
 
-        let mut objects = vec![];
         match object_type {
             ObjectType::Database => {
                 let db = Database::find_by_id(object_id.as_database_id())
@@ -333,33 +333,29 @@ impl CatalogController {
                     .await;
                 return Ok(version);
             }
+            _ => {}
+        }
+
+        // Transfer the ownership of the companion objects together, and collect all the
+        // affected objects.
+        let mut updated_oids = vec![object_id];
+        match object_type {
             ObjectType::Table => {
                 let table = Table::find_by_id(object_id.as_table_id())
                     .one(&txn)
                     .await?
                     .ok_or_else(|| MetaError::catalog_id_not_found("table", object_id))?;
-                let streaming_job = streaming_job::Entity::find_by_id(object_id.as_job_id())
-                    .one(&txn)
-                    .await?;
 
                 // associated source.
                 if let Some(associated_source_id) = table.optional_associated_source_id {
-                    let src_obj = object::ActiveModel {
+                    object::ActiveModel {
                         oid: Set(associated_source_id.as_object_id()),
                         owner_id: Set(new_owner),
                         ..Default::default()
                     }
                     .update(&txn)
                     .await?;
-                    let source = Source::find_by_id(associated_source_id)
-                        .one(&txn)
-                        .await?
-                        .ok_or_else(|| {
-                            MetaError::catalog_id_not_found("source", associated_source_id)
-                        })?;
-                    objects.push(PbObjectInfo::Source(
-                        ObjectModel(source, src_obj, None).into(),
-                    ));
+                    updated_oids.push(associated_source_id.as_object_id());
                 }
 
                 // associated sink and source for iceberg table.
@@ -381,21 +377,6 @@ impl CatalogController {
                         .one(&txn)
                         .await?
                         .expect("iceberg sink must exist");
-                    let sink_obj = object::ActiveModel {
-                        oid: Set(iceberg_sink.as_object_id()),
-                        owner_id: Set(new_owner),
-                        ..Default::default()
-                    }
-                    .update(&txn)
-                    .await?;
-                    let sink = Sink::find_by_id(iceberg_sink)
-                        .one(&txn)
-                        .await?
-                        .ok_or_else(|| MetaError::catalog_id_not_found("sink", iceberg_sink))?;
-                    objects.push(PbObjectInfo::Sink(
-                        ObjectModel(sink, sink_obj, streaming_job.clone()).into(),
-                    ));
-
                     let iceberg_source = Source::find()
                         .inner_join(Object)
                         .select_only()
@@ -413,23 +394,16 @@ impl CatalogController {
                         .one(&txn)
                         .await?
                         .expect("iceberg source must exist");
-                    let source_obj = object::ActiveModel {
-                        oid: Set(iceberg_source.as_object_id()),
-                        owner_id: Set(new_owner),
-                        ..Default::default()
-                    }
-                    .update(&txn)
+                    Self::transfer_objects_owner(
+                        &txn,
+                        new_owner,
+                        vec![iceberg_sink.as_object_id(), iceberg_source.as_object_id()],
+                        &mut updated_oids,
+                    )
                     .await?;
-                    let source = Source::find_by_id(iceberg_source)
-                        .one(&txn)
-                        .await?
-                        .ok_or_else(|| MetaError::catalog_id_not_found("source", iceberg_source))?;
-                    objects.push(PbObjectInfo::Source(
-                        ObjectModel(source, source_obj, None).into(),
-                    ));
                 }
 
-                // indexes.
+                // indexes, their storage tables, and the internal tables.
                 let (index_ids, mut table_ids): (Vec<IndexId>, Vec<TableId>) = Index::find()
                     .select_only()
                     .columns([index::Column::IndexId, index::Column::IndexTableId])
@@ -439,11 +413,7 @@ impl CatalogController {
                     .await?
                     .into_iter()
                     .unzip();
-                objects.push(PbObjectInfo::Table(
-                    ObjectModel(table, obj, streaming_job).into(),
-                ));
 
-                // internal tables.
                 let internal_tables: Vec<TableId> = Table::find()
                     .select_only()
                     .column(table::Column::TableId)
@@ -460,150 +430,64 @@ impl CatalogController {
                     .await?;
                 table_ids.extend(internal_tables);
 
-                if !index_ids.is_empty() || !table_ids.is_empty() {
-                    Object::update_many()
-                        .col_expr(object::Column::OwnerId, SimpleExpr::Value(new_owner.into()))
-                        .filter(
-                            object::Column::Oid.is_in::<ObjectId, _>(
-                                index_ids
-                                    .iter()
-                                    .copied()
-                                    .map_into()
-                                    .chain(table_ids.iter().copied().map_into()),
-                            ),
-                        )
-                        .exec(&txn)
-                        .await?;
-                }
-
-                if !table_ids.is_empty() {
-                    let table_objs = Table::find()
-                        .find_also_related(Object)
-                        .filter(table::Column::TableId.is_in(table_ids))
-                        .all(&txn)
-                        .await?;
-                    let streaming_jobs = load_streaming_jobs_by_ids(
-                        &txn,
-                        table_objs.iter().map(|(table, _)| table.job_id()),
-                    )
-                    .await?;
-                    for (table, table_obj) in table_objs {
-                        let job_id = table.job_id();
-                        let streaming_job = streaming_jobs.get(&job_id).cloned();
-                        objects.push(PbObjectInfo::Table(
-                            ObjectModel(table, table_obj.unwrap(), streaming_job).into(),
-                        ));
-                    }
-                }
-                // FIXME: frontend will update index/primary table from cache, requires apply updates of indexes after tables.
-                if !index_ids.is_empty() {
-                    let index_objs = Index::find()
-                        .find_also_related(Object)
-                        .filter(index::Column::IndexId.is_in(index_ids))
-                        .all(&txn)
-                        .await?;
-                    let streaming_jobs = load_streaming_jobs_by_ids(
-                        &txn,
-                        index_objs
-                            .iter()
-                            .map(|(index, _)| index.index_id.as_job_id()),
-                    )
-                    .await?;
-                    for (index, index_obj) in index_objs {
-                        let streaming_job =
-                            streaming_jobs.get(&index.index_id.as_job_id()).cloned();
-                        objects.push(PbObjectInfo::Index(
-                            ObjectModel(index, index_obj.unwrap(), streaming_job).into(),
-                        ));
-                    }
-                }
+                Self::transfer_objects_owner(
+                    &txn,
+                    new_owner,
+                    index_ids
+                        .into_iter()
+                        .map(|id| id.as_object_id())
+                        .chain(table_ids.into_iter().map(|id| id.as_object_id()))
+                        .collect(),
+                    &mut updated_oids,
+                )
+                .await?;
             }
             ObjectType::Source => {
                 let source = Source::find_by_id(object_id.as_source_id())
                     .one(&txn)
                     .await?
                     .ok_or_else(|| MetaError::catalog_id_not_found("source", object_id))?;
-                let is_shared = source.is_shared();
-                objects.push(PbObjectInfo::Source(ObjectModel(source, obj, None).into()));
 
                 // Note: For non-shared source, we don't update their state tables, which
                 // belongs to the MV.
-                if is_shared {
-                    update_internal_tables(
+                if source.is_shared() {
+                    let internal_tables =
+                        get_internal_tables_by_id(object_id.as_job_id(), &txn).await?;
+                    Self::transfer_objects_owner(
                         &txn,
-                        object_id,
-                        object::Column::OwnerId,
                         new_owner,
-                        &mut objects,
+                        internal_tables
+                            .into_iter()
+                            .map(|id| id.as_object_id())
+                            .collect(),
+                        &mut updated_oids,
                     )
                     .await?;
                 }
             }
             ObjectType::Sink => {
-                let (sink, sink_obj) = Sink::find_by_id(object_id.as_sink_id())
-                    .find_also_related(Object)
-                    .one(&txn)
-                    .await?
-                    .ok_or_else(|| MetaError::catalog_id_not_found("sink", object_id))?;
-                let streaming_job = streaming_job::Entity::find_by_id(sink.sink_id.as_job_id())
-                    .one(&txn)
-                    .await?;
-                objects.push(PbObjectInfo::Sink(
-                    ObjectModel(sink, sink_obj.unwrap(), streaming_job).into(),
-                ));
-
-                update_internal_tables(
+                let internal_tables =
+                    get_internal_tables_by_id(object_id.as_job_id(), &txn).await?;
+                Self::transfer_objects_owner(
                     &txn,
-                    object_id,
-                    object::Column::OwnerId,
                     new_owner,
-                    &mut objects,
+                    internal_tables
+                        .into_iter()
+                        .map(|id| id.as_object_id())
+                        .collect(),
+                    &mut updated_oids,
                 )
                 .await?;
             }
-            ObjectType::Subscription => {
-                let subscription = Subscription::find_by_id(object_id.as_subscription_id())
-                    .one(&txn)
-                    .await?
-                    .ok_or_else(|| MetaError::catalog_id_not_found("subscription", object_id))?;
-                objects.push(PbObjectInfo::Subscription(
-                    ObjectModel(subscription, obj, None).into(),
-                ));
-            }
-            ObjectType::View => {
-                let view = View::find_by_id(object_id.as_view_id())
-                    .one(&txn)
-                    .await?
-                    .ok_or_else(|| MetaError::catalog_id_not_found("view", object_id))?;
-                objects.push(PbObjectInfo::View(ObjectModel(view, obj, None).into()));
-            }
-            ObjectType::Connection => {
-                let connection = Connection::find_by_id(object_id.as_connection_id())
-                    .one(&txn)
-                    .await?
-                    .ok_or_else(|| MetaError::catalog_id_not_found("connection", object_id))?;
-                objects.push(PbObjectInfo::Connection(
-                    ObjectModel(connection, obj, None).into(),
-                ));
-            }
-            ObjectType::Function => {
-                let function = Function::find_by_id(object_id.as_function_id())
-                    .one(&txn)
-                    .await?
-                    .ok_or_else(|| MetaError::catalog_id_not_found("function", object_id))?;
-                objects.push(PbObjectInfo::Function(
-                    ObjectModel(function, obj, None).into(),
-                ));
-            }
-            ObjectType::Secret => {
-                let secret = Secret::find_by_id(object_id.as_secret_id())
-                    .one(&txn)
-                    .await?
-                    .ok_or_else(|| MetaError::catalog_id_not_found("secret", object_id))?;
-                objects.push(PbObjectInfo::Secret(ObjectModel(secret, obj, None).into()));
-            }
+            ObjectType::Subscription
+            | ObjectType::View
+            | ObjectType::Connection
+            | ObjectType::Function
+            | ObjectType::Secret => {}
             _ => unreachable!("not supported object type: {:?}", object_type),
         };
+
+        let objects = Self::build_updated_object_infos(&txn, updated_oids).await?;
 
         txn.commit().await?;
 
@@ -622,6 +506,364 @@ impl CatalogController {
             )
             .await;
         Ok(version)
+    }
+
+    /// `REASSIGN OWNED BY`: transfer ownership of all objects in the given database owned by
+    /// `old_owner_ids` to `new_owner`, along with `Database` objects they own (following the
+    /// "shared objects" semantics of PostgreSQL). Companion objects (e.g. indexes and their
+    /// storage tables, internal state tables) share their host object's owner by construction,
+    /// so they are covered by the owned set itself and need no expansion like `alter_owner`.
+    pub async fn reassign_owned(
+        &self,
+        old_owner_ids: Vec<UserId>,
+        new_owner: UserId,
+        database_id: DatabaseId,
+    ) -> MetaResult<NotificationVersion> {
+        let inner = self.inner.write().await;
+        let txn = inner.db.begin().await?;
+        ensure_user_id(new_owner, &txn).await?;
+        for user_id in &old_owner_ids {
+            ensure_user_id(*user_id, &txn).await?;
+        }
+
+        let owned_objects: Vec<(ObjectId, ObjectType)> = Object::find()
+            .select_only()
+            .columns([object::Column::Oid, object::Column::ObjType])
+            .filter(
+                object::Column::OwnerId.is_in(old_owner_ids.clone()).and(
+                    object::Column::DatabaseId
+                        .eq(database_id)
+                        .or(object::Column::ObjType.eq(ObjectType::Database)),
+                ),
+            )
+            .into_tuple()
+            .all(&txn)
+            .await?;
+        if owned_objects.is_empty() {
+            return Ok(IGNORED_NOTIFICATION_VERSION);
+        }
+
+        // Frontends are not notified of some in-creation objects (e.g. foreground
+        // `CREATE TABLE` / `CREATE INDEX`, and subscriptions whose log store is still
+        // being created), so an `Update` notification for them would panic the frontend
+        // observer.
+        let creating =
+            StreamingJob::find()
+                .filter(streaming_job::Column::JobStatus.ne(JobStatus::Created).and(
+                    streaming_job::Column::JobId.is_in(owned_objects.iter().map(|(oid, _)| *oid)),
+                ))
+                .count(&txn)
+                .await?
+                + Subscription::find()
+                    .filter(
+                        subscription::Column::SubscriptionState
+                            .ne(PbSubscriptionState::Created as i32)
+                            .and(
+                                subscription::Column::SubscriptionId
+                                    .is_in(owned_objects.iter().map(|(oid, _)| *oid)),
+                            ),
+                    )
+                    .count(&txn)
+                    .await?;
+        if creating != 0 {
+            return Err(MetaError::permission_denied(format!(
+                "cannot reassign {creating} object(s) that are still being created, \
+                 please cancel them or wait for the creation to complete first"
+            )));
+        }
+
+        Object::update_many()
+            .col_expr(object::Column::OwnerId, SimpleExpr::Value(new_owner.into()))
+            .filter(object::Column::Oid.is_in(owned_objects.iter().map(|(oid, _)| *oid)))
+            .exec(&txn)
+            .await?;
+
+        let mut databases = vec![];
+        let mut schemas = vec![];
+        let mut group_oids = vec![];
+        for (oid, obj_type) in owned_objects {
+            match obj_type {
+                ObjectType::Database => {
+                    let (db, obj) = Database::find_by_id(oid.as_database_id())
+                        .find_also_related(Object)
+                        .one(&txn)
+                        .await?
+                        .ok_or_else(|| MetaError::catalog_id_not_found("database", oid))?;
+                    databases.push(PbDatabase::from(ObjectModel(db, obj.unwrap(), None)));
+                }
+                ObjectType::Schema => {
+                    let (schema, obj) = Schema::find_by_id(oid.as_schema_id())
+                        .find_also_related(Object)
+                        .one(&txn)
+                        .await?
+                        .ok_or_else(|| MetaError::catalog_id_not_found("schema", oid))?;
+                    schemas.push(PbSchema::from(ObjectModel(schema, obj.unwrap(), None)));
+                }
+                _ => group_oids.push(oid),
+            }
+        }
+        let objects = Self::build_updated_object_infos(&txn, group_oids).await?;
+
+        txn.commit().await?;
+
+        let mut version = IGNORED_NOTIFICATION_VERSION;
+        for db in databases {
+            version = self
+                .notify_frontend(
+                    NotificationOperation::Update,
+                    NotificationInfo::Database(db),
+                )
+                .await;
+        }
+        for schema in schemas {
+            version = self
+                .notify_frontend(
+                    NotificationOperation::Update,
+                    NotificationInfo::Schema(schema),
+                )
+                .await;
+        }
+        if !objects.is_empty() {
+            version = self
+                .notify_frontend(
+                    NotificationOperation::Update,
+                    NotificationInfo::ObjectGroup(PbObjectGroup {
+                        objects: objects
+                            .into_iter()
+                            .map(|object| PbObject {
+                                object_info: Some(object),
+                            })
+                            .collect(),
+                        dependencies: vec![],
+                    }),
+                )
+                .await;
+        }
+        Ok(version)
+    }
+
+    async fn transfer_objects_owner(
+        txn: &DatabaseTransaction,
+        new_owner: UserId,
+        oids: Vec<ObjectId>,
+        updated_oids: &mut Vec<ObjectId>,
+    ) -> MetaResult<()> {
+        if oids.is_empty() {
+            return Ok(());
+        }
+        Object::update_many()
+            .col_expr(object::Column::OwnerId, SimpleExpr::Value(new_owner.into()))
+            .filter(object::Column::Oid.is_in(oids.iter().copied()))
+            .exec(txn)
+            .await?;
+        updated_oids.extend(oids);
+        Ok(())
+    }
+
+    /// Load the catalogs of the given objects, whose metadata was just updated in the
+    /// transaction, and build the object infos for an `Update` notification. The storage
+    /// tables of the involved indexes are included automatically, before the indexes, as
+    /// the frontend derives an index's metadata (e.g. owner) from its storage table.
+    /// `Database` and `Schema` objects are not supported and must be notified individually
+    /// by the caller.
+    async fn build_updated_object_infos(
+        txn: &DatabaseTransaction,
+        object_ids: Vec<ObjectId>,
+    ) -> MetaResult<Vec<PbObjectInfo>> {
+        let updated_objs: Vec<object::Model> = Object::find()
+            .filter(object::Column::Oid.is_in(object_ids))
+            .all(txn)
+            .await?;
+        let oids_of = |object_type: ObjectType| {
+            updated_objs
+                .iter()
+                .filter(|obj| obj.obj_type == object_type)
+                .map(|obj| obj.oid)
+                .collect_vec()
+        };
+        debug_assert!(
+            oids_of(ObjectType::Database).is_empty() && oids_of(ObjectType::Schema).is_empty()
+        );
+
+        let mut objects = vec![];
+        let index_objs = Index::find()
+            .find_also_related(Object)
+            .filter(
+                index::Column::IndexId.is_in(
+                    oids_of(ObjectType::Index)
+                        .into_iter()
+                        .map(|oid| oid.as_index_id()),
+                ),
+            )
+            .all(txn)
+            .await?;
+        let index_table_ids = index_objs
+            .iter()
+            .map(|(index, _)| index.index_table_id)
+            .collect_vec();
+        let table_objs = Table::find()
+            .find_also_related(Object)
+            .filter(
+                table::Column::TableId.is_in(
+                    oids_of(ObjectType::Table)
+                        .into_iter()
+                        .map(|oid| oid.as_table_id())
+                        .chain(index_table_ids),
+                ),
+            )
+            .all(txn)
+            .await?;
+        let streaming_jobs =
+            load_streaming_jobs_by_ids(txn, table_objs.iter().map(|(table, _)| table.job_id()))
+                .await?;
+        for (table, obj) in table_objs {
+            let streaming_job = streaming_jobs.get(&table.job_id()).cloned();
+            objects.push(PbObjectInfo::Table(
+                ObjectModel(table, obj.unwrap(), streaming_job).into(),
+            ));
+        }
+
+        let source_objs = Source::find()
+            .find_also_related(Object)
+            .filter(
+                source::Column::SourceId.is_in(
+                    oids_of(ObjectType::Source)
+                        .into_iter()
+                        .map(|oid| oid.as_source_id()),
+                ),
+            )
+            .all(txn)
+            .await?;
+        for (source, obj) in source_objs {
+            objects.push(PbObjectInfo::Source(
+                ObjectModel(source, obj.unwrap(), None).into(),
+            ));
+        }
+
+        let sink_objs = Sink::find()
+            .find_also_related(Object)
+            .filter(
+                sink::Column::SinkId.is_in(
+                    oids_of(ObjectType::Sink)
+                        .into_iter()
+                        .map(|oid| oid.as_sink_id()),
+                ),
+            )
+            .all(txn)
+            .await?;
+        let streaming_jobs = load_streaming_jobs_by_ids(
+            txn,
+            sink_objs.iter().map(|(sink, _)| sink.sink_id.as_job_id()),
+        )
+        .await?;
+        for (sink, obj) in sink_objs {
+            let streaming_job = streaming_jobs.get(&sink.sink_id.as_job_id()).cloned();
+            objects.push(PbObjectInfo::Sink(
+                ObjectModel(sink, obj.unwrap(), streaming_job).into(),
+            ));
+        }
+
+        // FIXME: frontend will update index/primary table from cache, requires apply updates of indexes after tables.
+        let streaming_jobs = load_streaming_jobs_by_ids(
+            txn,
+            index_objs
+                .iter()
+                .map(|(index, _)| index.index_id.as_job_id()),
+        )
+        .await?;
+        for (index, obj) in index_objs {
+            let streaming_job = streaming_jobs.get(&index.index_id.as_job_id()).cloned();
+            objects.push(PbObjectInfo::Index(
+                ObjectModel(index, obj.unwrap(), streaming_job).into(),
+            ));
+        }
+
+        let view_objs = View::find()
+            .find_also_related(Object)
+            .filter(
+                view::Column::ViewId.is_in(
+                    oids_of(ObjectType::View)
+                        .into_iter()
+                        .map(|oid| oid.as_view_id()),
+                ),
+            )
+            .all(txn)
+            .await?;
+        for (view, obj) in view_objs {
+            objects.push(PbObjectInfo::View(
+                ObjectModel(view, obj.unwrap(), None).into(),
+            ));
+        }
+
+        let subscription_objs = Subscription::find()
+            .find_also_related(Object)
+            .filter(
+                subscription::Column::SubscriptionId.is_in(
+                    oids_of(ObjectType::Subscription)
+                        .into_iter()
+                        .map(|oid| oid.as_subscription_id()),
+                ),
+            )
+            .all(txn)
+            .await?;
+        for (subscription, obj) in subscription_objs {
+            objects.push(PbObjectInfo::Subscription(
+                ObjectModel(subscription, obj.unwrap(), None).into(),
+            ));
+        }
+
+        let function_objs = Function::find()
+            .find_also_related(Object)
+            .filter(
+                function::Column::FunctionId.is_in(
+                    oids_of(ObjectType::Function)
+                        .into_iter()
+                        .map(|oid| oid.as_function_id()),
+                ),
+            )
+            .all(txn)
+            .await?;
+        for (function, obj) in function_objs {
+            objects.push(PbObjectInfo::Function(
+                ObjectModel(function, obj.unwrap(), None).into(),
+            ));
+        }
+
+        let connection_objs = Connection::find()
+            .find_also_related(Object)
+            .filter(
+                connection::Column::ConnectionId.is_in(
+                    oids_of(ObjectType::Connection)
+                        .into_iter()
+                        .map(|oid| oid.as_connection_id()),
+                ),
+            )
+            .all(txn)
+            .await?;
+        for (connection, obj) in connection_objs {
+            objects.push(PbObjectInfo::Connection(
+                ObjectModel(connection, obj.unwrap(), None).into(),
+            ));
+        }
+
+        let secret_objs = Secret::find()
+            .find_also_related(Object)
+            .filter(
+                secret::Column::SecretId.is_in(
+                    oids_of(ObjectType::Secret)
+                        .into_iter()
+                        .map(|oid| oid.as_secret_id()),
+                ),
+            )
+            .all(txn)
+            .await?;
+        for (secret, obj) in secret_objs {
+            objects.push(PbObjectInfo::Secret(
+                ObjectModel(secret, obj.unwrap(), None).into(),
+            ));
+        }
+
+        Ok(objects)
     }
 
     pub async fn alter_schema(

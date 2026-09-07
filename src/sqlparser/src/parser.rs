@@ -331,6 +331,7 @@ impl Parser<'_> {
                 Keyword::DESCRIBE => Ok(self.parse_describe()?),
                 Keyword::GRANT => Ok(self.parse_grant()?),
                 Keyword::REVOKE => Ok(self.parse_revoke()?),
+                Keyword::REASSIGN => Ok(self.parse_reassign_owned()?),
                 Keyword::START => Ok(self.parse_start_transaction()?),
                 Keyword::ABORT => Ok(Statement::Abort),
                 // `BEGIN` is a nonstandard but common alias for the
@@ -2430,8 +2431,38 @@ impl Parser<'_> {
             return self.parse_drop_function();
         } else if self.parse_keyword(Keyword::AGGREGATE) {
             return self.parse_drop_aggregate();
+        } else if self.parse_keyword(Keyword::OWNED) {
+            return self.parse_drop_owned();
         }
         Ok(Statement::Drop(DropStatement::parse_to(self)?))
+    }
+
+    /// ```sql
+    /// DROP OWNED BY name [, ...] [ CASCADE | RESTRICT ]
+    /// ```
+    fn parse_drop_owned(&mut self) -> ModalResult<Statement> {
+        self.expect_keyword(Keyword::BY)?;
+        let owners = self.parse_comma_separated(Parser::parse_identifier)?;
+        let cascade = self.parse_keyword(Keyword::CASCADE);
+        let restrict = self.parse_keyword(Keyword::RESTRICT);
+        if cascade && restrict {
+            parser_err!("Cannot specify both CASCADE and RESTRICT in DROP OWNED");
+        }
+        Ok(Statement::DropOwned { owners, cascade })
+    }
+
+    /// ```sql
+    /// REASSIGN OWNED BY old_owner [, ...] TO new_owner
+    /// ```
+    fn parse_reassign_owned(&mut self) -> ModalResult<Statement> {
+        self.expect_keywords(&[Keyword::OWNED, Keyword::BY])?;
+        let old_owners = self.parse_comma_separated(Parser::parse_identifier)?;
+        self.expect_keyword(Keyword::TO)?;
+        let new_owner = self.parse_identifier()?;
+        Ok(Statement::ReassignOwned {
+            old_owners,
+            new_owner,
+        })
     }
 
     /// ```sql

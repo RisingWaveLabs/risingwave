@@ -1660,6 +1660,16 @@ pub enum Statement {
         revoke_grant_option: bool,
         cascade: bool,
     },
+    /// REASSIGN OWNED BY old_owners TO new_owner
+    ReassignOwned {
+        old_owners: Vec<Ident>,
+        new_owner: Ident,
+    },
+    /// DROP OWNED BY owners [ CASCADE | RESTRICT ]
+    DropOwned {
+        owners: Vec<Ident>,
+        cascade: bool,
+    },
     /// `DEALLOCATE [ PREPARE ] { name | ALL }`
     ///
     /// Note: this is a PostgreSQL-specific statement.
@@ -2430,6 +2440,25 @@ impl Statement {
                 }
                 write!(f, " {}", if *cascade { "CASCADE" } else { "RESTRICT" })?;
                 Ok(())
+            }
+            Statement::ReassignOwned {
+                old_owners,
+                new_owner,
+            } => {
+                write!(
+                    f,
+                    "REASSIGN OWNED BY {} TO {}",
+                    display_comma_separated(old_owners),
+                    new_owner
+                )
+            }
+            Statement::DropOwned { owners, cascade } => {
+                write!(
+                    f,
+                    "DROP OWNED BY {} {}",
+                    display_comma_separated(owners),
+                    if *cascade { "CASCADE" } else { "RESTRICT" }
+                )
             }
             Statement::Deallocate { name, prepare } => {
                 if let Some(name) = name {
