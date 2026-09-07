@@ -15,6 +15,7 @@
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
+use std::time::Duration;
 
 use either::Either;
 use futures::stream::select_with_strategy;
@@ -53,7 +54,7 @@ use crate::executor::backfill::utils::{
 use crate::executor::monitor::CdcBackfillMetrics;
 use crate::executor::prelude::*;
 use crate::executor::source::get_infinite_backoff_strategy;
-use crate::task::CreateMviewProgressReporter;
+use crate::task::cdc_progress::CdcProgressReporter;
 
 /// `split_id`, `is_finished`, `row_count`, `cdc_offset` all occupy 1 column each.
 const METADATA_STATE_LEN: usize = 4;
@@ -127,9 +128,7 @@ pub struct CdcBackfillExecutor<S: StateStore> {
     /// State table of the `CdcBackfill` executor
     state_impl: CdcBackfillState<S>,
 
-    // TODO: introduce a CdcBackfillProgress to report finish to Meta
-    // This object is just a stub right now
-    progress: Option<CreateMviewProgressReporter>,
+    progress: Option<CdcProgressReporter>,
 
     metrics: CdcBackfillMetrics,
 
@@ -149,7 +148,7 @@ impl<S: StateStore> CdcBackfillExecutor<S> {
         upstream: Executor,
         output_indices: Vec<usize>,
         output_columns: Vec<ColumnDesc>,
-        progress: Option<CreateMviewProgressReporter>,
+        progress: Option<CdcProgressReporter>,
         metrics: Arc<StreamingMetrics>,
         state_table: StateTable<S>,
         rate_limit_rps: Option<u32>,
@@ -353,6 +352,7 @@ impl<S: StateStore> CdcBackfillExecutor<S> {
         .boxed()
         .peekable();
         let mut last_binlog_offset = state.last_cdc_offset.clone();
+        let mut estimated_row_count = None;
 
         // CDC Backfill Algorithm:
         //
@@ -375,8 +375,38 @@ impl<S: StateStore> CdcBackfillExecutor<S> {
         //
         // Once the backfill loop ends, we forward the upstream directly to the downstream.
         if need_backfill {
+            // Use a disposable reader for the best-effort estimate. Dropping a timed-out query
+            // does not necessarily cancel it upstream, and PostgreSQL/SQL Server readers use a
+            // single connection. Reusing that connection for the snapshot could therefore block
+            // on the abandoned estimate.
+            estimated_row_count = match tokio::time::timeout(
+                Duration::from_secs(5),
+                estimate_upstream_row_count(self.external_table.clone()),
+            )
+            .await
+            {
+                Ok(Ok(estimate)) => estimate,
+                Ok(Err(error)) => {
+                    tracing::warn!(
+                        error = %error.as_report(),
+                        %table_id,
+                        upstream_table_name,
+                        "failed to estimate upstream table row count"
+                    );
+                    None
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        %table_id,
+                        upstream_table_name,
+                        "timed out estimating upstream table row count"
+                    );
+                    None
+                }
+            };
+
             // After init the state table and forward the initial barrier to downstream,
-            // we now try to create the table reader with retry.
+            // create a fresh table reader for the snapshot with retry.
             // If backfill hasn't finished, we can ignore upstream cdc events before we create the table reader.
             let mut table_reader: Option<ExternalTableReaderImpl> = None;
             let external_table = self.external_table.clone();
@@ -407,6 +437,15 @@ impl<S: StateStore> CdcBackfillExecutor<S> {
                             Message::Barrier(barrier) => {
                                 // commit state to bump the epoch of state table
                                 state_impl.commit_state(barrier.epoch).await?;
+                                if let Some(progress) = &self.progress {
+                                    progress.update_rows(
+                                        self.actor_ctx.fragment_id,
+                                        self.actor_ctx.id,
+                                        barrier.epoch,
+                                        total_snapshot_row_count,
+                                        None,
+                                    );
+                                }
                                 yield Message::Barrier(barrier);
                             }
                             Message::Chunk(_) => {
@@ -506,6 +545,15 @@ impl<S: StateStore> CdcBackfillExecutor<S> {
                         }
                         // commit state just to bump the epoch of state table
                         state_impl.commit_state(barrier.epoch).await?;
+                        if let Some(progress) = &self.progress {
+                            progress.update_rows(
+                                self.actor_ctx.fragment_id,
+                                self.actor_ctx.id,
+                                barrier.epoch,
+                                total_snapshot_row_count,
+                                estimated_row_count,
+                            );
+                        }
                         yield Message::Barrier(barrier);
                         break;
                     }
@@ -676,6 +724,16 @@ impl<S: StateStore> CdcBackfillExecutor<S> {
                                             .await?;
 
                                         state_impl.commit_state(barrier.epoch).await?;
+
+                                        if let Some(progress) = &self.progress {
+                                            progress.update_rows(
+                                                self.actor_ctx.fragment_id,
+                                                self.actor_ctx.id,
+                                                barrier.epoch,
+                                                total_snapshot_row_count,
+                                                estimated_row_count,
+                                            );
+                                        }
 
                                         // emit barrier and continue consume the backfill stream
                                         yield Message::Barrier(barrier);
@@ -893,6 +951,15 @@ impl<S: StateStore> CdcBackfillExecutor<S> {
                     .await?;
 
                 state_impl.commit_state(pending_barrier.epoch).await?;
+                if let Some(progress) = &self.progress {
+                    progress.update_rows(
+                        self.actor_ctx.fragment_id,
+                        self.actor_ctx.id,
+                        pending_barrier.epoch,
+                        total_snapshot_row_count,
+                        estimated_row_count,
+                    );
+                }
                 yield Message::Barrier(pending_barrier);
             }
             upstream_table_reader.disconnect().await?;
@@ -938,8 +1005,14 @@ impl<S: StateStore> CdcBackfillExecutor<S> {
                     state_impl.commit_state(barrier.epoch).await?;
 
                     // mark progress as finished
-                    if let Some(progress) = self.progress.as_mut() {
-                        progress.finish(barrier.epoch, total_snapshot_row_count);
+                    if let Some(progress) = &self.progress {
+                        progress.finish_rows(
+                            self.actor_ctx.fragment_id,
+                            self.actor_ctx.id,
+                            barrier.epoch,
+                            total_snapshot_row_count,
+                            estimated_row_count,
+                        );
                     }
                     yield msg;
                     // break after the state have been saved
@@ -965,6 +1038,16 @@ impl<S: StateStore> CdcBackfillExecutor<S> {
             }
         }
     }
+}
+
+async fn estimate_upstream_row_count(
+    external_table: ExternalStorageTable,
+) -> StreamExecutorResult<Option<u64>> {
+    let table_reader = external_table.create_table_reader().await?;
+    let upstream_table_reader = UpstreamTableReader::new(external_table, table_reader);
+    let estimate_result = upstream_table_reader.estimated_row_count().await;
+    upstream_table_reader.disconnect().await?;
+    estimate_result
 }
 
 pub(crate) async fn build_reader_and_poll_upstream(
@@ -1105,6 +1188,7 @@ impl<S: StateStore> Execute for CdcBackfillExecutor<S> {
 mod tests {
     use std::collections::BTreeMap;
     use std::str::FromStr;
+    use std::time::Duration;
 
     use futures::{StreamExt, pin_mut};
     use risingwave_common::array::{Array, DataChunk, Op, StreamChunk};
@@ -1371,6 +1455,78 @@ mod tests {
         let state = restored_state.restore_state().await.unwrap();
         assert!(state.is_finished);
         assert_eq!(state.last_cdc_offset, None);
+    }
+
+    #[tokio::test]
+    async fn test_finished_cdc_backfill_forwards_without_table_reader() {
+        let memory_state_store = MemoryStateStore::new();
+        let mut state_writer = CdcBackfillState::new(
+            TableId::new(1234),
+            create_cdc_state_table(memory_state_store.clone()).await,
+            5,
+        );
+        state_writer
+            .init_epoch(Barrier::new_test_barrier(test_epoch(1)).epoch)
+            .await
+            .unwrap();
+        state_writer
+            .mutate_state(None, None, 42, true)
+            .await
+            .unwrap();
+        state_writer
+            .commit_state(Barrier::new_test_barrier(test_epoch(2)).epoch)
+            .await
+            .unwrap();
+
+        let external_storage_table = ExternalStorageTable::new(
+            TableId::new(1234),
+            SchemaTableName {
+                schema_name: "public".to_owned(),
+                table_name: "orders".to_owned(),
+            },
+            "db".to_owned(),
+            ExternalTableConfig::default(),
+            ExternalCdcTableType::Undefined,
+            Schema::new(vec![Field::with_name(DataType::Int64, "id")]),
+            vec![OrderType::ascending()],
+            vec![0],
+        );
+        let schema = Schema::new(vec![
+            Field::unnamed(DataType::Jsonb),
+            Field::unnamed(DataType::Varchar),
+            Field::unnamed(DataType::Varchar),
+        ]);
+        let (tx, source) = MockSource::channel();
+        let source = source.into_executor(schema, vec![1]);
+        let cdc = CdcBackfillExecutor::new(
+            ActorContext::for_test(1),
+            external_storage_table,
+            source,
+            vec![0],
+            vec![ColumnDesc::named("id", ColumnId::new(1), DataType::Int64)],
+            None,
+            StreamingMetrics::unused().into(),
+            create_cdc_state_table(memory_state_store).await,
+            None,
+            CdcScanOptions::default(),
+            BTreeMap::default(),
+        );
+        let executor = cdc.execute_inner();
+        pin_mut!(executor);
+
+        tx.send_barrier(Barrier::new_test_barrier(test_epoch(3)));
+        assert!(matches!(
+            executor.next().await.unwrap().unwrap(),
+            Message::Barrier(_)
+        ));
+
+        tx.send_barrier(Barrier::new_test_barrier(test_epoch(4)));
+        let next = tokio::time::timeout(Duration::from_secs(1), executor.next())
+            .await
+            .expect("finished backfill must not wait for an external table reader")
+            .unwrap()
+            .unwrap();
+        assert!(matches!(next, Message::Barrier(_)));
     }
 
     #[tokio::test]

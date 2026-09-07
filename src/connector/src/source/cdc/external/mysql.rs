@@ -490,6 +490,22 @@ impl ExternalTableReader for MySqlExternalTableReader {
         }))
     }
 
+    async fn estimated_row_count(
+        &self,
+        table_name: &SchemaTableName,
+    ) -> ConnectorResult<Option<u64>> {
+        let mut conn = self.pool.get_conn().await?;
+        let estimate: Option<(Option<u64>,)> = conn
+            .exec_first(
+                "SELECT TABLE_ROWS \
+                 FROM INFORMATION_SCHEMA.TABLES \
+                 WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?",
+                (&table_name.schema_name, &table_name.table_name),
+            )
+            .await?;
+        Ok(estimate.and_then(|(row_count,)| row_count))
+    }
+
     fn snapshot_read(
         &self,
         table_name: SchemaTableName,

@@ -139,13 +139,14 @@ impl ExecutorBuilder for StreamCdcScanExecutorBuilder {
                 .enable_preload_all_rows_by_config(&params.config)
                 .build()
                 .await;
+            let progress = CdcProgressReporter::new(params.local_barrier_manager.clone());
             let exec = CdcBackfillExecutor::new(
                 params.actor_context.clone(),
                 external_table,
                 upstream,
                 output_indices,
                 output_columns,
-                None,
+                Some(progress),
                 params.executor_stats,
                 state_table,
                 node.rate_limit,

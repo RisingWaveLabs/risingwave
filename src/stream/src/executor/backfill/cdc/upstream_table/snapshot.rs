@@ -44,6 +44,10 @@ pub trait UpstreamTableRead {
         &self,
     ) -> impl Future<Output = StreamExecutorResult<Option<CdcOffset>>> + Send + '_;
 
+    fn estimated_row_count(
+        &self,
+    ) -> impl Future<Output = StreamExecutorResult<Option<u64>>> + Send + '_;
+
     async fn disconnect(self) -> StreamExecutorResult<()>;
 
     fn snapshot_read_table_split(
@@ -174,6 +178,13 @@ fn with_additional_columns(
 }
 
 impl UpstreamTableRead for UpstreamTableReader<ExternalStorageTable> {
+    async fn estimated_row_count(&self) -> StreamExecutorResult<Option<u64>> {
+        Ok(self
+            .reader
+            .estimated_row_count(&self.table.schema_table_name())
+            .await?)
+    }
+
     #[try_stream(ok = Option<StreamChunk>, error = StreamExecutorError)]
     async fn snapshot_read_full_table(&self, args: SnapshotReadArgs, batch_size: u32) {
         let primary_keys = self

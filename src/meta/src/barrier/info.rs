@@ -570,6 +570,9 @@ impl InflightDatabaseInfo {
         let job_id = self.fragment_location[&fragment_id];
         let job = self.jobs.get_mut(&job_id).expect("should exist");
         if let Some(tracker) = &mut job.cdc_table_backfill_tracker {
+            if !tracker.is_parallelized() {
+                return Ok(None);
+            }
             let cdc_scan_fragment_id = tracker.cdc_scan_fragment_id();
             if cdc_scan_fragment_id != fragment_id {
                 return Ok(None);
@@ -591,6 +594,9 @@ impl InflightDatabaseInfo {
     ) -> MetaResult<Option<HashMap<ActorId, PbCdcTableSnapshotSplits>>> {
         let job = self.jobs.get_mut(&job_id).expect("should exist");
         if let Some(tracker) = &mut job.cdc_table_backfill_tracker {
+            if !tracker.is_parallelized() {
+                return Ok(None);
+            }
             let cdc_scan_fragment_id = tracker.cdc_scan_fragment_id();
             let actors = job.fragment_infos[&cdc_scan_fragment_id]
                 .actors
@@ -690,16 +696,29 @@ impl InflightDatabaseInfo {
                 );
                 continue;
             };
-            let Some(tracker) = &mut self
-                .jobs
-                .get_mut(job_id)
-                .expect("should exist")
-                .cdc_table_backfill_tracker
-            else {
+            let job = self.jobs.get_mut(job_id).expect("should exist");
+            if job.cdc_table_backfill_tracker.is_none() && progress.backfilled_row_count.is_some() {
+                job.cdc_table_backfill_tracker = Some(
+                    CdcTableBackfillTracker::new_non_parallelized(progress.fragment_id),
+                );
+            }
+            let Some(tracker) = &mut job.cdc_table_backfill_tracker else {
                 warn!("update the cdc progress of an created streaming job: {progress:?}");
                 continue;
             };
-            tracker.update_split_progress(progress);
+            if progress.backfilled_row_count.is_some() {
+                if tracker.is_parallelized() {
+                    warn!("update row progress on a parallelized CDC backfill: {progress:?}");
+                    continue;
+                }
+                tracker.update_row_progress(progress);
+            } else {
+                if !tracker.is_parallelized() {
+                    warn!("update split progress on a non-parallelized CDC backfill: {progress:?}");
+                    continue;
+                }
+                tracker.update_split_progress(progress);
+            }
         }
         // Handle CDC source offset updated events
         for cdc_offset_updated in resps

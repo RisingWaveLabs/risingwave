@@ -917,6 +917,8 @@ impl StreamManagerService for StreamServiceImpl {
                         split_total_count: p.split_total_count,
                         split_backfilled_count: p.split_backfilled_count,
                         split_completed_count: p.split_completed_count,
+                        backfilled_row_count: p.backfilled_row_count,
+                        estimated_row_count: p.estimated_row_count,
                     },
                 )
             })

@@ -451,6 +451,11 @@ message ListCdcProgressResponse {
     uint64 split_total_count = 1;
     uint64 split_backfilled_count = 2;
     uint64 split_completed_count = 3;
+    // Only set for non-parallelized CDC backfill.
+    optional uint64 backfilled_row_count = 4;
+    // Best-effort estimate from upstream database statistics. Only set for
+    // non-parallelized CDC backfill when the estimate is available.
+    optional uint64 estimated_row_count = 5;
   }
   map<uint32, CdcProgress> cdc_progress = 1;
 }

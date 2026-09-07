@@ -26,6 +26,8 @@ struct RwCdcProgress {
     split_total_count: i64,
     split_backfilled_count: i64,
     split_completed_count: i64,
+    backfilled_row_count: Option<i64>,
+    estimated_row_count: Option<i64>,
 }
 
 #[system_catalog(table, "rw_catalog.rw_cdc_progress")]
@@ -39,6 +41,8 @@ async fn read_rw_cdc_progress(reader: &SysCatalogReaderImpl) -> Result<Vec<RwCdc
             split_total_count: p.split_total_count as _,
             split_backfilled_count: p.split_backfilled_count as _,
             split_completed_count: p.split_completed_count as _,
+            backfilled_row_count: p.backfilled_row_count.map(|count| count as _),
+            estimated_row_count: p.estimated_row_count.map(|count| count as _),
         })
         .collect())
 }

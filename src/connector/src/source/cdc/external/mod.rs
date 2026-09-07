@@ -233,6 +233,17 @@ pub type CdcOffsetParseFunc = Box<dyn Fn(&str) -> ConnectorResult<CdcOffset> + S
 pub trait ExternalTableReader: Sized {
     async fn current_cdc_offset(&self) -> ConnectorResult<CdcOffset>;
 
+    /// Returns a best-effort row count estimate from upstream database statistics.
+    ///
+    /// The estimate must not scan the upstream table. Callers should treat both an
+    /// unavailable estimate and an error as non-fatal for snapshot backfill.
+    async fn estimated_row_count(
+        &self,
+        _table_name: &SchemaTableName,
+    ) -> ConnectorResult<Option<u64>> {
+        Ok(None)
+    }
+
     // Currently, MySQL cdc uses a connection pool to manage connections to MySQL, and other CDC processes do not require the disconnect step for now.
 
     async fn disconnect(self) -> ConnectorResult<()> {
@@ -350,6 +361,22 @@ impl ExternalTableReader for ExternalTableReaderImpl {
             ExternalTableReaderImpl::Postgres(postgres) => postgres.current_cdc_offset().await,
             ExternalTableReaderImpl::SqlServer(sql_server) => sql_server.current_cdc_offset().await,
             ExternalTableReaderImpl::Mock(mock) => mock.current_cdc_offset().await,
+        }
+    }
+
+    async fn estimated_row_count(
+        &self,
+        table_name: &SchemaTableName,
+    ) -> ConnectorResult<Option<u64>> {
+        match self {
+            ExternalTableReaderImpl::MySql(mysql) => mysql.estimated_row_count(table_name).await,
+            ExternalTableReaderImpl::Postgres(postgres) => {
+                postgres.estimated_row_count(table_name).await
+            }
+            ExternalTableReaderImpl::SqlServer(sql_server) => {
+                sql_server.estimated_row_count(table_name).await
+            }
+            ExternalTableReaderImpl::Mock(mock) => mock.estimated_row_count(table_name).await,
         }
     }
 

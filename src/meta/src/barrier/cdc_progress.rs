@@ -52,6 +52,12 @@ struct CdcBackfillProgress {
     split_assignment_generation: u64,
 }
 
+#[derive(Debug, Default)]
+struct CdcBackfillRowProgress {
+    backfilled_row_count: u64,
+    estimated_row_count: Option<u64>,
+}
+
 #[derive(Debug)]
 pub struct CdcProgress {
     /// The total number of splits, immutable.
@@ -60,6 +66,10 @@ pub struct CdcProgress {
     pub split_backfilled_count: u64,
     /// The number of splits that has completed backfill and synchronized CDC offset.
     pub split_completed_count: u64,
+    /// Only set for non-parallelized CDC backfill.
+    pub backfilled_row_count: Option<u64>,
+    /// Best-effort estimate from upstream database statistics.
+    pub estimated_row_count: Option<u64>,
 }
 
 impl CdcTableBackfillTracker {
@@ -93,6 +103,7 @@ impl CdcTableBackfillTracker {
 #[derive(Debug)]
 pub(super) struct CdcTableBackfillTracker {
     status: CdcBackfillStatus,
+    row_progress: Option<CdcBackfillRowProgress>,
     cdc_scan_fragment_id: FragmentId,
     next_generation: u64,
 }
@@ -112,6 +123,7 @@ impl CdcTableBackfillTracker {
         };
         Self {
             status,
+            row_progress: None,
             cdc_scan_fragment_id,
             next_generation: INITIAL_CDC_SPLIT_ASSIGNMENT_GENERATION_ID + 1,
         }
@@ -126,6 +138,24 @@ impl CdcTableBackfillTracker {
             cdc_scan_fragment_id,
             CdcTableSnapshotSplits::Backfilling(splits),
         )
+    }
+
+    pub fn new_non_parallelized(cdc_scan_fragment_id: FragmentId) -> Self {
+        Self {
+            status: CdcBackfillStatus::Backfilling(CdcBackfillProgress {
+                splits: vec![single_merged_split()],
+                split_backfilled_count: 0,
+                split_completed_count: 0,
+                split_assignment_generation: INVALID_CDC_SPLIT_ASSIGNMENT_GENERATION_ID,
+            }),
+            row_progress: Some(CdcBackfillRowProgress::default()),
+            cdc_scan_fragment_id,
+            next_generation: INITIAL_CDC_SPLIT_ASSIGNMENT_GENERATION_ID,
+        }
+    }
+
+    pub fn is_parallelized(&self) -> bool {
+        self.row_progress.is_none()
     }
 
     pub fn cdc_scan_fragment_id(&self) -> FragmentId {
@@ -158,10 +188,28 @@ impl CdcTableBackfillTracker {
         }
     }
 
+    pub fn update_row_progress(&mut self, progress: &PbCdcTableBackfillProgress) {
+        let Some(backfilled_row_count) = progress.backfilled_row_count else {
+            return;
+        };
+        let Some(row_progress) = &mut self.row_progress else {
+            return;
+        };
+        row_progress.backfilled_row_count =
+            row_progress.backfilled_row_count.max(backfilled_row_count);
+        if row_progress.estimated_row_count.is_none() {
+            row_progress.estimated_row_count = progress.estimated_row_count;
+        }
+        if progress.done {
+            self.status = CdcBackfillStatus::Completed;
+        }
+    }
+
     pub fn reassign_splits(
         &mut self,
         actor_ids: HashSet<ActorId>,
     ) -> MetaResult<HashMap<ActorId, PbCdcTableSnapshotSplits>> {
+        assert!(self.is_parallelized());
         let generation = self.next_generation;
         self.next_generation += 1;
         let splits = match &mut self.status {
@@ -181,17 +229,22 @@ impl CdcTableBackfillTracker {
     }
 
     pub fn gen_cdc_progress(&self) -> CdcProgress {
-        match &self.status {
-            CdcBackfillStatus::Backfilling(progress) => CdcProgress {
-                split_total_count: progress.splits.len() as _,
-                split_backfilled_count: progress.split_backfilled_count,
-                split_completed_count: progress.split_completed_count,
-            },
-            CdcBackfillStatus::PreCompleted | CdcBackfillStatus::Completed => CdcProgress {
-                split_total_count: 1,
-                split_backfilled_count: 1,
-                split_completed_count: 1,
-            },
+        let (split_total_count, split_backfilled_count, split_completed_count) = match &self.status
+        {
+            CdcBackfillStatus::Backfilling(progress) => (
+                progress.splits.len() as _,
+                progress.split_backfilled_count,
+                progress.split_completed_count,
+            ),
+            CdcBackfillStatus::PreCompleted | CdcBackfillStatus::Completed => (1, 1, 1),
+        };
+        let row_progress = self.row_progress.as_ref();
+        CdcProgress {
+            split_total_count,
+            split_backfilled_count,
+            split_completed_count,
+            backfilled_row_count: row_progress.map(|progress| progress.backfilled_row_count),
+            estimated_row_count: row_progress.and_then(|progress| progress.estimated_row_count),
         }
     }
 
@@ -318,6 +371,51 @@ mod test {
             tracker.update_split_progress(progress);
         }
         assert!(tracker.take_pre_completed());
+    }
+
+    #[test]
+    fn test_non_parallelized_row_progress() {
+        let mut tracker = CdcTableBackfillTracker::new_non_parallelized(233.into());
+        assert!(!tracker.is_parallelized());
+
+        tracker.update_row_progress(&CdcTableBackfillProgress {
+            fragment_id: 233.into(),
+            backfilled_row_count: Some(40),
+            estimated_row_count: Some(100),
+            ..Default::default()
+        });
+        let progress = tracker.gen_cdc_progress();
+        assert_eq!(progress.split_total_count, 1);
+        assert_eq!(progress.split_backfilled_count, 0);
+        assert_eq!(progress.split_completed_count, 0);
+        assert_eq!(progress.backfilled_row_count, Some(40));
+        assert_eq!(progress.estimated_row_count, Some(100));
+
+        // Retried or stale reports must not move the numerator backwards or
+        // replace the estimate captured by the first successful query.
+        tracker.update_row_progress(&CdcTableBackfillProgress {
+            fragment_id: 233.into(),
+            backfilled_row_count: Some(20),
+            estimated_row_count: Some(200),
+            ..Default::default()
+        });
+        let progress = tracker.gen_cdc_progress();
+        assert_eq!(progress.backfilled_row_count, Some(40));
+        assert_eq!(progress.estimated_row_count, Some(100));
+
+        tracker.update_row_progress(&CdcTableBackfillProgress {
+            fragment_id: 233.into(),
+            done: true,
+            backfilled_row_count: Some(110),
+            estimated_row_count: Some(100),
+            ..Default::default()
+        });
+        let progress = tracker.gen_cdc_progress();
+        assert_eq!(progress.split_backfilled_count, 1);
+        assert_eq!(progress.split_completed_count, 1);
+        assert_eq!(progress.backfilled_row_count, Some(110));
+        assert_eq!(progress.estimated_row_count, Some(100));
+        assert!(!tracker.take_pre_completed());
     }
 
     fn assert_init_state(tracker: &CdcTableBackfillTracker, split_count: u64) {

@@ -172,6 +172,29 @@ impl ExternalTableReader for PostgresExternalTableReader {
         Ok(CdcOffset::Postgres(pg_offset))
     }
 
+    async fn estimated_row_count(
+        &self,
+        table_name: &SchemaTableName,
+    ) -> ConnectorResult<Option<u64>> {
+        assert_eq!(table_name, &self.schema_table_name);
+        let client = self.client.lock().await;
+        let row = client
+            .query_opt(
+                "SELECT c.reltuples::double precision \
+                 FROM pg_catalog.pg_class c \
+                 JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+                 WHERE n.nspname = $1 AND c.relname = $2 \
+                   AND c.relkind IN ('r', 'p')",
+                &[&table_name.schema_name, &table_name.table_name],
+            )
+            .await?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let estimate = row.get::<_, f64>(0);
+        Ok((estimate.is_finite() && estimate >= 0.0).then_some(estimate.round() as u64))
+    }
+
     fn snapshot_read(
         &self,
         table_name: SchemaTableName,

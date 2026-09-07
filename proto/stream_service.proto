@@ -73,6 +73,10 @@ message BarrierCompleteResponse {
     int64 split_id_end_inclusive = 5;
     uint64 generation = 6;
     uint32 fragment_id = 7;
+    // Only set for non-parallelized CDC backfill.
+    optional uint64 backfilled_row_count = 8;
+    // Best-effort estimate from upstream database statistics.
+    optional uint64 estimated_row_count = 9;
   }
   string request_id = 1;
   common.Status status = 2;

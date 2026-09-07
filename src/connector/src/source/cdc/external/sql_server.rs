@@ -38,6 +38,13 @@ use crate::source::cdc::external::{
 // The maximum commit_lsn value in Sql Server
 const MAX_COMMIT_LSN: &str = "ffffffff:ffffffff:ffff";
 
+// Unlike `sys.dm_db_partition_stats`, `sys.partitions` does not require database-wide
+// state/definition permissions. Its rows are filtered by normal metadata visibility, so a CDC
+// user with access to the upstream table can obtain the same approximate row count.
+const ESTIMATED_ROW_COUNT_QUERY: &str = "SELECT SUM(p.rows) \
+    FROM sys.partitions AS p \
+    WHERE p.object_id = OBJECT_ID(@P1) AND p.index_id IN (0, 1)";
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct SqlServerOffset {
     // https://learn.microsoft.com/en-us/answers/questions/1328359/how-to-accurately-sequence-change-data-capture-dat
@@ -268,6 +275,27 @@ impl ExternalTableReader for SqlServerExternalTableReader {
         }))
     }
 
+    async fn estimated_row_count(
+        &self,
+        table_name: &SchemaTableName,
+    ) -> ConnectorResult<Option<u64>> {
+        let mut query = Query::new(ESTIMATED_ROW_COUNT_QUERY);
+        let normalized_table_name = Self::get_normalized_table_name(table_name);
+        query.bind(normalized_table_name.as_str());
+
+        let mut client = self.client.lock().await;
+        let row = query
+            .query(&mut client.inner_client)
+            .await?
+            .into_row()
+            .await?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let estimate = row.try_get::<i64, usize>(0)?;
+        Ok(estimate.and_then(|row_count| u64::try_from(row_count).ok()))
+    }
+
     fn snapshot_read(
         &self,
         table_name: SchemaTableName,
@@ -461,6 +489,15 @@ impl SqlServerExternalTableReader {
 #[cfg(test)]
 mod tests {
     use crate::source::cdc::external::SqlServerExternalTableReader;
+    use crate::source::cdc::external::sql_server::ESTIMATED_ROW_COUNT_QUERY;
+
+    #[test]
+    fn test_estimated_row_count_query_uses_public_catalog_view() {
+        assert_eq!(
+            ESTIMATED_ROW_COUNT_QUERY,
+            "SELECT SUM(p.rows) FROM sys.partitions AS p WHERE p.object_id = OBJECT_ID(@P1) AND p.index_id IN (0, 1)"
+        );
+    }
 
     #[test]
     fn test_sql_server_filter_expr() {
