@@ -50,6 +50,7 @@ pub const CDC_BACKFILL_PARALLELISM: &str = "backfill.parallelism";
 pub const CDC_BACKFILL_NUM_ROWS_PER_SPLIT: &str = "backfill.num_rows_per_split";
 pub const CDC_BACKFILL_AS_EVEN_SPLITS: &str = "backfill.as_even_splits";
 pub const CDC_BACKFILL_SPLIT_PK_COLUMN_INDEX: &str = "backfill.split_pk_column_index";
+pub const CDC_BACKFILL_SPLIT_COLUMN_NAME: &str = "backfill.split_column_name";
 // We enable transaction for shared cdc source by default
 pub const CDC_TRANSACTIONAL_KEY: &str = "transactional";
 pub const CDC_WAIT_FOR_STREAMING_START_TIMEOUT: &str = "cdc.source.wait.streaming.start.timeout";
@@ -319,6 +320,8 @@ pub struct CdcScanOptions {
     pub backfill_as_even_splits: bool,
     /// Used by parallelized backfill. Specify the index of primary key column to use as split column.
     pub backfill_split_pk_column_index: u32,
+    /// If set, it will override `backfill_split_pk_column_index`.
+    pub backfill_split_column_name: Option<String>,
 }
 
 impl Default for CdcScanOptions {
@@ -332,6 +335,7 @@ impl Default for CdcScanOptions {
             backfill_num_rows_per_split: 100_000,
             backfill_as_even_splits: true,
             backfill_split_pk_column_index: 0,
+            backfill_split_column_name: None,
         }
     }
 }
@@ -346,6 +350,7 @@ impl CdcScanOptions {
             backfill_num_rows_per_split: self.backfill_num_rows_per_split,
             backfill_as_even_splits: self.backfill_as_even_splits,
             backfill_split_pk_column_index: self.backfill_split_pk_column_index,
+            backfill_split_column_name: self.backfill_split_column_name.clone(),
         }
     }
 
@@ -358,6 +363,7 @@ impl CdcScanOptions {
             backfill_num_rows_per_split: proto.backfill_num_rows_per_split,
             backfill_as_even_splits: proto.backfill_as_even_splits,
             backfill_split_pk_column_index: proto.backfill_split_pk_column_index,
+            backfill_split_column_name: proto.backfill_split_column_name.clone(),
         }
     }
 

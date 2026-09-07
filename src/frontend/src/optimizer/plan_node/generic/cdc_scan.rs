@@ -26,7 +26,7 @@ use risingwave_connector::source::cdc::{
     CDC_BACKFILL_AS_EVEN_SPLITS, CDC_BACKFILL_ENABLE_KEY, CDC_BACKFILL_MAX_PARALLELISM,
     CDC_BACKFILL_NUM_ROWS_PER_SPLIT, CDC_BACKFILL_PARALLELISM,
     CDC_BACKFILL_SNAPSHOT_BATCH_SIZE_KEY, CDC_BACKFILL_SNAPSHOT_INTERVAL_KEY,
-    CDC_BACKFILL_SPLIT_PK_COLUMN_INDEX, CdcScanOptions,
+    CDC_BACKFILL_SPLIT_COLUMN_NAME, CDC_BACKFILL_SPLIT_PK_COLUMN_INDEX, CdcScanOptions,
 };
 
 use super::GenericPlanNode;
@@ -116,6 +116,10 @@ pub fn build_cdc_scan_options_with_options(
                 u32::from_str(backfill_split_pk_column_index).map_err(|_| {
                     anyhow!("Invalid value for {}", CDC_BACKFILL_SPLIT_PK_COLUMN_INDEX)
                 })?;
+        }
+
+        if let Some(backfill_split_column_name) = with_options.get(CDC_BACKFILL_SPLIT_COLUMN_NAME) {
+            scan_options.backfill_split_column_name = Some(backfill_split_column_name.to_owned());
         }
     }
 

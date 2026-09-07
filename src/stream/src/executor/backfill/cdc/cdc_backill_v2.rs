@@ -116,13 +116,29 @@ impl<S: StateStore> ParallelizedCdcBackfillExecutor<S> {
             .filter(|col| col.additional_column.column_type.is_some())
             .cloned()
             .collect_vec();
-        assert!(
-            (self.options.backfill_split_pk_column_index as usize) < pk_indices.len(),
-            "split pk column index {} out of bound",
-            self.options.backfill_split_pk_column_index
-        );
         let snapshot_split_column_index =
-            pk_indices[self.options.backfill_split_pk_column_index as usize];
+            if let Some(backfill_split_column_name) = &self.options.backfill_split_column_name {
+                let Some(pos) = self
+                    .external_table
+                    .schema()
+                    .fields
+                    .iter()
+                    .position(|f| f.name == *backfill_split_column_name)
+                else {
+                    panic!(
+                        "invalid backfill_split_column_name {}",
+                        backfill_split_column_name
+                    );
+                };
+                pos
+            } else {
+                assert!(
+                    (self.options.backfill_split_pk_column_index as usize) < pk_indices.len(),
+                    "split pk column index {} out of bound",
+                    self.options.backfill_split_pk_column_index
+                );
+                pk_indices[self.options.backfill_split_pk_column_index as usize]
+            };
         let cdc_table_snapshot_split_column =
             vec![self.external_table.schema().fields[snapshot_split_column_index].clone()];
 
@@ -808,7 +824,12 @@ fn assert_consecutive_splits(actor_snapshot_splits: &[CdcTableSnapshotSplit]) {
                 actor_snapshot_splits[i].right_bound_exclusive.datum_at(0),
                 OrderType::ascending_nulls_last(),
             )
-            .is_lt()
+            .is_lt(),
+            "{:?} {:?}",
+            actor_snapshot_splits[i - 1]
+                .right_bound_exclusive
+                .datum_at(0),
+            actor_snapshot_splits[i].right_bound_exclusive.datum_at(0)
         );
     }
 }

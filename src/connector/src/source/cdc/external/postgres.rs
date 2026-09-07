@@ -199,6 +199,19 @@ impl ExternalTableReader for PostgresExternalTableReader {
             ))
             .into());
         }
+        if let Some(backfill_split_column_name) = &options.backfill_split_column_name
+            && self
+                .rw_schema
+                .fields
+                .iter()
+                .all(|f| f.name != *backfill_split_column_name)
+        {
+            return Err(anyhow::anyhow!(format!(
+                "invalid backfill_split_column_name {}",
+                backfill_split_column_name
+            ))
+            .into());
+        }
         let split_column = self.split_column(&options);
         let row_stream = if options.backfill_as_even_splits
             && is_supported_even_split_data_type(&split_column.data_type)
@@ -809,8 +822,18 @@ impl PostgresExternalTableReader {
     }
 
     fn split_column(&self, options: &CdcTableSnapshotSplitOption) -> Field {
-        self.rw_schema.fields[self.pk_indices[options.backfill_split_pk_column_index as usize]]
-            .clone()
+        if let Some(backfill_split_column_name) = &options.backfill_split_column_name {
+            self.rw_schema
+                .fields
+                .iter()
+                .filter(|f| f.name == *backfill_split_column_name)
+                .cloned()
+                .exactly_one()
+                .unwrap()
+        } else {
+            self.rw_schema.fields[self.pk_indices[options.backfill_split_pk_column_index as usize]]
+                .clone()
+        }
     }
 }
 

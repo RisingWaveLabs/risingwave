@@ -265,6 +265,7 @@ pub struct CdcTableSnapshotSplitOption {
     pub backfill_num_rows_per_split: u64,
     pub backfill_as_even_splits: bool,
     pub backfill_split_pk_column_index: u32,
+    pub backfill_split_column_name: Option<String>,
 }
 
 pub enum ExternalTableReaderImpl {
