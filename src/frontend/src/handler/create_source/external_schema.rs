@@ -207,7 +207,11 @@ async fn bind_columns_from_source_for_non_cdc(
             )
         }
         (format @ (Format::Plain | Format::Upsert | Format::Debezium), Encode::Avro) => {
-            if format_encode_options_to_consume
+            if format_encode_options_to_consume.contains_key(PULSAR_SCHEMA_URL_KEY) {
+                // Pulsar schema options are parsed by `SpecificParserConfig` and remain in the
+                // catalog format options. They deliberately do not populate the legacy
+                // Confluent-oriented `row_schema_location` fields.
+            } else if format_encode_options_to_consume
                 .remove(AWS_GLUE_SCHEMA_ARN_KEY)
                 .is_none()
             {
