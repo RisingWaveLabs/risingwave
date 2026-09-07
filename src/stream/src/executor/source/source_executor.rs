@@ -21,7 +21,7 @@ use itertools::Itertools;
 use prometheus::core::{AtomicU64, GenericCounter};
 use risingwave_common::array::ArrayRef;
 use risingwave_common::catalog::TableId;
-use risingwave_common::metrics::{GLOBAL_ERROR_METRICS, LabelGuardedMetric};
+use risingwave_common::metrics::{GLOBAL_ERROR_METRICS, LabelGuardedIntGauge, LabelGuardedMetric};
 use risingwave_common::system_param::local_manager::SystemParamsReaderRef;
 use risingwave_common::system_param::reader::SystemParamsRead;
 use risingwave_common::types::JsonbVal;
@@ -60,6 +60,41 @@ fn lsn_u128_to_i64(lsn: u128) -> i64 {
     lsn.min(i64::MAX as u128) as i64
 }
 
+fn update_mysql_cdc_state_file_seq_metric(
+    metric_guard: &mut Option<LabelGuardedIntGauge>,
+    metrics: &StreamingMetrics,
+    source_id: &str,
+    split_impl: &SplitImpl,
+) {
+    let SplitImpl::MysqlCdc(mysql_split) = split_impl else {
+        return;
+    };
+
+    if let Some((file_seq, _)) = mysql_split.mysql_binlog_offset() {
+        metric_guard
+            .get_or_insert_with(|| {
+                metrics
+                    .mysql_cdc_state_binlog_file_seq
+                    .with_guarded_label_values(&[source_id])
+            })
+            .set(file_seq as i64);
+    } else {
+        *metric_guard = None;
+    }
+}
+
+fn clear_mysql_cdc_state_file_seq_metric_if_unassigned(
+    metric_guard: &mut Option<LabelGuardedIntGauge>,
+    target_state: &HashMap<SplitId, SplitImpl>,
+) {
+    if !target_state
+        .values()
+        .any(|split| matches!(split, SplitImpl::MysqlCdc(_)))
+    {
+        *metric_guard = None;
+    }
+}
+
 pub struct SourceExecutor<S: StateStore> {
     actor_ctx: ActorContextRef,
 
@@ -68,6 +103,9 @@ pub struct SourceExecutor<S: StateStore> {
 
     /// Metrics for monitor.
     metrics: Arc<StreamingMetrics>,
+
+    /// Keep the MySQL CDC state file sequence metric alive while this executor owns the split.
+    mysql_cdc_state_binlog_file_seq_guard: Option<LabelGuardedIntGauge>,
 
     /// Receiver of barrier channel.
     barrier_receiver: Option<UnboundedReceiver<Barrier>>,
@@ -100,6 +138,7 @@ impl<S: StateStore> SourceExecutor<S> {
             actor_ctx,
             stream_source_core,
             metrics,
+            mysql_cdc_state_binlog_file_seq_guard: None,
             barrier_receiver: Some(barrier_receiver),
             system_params,
             rate_limit_rps,
@@ -210,6 +249,7 @@ impl<S: StateStore> SourceExecutor<S> {
         target_splits: Vec<SplitImpl>,
         should_trim_state: bool,
     ) -> StreamExecutorResult<bool> {
+        let mysql_file_seq_metric_guard = &mut self.mysql_cdc_state_binlog_file_seq_guard;
         let core = &mut self.stream_source_core;
 
         let target_splits: HashMap<_, _> = target_splits
@@ -285,6 +325,11 @@ impl<S: StateStore> SourceExecutor<S> {
 
             core.latest_split_info = target_state;
         }
+
+        clear_mysql_cdc_state_file_seq_metric_if_unassigned(
+            mysql_file_seq_metric_guard,
+            &core.latest_split_info,
+        );
 
         Ok(split_changed)
     }
@@ -442,6 +487,7 @@ impl<S: StateStore> SourceExecutor<S> {
         epoch: EpochPair,
     ) -> StreamExecutorResult<HashMap<SplitId, SplitImpl>> {
         let core = &mut self.stream_source_core;
+        let mysql_file_seq_metric_guard = &mut self.mysql_cdc_state_binlog_file_seq_guard;
 
         let cache = core
             .updated_splits_in_epoch
@@ -466,12 +512,13 @@ impl<S: StateStore> SourceExecutor<S> {
                         }
                     }
                     SplitImpl::MysqlCdc(mysql_split) => {
-                        if let Some((file_seq, position)) = mysql_split.mysql_binlog_offset() {
-                            self.metrics
-                                .mysql_cdc_state_binlog_file_seq
-                                .with_guarded_label_values(&[&source_id])
-                                .set(file_seq as i64);
-
+                        update_mysql_cdc_state_file_seq_metric(
+                            mysql_file_seq_metric_guard,
+                            &self.metrics,
+                            &source_id,
+                            split_impl,
+                        );
+                        if let Some((_, position)) = mysql_split.mysql_binlog_offset() {
                             self.metrics
                                 .mysql_cdc_state_binlog_position
                                 .with_guarded_label_values(&[&source_id])
@@ -630,6 +677,7 @@ impl<S: StateStore> SourceExecutor<S> {
 
         core.split_state_store.init_epoch(first_epoch).await?;
         {
+            let source_id = source_id.to_string();
             let committed_reader = core
                 .split_state_store
                 .new_committed_reader(first_epoch)
@@ -639,6 +687,12 @@ impl<S: StateStore> SourceExecutor<S> {
                     committed_reader.try_recover_from_state_store(ele).await?
                 {
                     *ele = recover_state;
+                    update_mysql_cdc_state_file_seq_metric(
+                        &mut self.mysql_cdc_state_binlog_file_seq_guard,
+                        &self.metrics,
+                        &source_id,
+                        ele,
+                    );
                     // if state store is non-empty, we consider it's initialized.
                     is_uninitialized = false;
                 } else {
@@ -1282,12 +1336,16 @@ impl<S: StateStore> WaitCheckpointWorker<S> {
 #[cfg(test)]
 mod tests {
     use maplit::{btreemap, convert_args, hashmap};
+    use prometheus::Registry;
+    use prometheus::core::Collector;
     use risingwave_common::array::{Array, BytesArray};
     use risingwave_common::catalog::{ColumnId, Field};
+    use risingwave_common::config::MetricLevel;
     use risingwave_common::id::SourceId;
     use risingwave_common::system_param::local_manager::LocalSystemParamsManager;
     use risingwave_common::test_prelude::StreamChunkTestExt;
     use risingwave_common::util::epoch::{EpochExt, test_epoch};
+    use risingwave_connector::source::cdc::{DebeziumCdcSplit, Mysql};
     use risingwave_connector::source::datagen::DatagenSplit;
     use risingwave_connector::source::reader::desc::test_utils::create_source_desc_builder;
     use risingwave_pb::catalog::StreamSourceInfo;
@@ -1353,6 +1411,134 @@ mod tests {
                 build_pulsar_ack_channel_id(source_id, &split_b, actor_id),
                 build_pulsar_ack_channel_id(source_id, &split_a, actor_id),
             ]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_recovered_mysql_cdc_state_file_seq_metric_is_initialized()
+    -> StreamExecutorResult<()> {
+        let mut state_table_handler = SourceStateTableHandler::from_table_catalog(
+            &default_source_internal_table(0x2333),
+            MemoryStateStore::new(),
+        )
+        .await;
+        let offset = r#"{"sourceOffset":{"file":"binlog.000123","pos":45678}}"#;
+        let persisted_split = SplitImpl::MysqlCdc(DebeziumCdcSplit::<Mysql>::new(
+            1001,
+            Some(offset.to_owned()),
+            None,
+        ));
+        let uninitialized_split =
+            SplitImpl::MysqlCdc(DebeziumCdcSplit::<Mysql>::new(1001, None, None));
+        let epoch_1 = EpochPair::new_test_epoch(test_epoch(1));
+        let epoch_2 = EpochPair::new_test_epoch(test_epoch(2));
+        let epoch_3 = EpochPair::new_test_epoch(test_epoch(3));
+
+        state_table_handler.init_epoch(epoch_1).await?;
+        state_table_handler
+            .set_states(vec![persisted_split.clone()])
+            .await?;
+        state_table_handler
+            .state_table_mut()
+            .commit_for_test(epoch_2)
+            .await?;
+        state_table_handler
+            .state_table_mut()
+            .commit_for_test(epoch_3)
+            .await?;
+
+        let recovered_split = state_table_handler
+            .new_committed_reader(epoch_3)
+            .await?
+            .try_recover_from_state_store(&uninitialized_split)
+            .await?
+            .unwrap();
+        assert_eq!(recovered_split, persisted_split);
+
+        let registry = Registry::new();
+        let metrics = StreamingMetrics::new(&registry, MetricLevel::Debug);
+        let mut metric_guard = None;
+        update_mysql_cdc_state_file_seq_metric(&mut metric_guard, &metrics, "1", &recovered_split);
+
+        for _ in 0..2 {
+            let file_seq = metrics
+                .mysql_cdc_state_binlog_file_seq
+                .collect()
+                .pop()
+                .unwrap();
+            assert_eq!(
+                123.0,
+                file_seq.get_metric()[0]
+                    .get_gauge()
+                    .as_ref()
+                    .unwrap()
+                    .value()
+            );
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_mysql_cdc_state_file_seq_metric_is_cleared() {
+        let registry = Registry::new();
+        let metrics = StreamingMetrics::new(&registry, MetricLevel::Debug);
+        let mut metric_guard = None;
+        let split_with_offset = SplitImpl::MysqlCdc(DebeziumCdcSplit::<Mysql>::new(
+            1001,
+            Some(r#"{"sourceOffset":{"file":"binlog.000123","pos":45678}}"#.to_owned()),
+            None,
+        ));
+        let split_without_offset =
+            SplitImpl::MysqlCdc(DebeziumCdcSplit::<Mysql>::new(1001, None, None));
+
+        update_mysql_cdc_state_file_seq_metric(
+            &mut metric_guard,
+            &metrics,
+            "1",
+            &split_with_offset,
+        );
+        assert!(metric_guard.is_some());
+
+        update_mysql_cdc_state_file_seq_metric(
+            &mut metric_guard,
+            &metrics,
+            "1",
+            &split_without_offset,
+        );
+        assert!(metric_guard.is_none());
+
+        drop(metrics.mysql_cdc_state_binlog_file_seq.collect());
+        assert!(
+            metrics
+                .mysql_cdc_state_binlog_file_seq
+                .collect()
+                .pop()
+                .unwrap()
+                .get_metric()
+                .is_empty()
+        );
+
+        update_mysql_cdc_state_file_seq_metric(
+            &mut metric_guard,
+            &metrics,
+            "1",
+            &split_with_offset,
+        );
+        assert!(metric_guard.is_some());
+
+        clear_mysql_cdc_state_file_seq_metric_if_unassigned(&mut metric_guard, &HashMap::new());
+        assert!(metric_guard.is_none());
+
+        drop(metrics.mysql_cdc_state_binlog_file_seq.collect());
+        assert!(
+            metrics
+                .mysql_cdc_state_binlog_file_seq
+                .collect()
+                .pop()
+                .unwrap()
+                .get_metric()
+                .is_empty()
         );
     }
 

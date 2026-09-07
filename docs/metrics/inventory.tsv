@@ -146,8 +146,8 @@ kinesis_lag_latency_ms	histogram	source_id,source_name,fragment_id,shard_id	Lag 
 kinesis_rebuild_shard_iter_count	counter	source_id,source_name,fragment_id,shard_id	Total number of times rebuild shard iter in kinesis source		src/connector/src/source/monitor/metrics.rs
 kinesis_throughput_exceeded_count	counter	source_id,source_name,fragment_id,shard_id	Total number of times throughput exceeded in kinesis source		src/connector/src/source/monitor/metrics.rs
 kinesis_timeout_count	counter	source_id,source_name,fragment_id,shard_id	Total number of times timeout in kinesis source		src/connector/src/source/monitor/metrics.rs
-mysql_cdc_binlog_file_seq_max	gauge	hostname,port	MySQL CDC upstream binlog file sequence number (maximum/newest)		src/connector/src/source/monitor/metrics.rs
-mysql_cdc_binlog_file_seq_min	gauge	hostname,port	MySQL CDC upstream binlog file sequence number (minimum/oldest)		src/connector/src/source/monitor/metrics.rs
+mysql_cdc_binlog_file_seq_max	gauge	source_id,hostname,port	MySQL CDC upstream binlog file sequence number (maximum/newest)		src/connector/src/source/monitor/metrics.rs
+mysql_cdc_binlog_file_seq_min	gauge	source_id,hostname,port	MySQL CDC upstream binlog file sequence number (minimum/oldest)		src/connector/src/source/monitor/metrics.rs
 parquet_source_skip_row_count	counter	actor_id,source_id,source_name,fragment_id	Total number of rows that have been set to null in parquet source		src/connector/src/source/monitor/metrics.rs
 pg_cdc_confirmed_flush_lsn	gauge	source_id,slot_name	PostgreSQL CDC confirmed flush LSN		src/connector/src/source/monitor/metrics.rs
 pg_cdc_upstream_max_lsn	gauge	source_id,slot_name	PostgreSQL CDC upstream max LSN (pg_current_wal_lsn)		src/connector/src/source/monitor/metrics.rs
