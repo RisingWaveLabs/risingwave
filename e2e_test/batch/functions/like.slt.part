@@ -16,6 +16,74 @@ select * from test_table where name like 'test\_table';
 ----
 test_table
 
+query BBB
+select
+    'ABC_123' like 'ABC\_123' escape '\',
+    'ABCD123' like 'ABC\_123' escape '\',
+    'ABC\123' like 'ABC\\123' escape '\';
+----
+t f t
+
+query B
+select 'abc' like 'abc\' escape '\';
+----
+f
+
+query BBBBB
+select
+    'abc' like 'a_c' escape '',
+    'a_c' like 'a\_c' escape '',
+    'a\_c' like 'a\_c' escape '',
+    'abc\' like 'abc\' escape '',
+    'abc' like 'abc\' escape '';
+----
+t f t t f
+
+query BBB
+select
+    'bear' like 'b_ear' escape '_',
+    'be_r' like 'b_e__r' escape '_',
+    'be_r' like '__e__r' escape '_';
+----
+t t f
+
+query BBBBBBBBBB
+select
+    'Foo_Bar' ilike 'foo#_bar' escape '#',
+    'FooXBar' ilike 'foo#_bar' escape '#',
+    'Foo%Bar' ilike 'foo#%bar' escape '#',
+    'FooXBar' ilike 'foo#%bar' escape '#',
+    'FooXBar' ilike 'foo_bar' escape '#',
+    'Foo_Bar' ilike 'foo\_bar' escape '\',
+    'FooXBar' ilike 'foo\_bar' escape '\',
+    'Foo\XBar' ilike 'foo\_bar' escape '',
+    'BE_R' ilike 'b_e__r' escape '_',
+    'MACA' ilike 'm%aca' escape '%';
+----
+t f t f t t f t t t
+
+query BBB
+select
+    'be__r' like 'b_e___r' escape '_',
+    'be__r' like 'b_e____r' escape '_',
+    'be___r' like 'b_e______r' escape '_';
+----
+f t t
+
+query BBB
+select
+    'maca' like 'm%aca' escape '%',
+    'ma%a' like 'm%a%%a' escape '%',
+    'm' like 'm%' escape '%';
+----
+t t f
+
+statement error LIKE pattern must not end with escape character
+SELECT '____' LIKE '_____' ESCAPE '_';
+
+statement error LIKE pattern must not end with escape character
+SELECT '____' ILIKE '_____' ESCAPE '_';
+
 statement ok
 drop table test_table;
 

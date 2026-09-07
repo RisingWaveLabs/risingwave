@@ -832,15 +832,23 @@ pub async fn handle_show_object(
     };
 
     // Apply filters.
-    let rows = rows.into_iter().filter(|row| match &filter {
-        Some(ShowStatementFilter::Like(pattern)) => like_default(&row.base_name(), pattern),
-        Some(ShowStatementFilter::ILike(pattern)) => i_like_default(&row.base_name(), pattern),
-        Some(ShowStatementFilter::Where(..)) => unreachable!(),
-        None => true,
-    });
+    let mut result = Vec::new();
+
+    for row in rows {
+        let matched = match &filter {
+            Some(ShowStatementFilter::Like(pattern)) => like_default(&row.base_name(), pattern)?,
+            Some(ShowStatementFilter::ILike(pattern)) => i_like_default(&row.base_name(), pattern)?,
+            Some(ShowStatementFilter::Where(..)) => unreachable!(),
+            None => true,
+        };
+
+        if matched {
+            result.push(row);
+        }
+    }
 
     Ok(PgResponse::builder(StatementType::SHOW_COMMAND)
-        .rows(rows)
+        .rows(result)
         .into())
 }
 
