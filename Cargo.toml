@@ -144,7 +144,7 @@ aws-sdk-sqs = { version = "1", default-features = false, features = [
     "default-https-client",
     "rt-tokio",
 ] }
-aws-smithy-http = "0.62"
+aws-smithy-http = "0.63"
 aws-smithy-http-client = { version = "1.1", default-features = false, features = [
     "rustls-aws-lc",
 ] }
