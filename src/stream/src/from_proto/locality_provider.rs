@@ -18,9 +18,9 @@ use risingwave_pb::stream_plan::LocalityProviderNode;
 use risingwave_storage::StateStore;
 
 use super::*;
-use crate::common::table::state_table::StateTableBuilder;
+use crate::common::table::state_table::{StateTableBuilder, StateTableOpConsistencyLevel};
 use crate::executor::Executor;
-use crate::executor::locality_provider::LocalityProviderExecutor;
+use crate::executor::locality_provider::{LocalityProviderExecutor, SortBufferSettings};
 
 impl_stream_node_body!(LocalityProvider(LocalityProviderNode) => LocalityProviderBuilder);
 
@@ -59,21 +59,48 @@ impl ExecutorBuilder for LocalityProviderBuilder {
         .await;
 
         // Create progress table for tracking backfill progress
-        let progress_table =
-            StateTableBuilder::new(node.get_progress_table().unwrap(), store, vnodes)
-                .enable_preload_all_rows_by_config(&params.config)
-                .build()
-                .await;
+        let progress_table = StateTableBuilder::new(
+            node.get_progress_table().unwrap(),
+            store.clone(),
+            vnodes.clone(),
+        )
+        .enable_preload_all_rows_by_config(&params.config)
+        .build()
+        .await;
+
+        // Create the ephemeral sorted log table for the post-backfill sort buffer, if enabled at
+        // plan time. Writes to it are append-only with unique keys, so consistency checks on old
+        // values are unnecessary.
+        let sort_buffer_table = match &node.sort_buffer_table {
+            Some(table) => Some(
+                StateTableBuilder::new(table, store, vnodes)
+                    .with_op_consistency_level(StateTableOpConsistencyLevel::Inconsistent)
+                    .forbid_preload_all_rows()
+                    .build()
+                    .await,
+            ),
+            None => None,
+        };
 
         let progress = params
             .local_barrier_manager
             .register_create_mview_progress(&params.actor_context);
+
+        let sort_buffer_settings = SortBufferSettings {
+            enabled: params.config.developer.enable_locality_sort_buffer,
+            activate_threshold: params
+                .config
+                .developer
+                .locality_sort_buffer_activate_threshold,
+        };
 
         let exec = LocalityProviderExecutor::new(
             input,
             locality_columns,
             state_table,
             progress_table,
+            sort_buffer_table,
+            sort_buffer_settings,
             input_schema,
             progress,
             params.executor_stats.clone(),

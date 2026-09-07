@@ -304,3 +304,134 @@
               └─StreamLocalityProvider { locality_columns: [t.a, t.b] }
                 └─StreamExchange { dist: HashShard(t.a, t.b) }
                   └─StreamTableScan { table: t, columns: [t.a, t.b, t._row_id], stream_scan_type: SnapshotBackfill, stream_key: [t._row_id], pk: [_row_id], dist: UpstreamHashShard(t._row_id) }
+- name: locality provider with sort buffer table attached
+  sql: |
+    set enable_locality_backfill = true;
+    set locality_backfill_mode = always;
+    set enable_locality_sort_buffer = true;
+    create table t1 (a int, b int, c int);
+    create table t2 (a int, b int, c int);
+    select count(*) from t1 join t2 on t1.a = t2.a group by t1.b;
+  stream_dist_plan: |+
+    Fragment 0
+    StreamMaterialize { columns: [count, t1.b(hidden)], stream_key: [t1.b], pk_columns: [t1.b], pk_conflict: NoCheck }
+    └── StreamProject { exprs: [count, t1.b] }
+        └── StreamHashAgg { group_key: [t1.b], aggs: [count] } { tables: [ HashAggState: 0 ] }
+            └── StreamLocalityProvider { locality_columns: [t1.b] }
+                ├── tables: [ LocalityProviderState: 1, LocalityProviderProgress: 2, LocalityProviderSortBuffer: 3 ]
+                └── StreamExchange Hash([0]) from 1
+
+    Fragment 1
+    StreamHashJoin { type: Inner, predicate: t1.a = t2.a, output: [t1.b, t1.a, t1._row_id, t2.a, t2._row_id] }
+    ├── tables: [ HashJoinLeft: 4, HashJoinDegreeLeft: 5, HashJoinRight: 6, HashJoinDegreeRight: 7 ]
+    ├── StreamExchange Hash([0]) from 2
+    └── StreamExchange Hash([0]) from 4
+
+    Fragment 2
+    StreamLocalityProvider { locality_columns: [t1.a] }
+    ├── tables: [ LocalityProviderState: 8, LocalityProviderProgress: 9, LocalityProviderSortBuffer: 10 ]
+    └── StreamExchange Hash([0]) from 3
+
+    Fragment 3
+    StreamTableScan { table: t1, columns: [t1.a, t1.b, t1._row_id], stream_scan_type: SnapshotBackfill, stream_key: [t1._row_id], pk: [_row_id], dist: UpstreamHashShard(t1._row_id) }
+    ├── tables: [ StreamScan: 11 ]
+    ├── Upstream
+    └── BatchPlanNode
+
+    Fragment 4
+    StreamLocalityProvider { locality_columns: [t2.a] } { tables: [ LocalityProviderState: 12, LocalityProviderProgress: 13, LocalityProviderSortBuffer: 14 ] }
+    └── StreamExchange Hash([0]) from 5
+
+    Fragment 5
+    StreamTableScan { table: t2, columns: [t2.a, t2._row_id], stream_scan_type: SnapshotBackfill, stream_key: [t2._row_id], pk: [_row_id], dist: UpstreamHashShard(t2._row_id) }
+    ├── tables: [ StreamScan: 15 ]
+    ├── Upstream
+    └── BatchPlanNode
+
+    Table 0 { columns: [ t1_b, count, _rw_timestamp ], primary key: [ $0 ASC ], value indices: [ 1 ], distribution key: [ 0 ], read pk prefix len hint: 1 }
+
+    Table 1
+    ├── columns: [ t1_b, t1_a, t1__row_id, t2_a, t2__row_id, _rw_timestamp ]
+    ├── primary key: [ $0 ASC, $1 ASC, $2 ASC, $4 ASC ]
+    ├── value indices: [ 0, 1, 2, 3, 4 ]
+    ├── distribution key: [ 0 ]
+    └── read pk prefix len hint: 0
+
+    Table 2
+    ├── columns: [ vnode, t1_b, t1_a, t1__row_id, t2__row_id, backfill_finished, row_count, _rw_timestamp ]
+    ├── primary key: [ $0 ASC ]
+    ├── value indices: [ 0, 1, 2, 3, 4, 5, 6 ]
+    ├── distribution key: [ 0 ]
+    ├── read pk prefix len hint: 1
+    └── vnode column idx: 0
+
+    Table 3
+    ├── columns: [ t1_b, t1_a, t1__row_id, t2_a, t2__row_id, _rw_gen, _rw_op, _rw_seq, _rw_timestamp ]
+    ├── primary key: [ $5 ASC, $0 ASC, $1 ASC, $2 ASC, $4 ASC, $7 ASC ]
+    ├── value indices: [ 0, 1, 2, 3, 4, 5, 6, 7 ]
+    ├── distribution key: [ 0 ]
+    ├── read pk prefix len hint: 0
+    └── clean watermark indices: [5]
+
+    Table 4 { columns: [ t1_a, t1_b, t1__row_id, _rw_timestamp ], primary key: [ $0 ASC, $2 ASC ], value indices: [ 0, 1, 2 ], distribution key: [ 0 ], read pk prefix len hint: 1 }
+
+    Table 5 { columns: [ t1_a, t1__row_id, _degree, _rw_timestamp ], primary key: [ $0 ASC, $1 ASC ], value indices: [ 2 ], distribution key: [ 0 ], read pk prefix len hint: 1 }
+
+    Table 6 { columns: [ t2_a, t2__row_id, _rw_timestamp ], primary key: [ $0 ASC, $1 ASC ], value indices: [ 0, 1 ], distribution key: [ 0 ], read pk prefix len hint: 1 }
+
+    Table 7 { columns: [ t2_a, t2__row_id, _degree, _rw_timestamp ], primary key: [ $0 ASC, $1 ASC ], value indices: [ 2 ], distribution key: [ 0 ], read pk prefix len hint: 1 }
+
+    Table 8 { columns: [ t1_a, t1_b, t1__row_id, _rw_timestamp ], primary key: [ $0 ASC, $2 ASC ], value indices: [ 0, 1, 2 ], distribution key: [ 0 ], read pk prefix len hint: 0 }
+
+    Table 9
+    ├── columns: [ vnode, t1_a, t1__row_id, backfill_finished, row_count, _rw_timestamp ]
+    ├── primary key: [ $0 ASC ]
+    ├── value indices: [ 0, 1, 2, 3, 4 ]
+    ├── distribution key: [ 0 ]
+    ├── read pk prefix len hint: 1
+    └── vnode column idx: 0
+
+    Table 10
+    ├── columns: [ t1_a, t1_b, t1__row_id, _rw_gen, _rw_op, _rw_seq, _rw_timestamp ]
+    ├── primary key: [ $3 ASC, $0 ASC, $2 ASC, $5 ASC ]
+    ├── value indices: [ 0, 1, 2, 3, 4, 5 ]
+    ├── distribution key: [ 0 ]
+    ├── read pk prefix len hint: 0
+    └── clean watermark indices: [3]
+
+    Table 11
+    ├── columns: [ vnode, epoch, row_count, is_epoch_finished, _row_id, _rw_timestamp ]
+    ├── primary key: [ $0 ASC ]
+    ├── value indices: [ 1, 2, 3, 4 ]
+    ├── distribution key: [ 0 ]
+    ├── read pk prefix len hint: 1
+    └── vnode column idx: 0
+
+    Table 12 { columns: [ t2_a, t2__row_id, _rw_timestamp ], primary key: [ $0 ASC, $1 ASC ], value indices: [ 0, 1 ], distribution key: [ 0 ], read pk prefix len hint: 0 }
+
+    Table 13
+    ├── columns: [ vnode, t2_a, t2__row_id, backfill_finished, row_count, _rw_timestamp ]
+    ├── primary key: [ $0 ASC ]
+    ├── value indices: [ 0, 1, 2, 3, 4 ]
+    ├── distribution key: [ 0 ]
+    ├── read pk prefix len hint: 1
+    └── vnode column idx: 0
+
+    Table 14
+    ├── columns: [ t2_a, t2__row_id, _rw_gen, _rw_op, _rw_seq, _rw_timestamp ]
+    ├── primary key: [ $2 ASC, $0 ASC, $1 ASC, $4 ASC ]
+    ├── value indices: [ 0, 1, 2, 3, 4 ]
+    ├── distribution key: [ 0 ]
+    ├── read pk prefix len hint: 0
+    └── clean watermark indices: [2]
+
+    Table 15
+    ├── columns: [ vnode, epoch, row_count, is_epoch_finished, _row_id, _rw_timestamp ]
+    ├── primary key: [ $0 ASC ]
+    ├── value indices: [ 1, 2, 3, 4 ]
+    ├── distribution key: [ 0 ]
+    ├── read pk prefix len hint: 1
+    └── vnode column idx: 0
+
+    Table 4294967294 { columns: [ count, t1.b, _rw_timestamp ], primary key: [ $1 ASC ], value indices: [ 0, 1 ], distribution key: [ 1 ], read pk prefix len hint: 1 }
+

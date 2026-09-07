@@ -521,6 +521,14 @@ pub struct SessionConfig {
     #[parameter(default = AUTO_LOCALITY_BACKFILL_MIN_SIZE)]
     auto_locality_backfill_min_size: u64,
 
+    /// Enable the sort buffer of locality providers for streaming queries created in this session.
+    /// When enabled, locality providers buffer and re-order amplified intermediate results (e.g.,
+    /// caused by join amplification) within an epoch to provide better locality for downstream
+    /// operators, with bounded memory usage. Only takes effect on streaming jobs planned with
+    /// locality providers (see `enable_locality_backfill`). Defaults to true.
+    #[parameter(default = true)]
+    enable_locality_sort_buffer: bool,
+
     /// Duration in seconds before notifying the user that a long-running DDL operation (e.g., DROP TABLE, CANCEL JOBS)
     /// is still running. Set to 0 to disable notifications. Defaults to 30 seconds.
     #[parameter(default = 30u32)]

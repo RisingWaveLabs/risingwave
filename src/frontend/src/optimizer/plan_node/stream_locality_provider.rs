@@ -102,12 +102,24 @@ impl StreamNode for StreamLocalityProvider {
         let state_table = self.build_state_catalog(state);
         let progress_table = self.build_progress_catalog(state);
 
+        // The sort buffer table is only attached when the session enables it at plan time.
+        // Old plans without this table simply keep the pass-through behavior.
+        let sort_buffer_table = self
+            .base
+            .ctx()
+            .session_ctx()
+            .config()
+            .enable_locality_sort_buffer()
+            .then(|| self.build_sort_buffer_catalog(state).to_prost());
+
         let locality_provider_node = LocalityProviderNode {
             locality_columns: self.locality_columns().iter().map(|&i| i as u32).collect(),
             // State table for buffering input data
             state_table: Some(state_table.to_prost()),
             // Progress table for tracking backfill progress
             progress_table: Some(progress_table.to_prost()),
+            // Ephemeral sorted log table for the post-backfill sort buffer
+            sort_buffer_table,
         };
 
         PbNodeBody::LocalityProvider(Box::new(locality_provider_node))
@@ -154,6 +166,53 @@ impl StreamLocalityProvider {
         }
 
         catalog_builder.set_value_indices((0..input_schema.len()).collect());
+
+        catalog_builder
+            .build(
+                self.input().distribution().dist_column_indices().to_vec(),
+                0,
+            )
+            .with_id(state.gen_table_id_wrapped())
+    }
+
+    /// Build the ephemeral sorted log table catalog for the post-backfill sort buffer.
+    /// Schema: all input columns + `gen` (epoch generation) + `op` + `seq`
+    /// Key: `gen` + `locality_columns` + input stream key + `seq`
+    ///
+    /// Buffered changes of one epoch are written with the current epoch as `gen`, so that a
+    /// prefix scan on `gen` replays exactly the changes of that epoch in locality order. `seq`
+    /// is a monotonically increasing sequence number within the epoch, making every buffered
+    /// change a unique key (append-only writes, per-key order preserved). `op` records the
+    /// change kind. Old generations are cleaned by the state-clean watermark on `gen`.
+    fn build_sort_buffer_catalog(&self, state: &mut BuildFragmentGraphState) -> TableCatalog {
+        let mut catalog_builder = TableCatalogBuilder::default();
+        let input = self.input();
+        let input_schema = input.schema();
+
+        // Add all input columns in original order
+        for field in &input_schema.fields {
+            catalog_builder.add_column(field);
+        }
+
+        let gen_col_idx = catalog_builder.add_column(&Field::with_name(DataType::Int64, "_rw_gen"));
+        catalog_builder.add_column(&Field::with_name(DataType::Int16, "_rw_op"));
+        let seq_col_idx = catalog_builder.add_column(&Field::with_name(DataType::Int64, "_rw_seq"));
+
+        // Primary key: gen + locality columns + stream key + seq
+        catalog_builder.add_order_column(gen_col_idx, OrderType::ascending());
+        for locality_col_idx in self.locality_columns() {
+            catalog_builder.add_order_column(*locality_col_idx, OrderType::ascending());
+        }
+        for &key_col_idx in input.expect_stream_key() {
+            catalog_builder.add_order_column(key_col_idx, OrderType::ascending());
+        }
+        catalog_builder.add_order_column(seq_col_idx, OrderType::ascending());
+
+        // Clean old generations by the state-clean watermark on the `gen` column.
+        catalog_builder.set_clean_watermark_indices(vec![gen_col_idx]);
+
+        let num_of_columns = catalog_builder.columns().len();
+        catalog_builder.set_value_indices((0..num_of_columns).collect());
 
         catalog_builder
             .build(

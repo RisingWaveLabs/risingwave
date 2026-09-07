@@ -176,3 +176,13 @@
     group by b;
   expected_outputs:
     - stream_plan
+- name: locality provider with sort buffer table attached
+  sql: |
+    set enable_locality_backfill = true;
+    set locality_backfill_mode = always;
+    set enable_locality_sort_buffer = true;
+    create table t1 (a int, b int, c int);
+    create table t2 (a int, b int, c int);
+    select count(*) from t1 join t2 on t1.a = t2.a group by t1.b;
+  expected_outputs:
+    - stream_dist_plan

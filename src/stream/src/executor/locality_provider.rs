@@ -12,18 +12,22 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+use std::ops::Bound;
 use std::sync::Arc;
 
 use futures::future::{Either as FutureEither, select};
 use futures::{StreamExt, TryStreamExt, pin_mut};
 use futures_async_stream::try_stream;
 use itertools::Itertools;
-use risingwave_common::array::{DataChunk, Op, StreamChunk};
+use risingwave_common::array::stream_record::Record;
+use risingwave_common::array::{
+    ArrayImpl, DataChunk, I16Array, I64Array, Op, StreamChunk, StreamChunkBuilder,
+};
 use risingwave_common::catalog::Schema;
 use risingwave_common::hash::{VirtualNode, VnodeBitmapExt};
 use risingwave_common::row::{OwnedRow, Row, RowExt};
-use risingwave_common::types::{Datum, ToOwnedDatum};
+use risingwave_common::types::{DataType, Datum, ScalarImpl, ToOwnedDatum};
 use risingwave_common::util::chunk_coalesce::DataChunkBuilder;
 use risingwave_common::util::sort_util::cmp_datum_iter;
 use risingwave_common_rate_limit::RateLimit;
@@ -31,11 +35,73 @@ use risingwave_storage::StateStore;
 use risingwave_storage::store::PrefetchOptions;
 
 use crate::common::table::state_table::{FlushedStateTableReader, StateTable};
+use crate::consistency::consistency_panic;
 use crate::executor::backfill::utils::create_builder;
 use crate::executor::prelude::*;
 use crate::task::{CreateMviewProgressReporter, FragmentId};
 
 type Builders = HashMap<VirtualNode, DataChunkBuilder>;
+
+/// Runtime settings for the sort buffer of [`LocalityProviderExecutor`].
+#[derive(Debug, Clone, Copy)]
+pub struct SortBufferSettings {
+    /// Runtime switch. When false, the executor always passes through input directly even if the
+    /// sort buffer table is present in the plan.
+    pub enabled: bool,
+    /// The number of input rows within one epoch after which buffering activates.
+    pub activate_threshold: u64,
+}
+
+/// Op code of a buffered change, stored in the `_rw_op` column of the sort buffer table.
+/// Update ops are normalized to `Insert`/`Delete` on write (see [`Op::normalize_update`]),
+/// and reconstructed as `Update` records by per-key compaction on replay.
+fn op_to_code(op: Op) -> i16 {
+    op.normalize_update().to_i16()
+}
+
+/// Apply one buffered change to the per-key compaction slot, mirroring the semantics of
+/// `ChangeBuffer`: consecutive changes of the same key are merged into at most one record.
+fn apply_change_to_slot(slot: &mut Option<Record<OwnedRow>>, is_insert: bool, row: OwnedRow) {
+    let prev = slot.take();
+    *slot = if is_insert {
+        match prev {
+            None => Some(Record::Insert { new_row: row }),
+            Some(Record::Delete { old_row }) => Some(Record::Update {
+                old_row,
+                new_row: row,
+            }),
+            Some(Record::Insert { .. }) => {
+                consistency_panic!("locality sort buffer: double-inserting the same key");
+                Some(Record::Insert { new_row: row })
+            }
+            Some(Record::Update { old_row, .. }) => {
+                consistency_panic!("locality sort buffer: double-inserting the same key");
+                Some(Record::Update {
+                    old_row,
+                    new_row: row,
+                })
+            }
+        }
+    } else {
+        match prev {
+            None => Some(Record::Delete { old_row: row }),
+            Some(Record::Insert { .. }) => None,
+            Some(Record::Update { old_row, .. }) => Some(Record::Delete { old_row }),
+            Some(Record::Delete { .. }) => {
+                consistency_panic!("locality sort buffer: double-deleting the same key");
+                Some(Record::Delete { old_row: row })
+            }
+        }
+    };
+}
+
+/// Take the compacted record of the current key, dropping no-op updates.
+fn take_compacted_record(slot: &mut Option<Record<OwnedRow>>) -> Option<Record<OwnedRow>> {
+    match slot.take() {
+        Some(Record::Update { old_row, new_row }) if old_row == new_row => None,
+        record => record,
+    }
+}
 
 /// Progress state for tracking backfill per vnode
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -154,7 +220,13 @@ impl LocalityBackfillState {
 ///
 /// The executor implements a proper backfill process similar to arrangement backfill:
 /// 1. Backfill phase: Buffer incoming data and provide locality-ordered snapshot reads
-/// 2. Forward phase: Once backfill is complete, forward upstream messages directly
+/// 2. Completion transition: Drain buffered input and forward new input directly until the
+///    barrier that persists backfill completion
+/// 3. Forward phase: Optionally sort amplified epochs after that completion barrier
+///
+/// The sort buffer intentionally does not cover the completion transition. Input drained when the
+/// snapshot reaches EOF, or received while waiting for the completion barrier, is forwarded in
+/// arrival order. Only input after that barrier is eligible for sorting.
 ///
 /// Key improvements over the original implementation:
 /// - Removes arbitrary barrier buffer limit
@@ -173,6 +245,13 @@ pub struct LocalityProviderExecutor<S: StateStore> {
 
     /// Progress table for tracking backfill progress per vnode
     progress_table: StateTable<S>,
+
+    /// Ephemeral sorted log table for buffering and re-ordering amplified input within an epoch
+    /// after backfill is finished. `None` if the feature was not enabled at plan time.
+    sort_buffer_table: Option<StateTable<S>>,
+
+    /// Runtime settings for the sort buffer.
+    sort_buffer_settings: SortBufferSettings,
 
     input_schema: Schema,
 
@@ -197,6 +276,8 @@ impl<S: StateStore> LocalityProviderExecutor<S> {
         locality_columns: Vec<usize>,
         state_table: StateTable<S>,
         progress_table: StateTable<S>,
+        sort_buffer_table: Option<StateTable<S>>,
+        sort_buffer_settings: SortBufferSettings,
         input_schema: Schema,
         progress: CreateMviewProgressReporter,
         metrics: Arc<StreamingMetrics>,
@@ -208,6 +289,8 @@ impl<S: StateStore> LocalityProviderExecutor<S> {
             locality_columns,
             state_table,
             progress_table,
+            sort_buffer_table,
+            sort_buffer_settings,
             input_schema,
             actor_id: progress.actor_id(),
             progress,
@@ -423,6 +506,112 @@ impl<S: StateStore> LocalityProviderExecutor<S> {
         *cur_barrier_snapshot_processed_rows += chunk_cardinality;
         Ok(chunk)
     }
+
+    /// Write a compacted input chunk into the sort buffer table as an append-only log.
+    /// Each row is extended with `gen` (the current epoch generation), `op` (normalized op code)
+    /// and `seq` (monotonic sequence number within the epoch), all writes using `Op::Insert` with
+    /// unique keys.
+    fn write_chunk_to_sort_buffer(
+        sort_buffer_table: &mut StateTable<S>,
+        chunk: &StreamChunk,
+        generation: i64,
+        seq: &mut i64,
+    ) {
+        let cardinality = chunk.cardinality();
+        debug_assert_eq!(
+            cardinality,
+            chunk.capacity(),
+            "chunk must be compacted before buffering"
+        );
+
+        let mut columns = chunk.data_chunk().columns().to_vec();
+        columns.push(Arc::new(ArrayImpl::Int64(I64Array::from_iter(
+            std::iter::repeat_n(Some(generation), cardinality),
+        ))));
+        columns.push(Arc::new(ArrayImpl::Int16(I16Array::from_iter(
+            chunk.ops().iter().map(|op| Some(op_to_code(*op))),
+        ))));
+        columns.push(Arc::new(ArrayImpl::Int64(I64Array::from_iter(
+            (*seq..*seq + cardinality as i64).map(Some),
+        ))));
+        *seq += cardinality as i64;
+
+        let log_chunk = StreamChunk::new(vec![Op::Insert; cardinality], columns);
+        sort_buffer_table.write_chunk(log_chunk);
+    }
+
+    /// Replay this epoch's buffered changes from the sort buffer table in locality order,
+    /// compacting consecutive changes of the same key (locality columns + stream key) into at
+    /// most one record.
+    ///
+    /// Must be called *after* the sort buffer table has been committed for the epoch, so that all
+    /// buffered rows are visible to the flushed snapshot reader (staging imms + spilled SSTs).
+    #[try_stream(ok = StreamChunk, error = StreamExecutorError)]
+    async fn make_sort_buffer_replay_stream(
+        reader: FlushedStateTableReader<S>,
+        generation: i64,
+        group_key_indices: Vec<usize>,
+        input_len: usize,
+        data_types: Vec<DataType>,
+        chunk_size: usize,
+    ) {
+        // Scan exactly this epoch's generation via a prefix range on the first pk column.
+        let range = (
+            Bound::Included(OwnedRow::new(vec![Some(ScalarImpl::Int64(generation))])),
+            Bound::Excluded(OwnedRow::new(vec![Some(ScalarImpl::Int64(generation + 1))])),
+        );
+
+        let mut chunk_builder = StreamChunkBuilder::new(chunk_size, data_types);
+        let mut cur_key: Option<OwnedRow> = None;
+        let mut slot: Option<Record<OwnedRow>> = None;
+
+        // Each key belongs to exactly one vnode, so a per-vnode sequential scan already yields
+        // all changes of one key contiguously, which is what downstream locality needs.
+        for vnode in reader.vnodes().iter_vnodes() {
+            let iter = reader
+                .iter_with_vnode(
+                    vnode,
+                    &range,
+                    PrefetchOptions::prefetch_for_large_range_scan(),
+                )
+                .await?;
+            pin_mut!(iter);
+
+            while let Some(row) = iter.try_next().await? {
+                // Row layout: input columns ++ [gen, op, seq]
+                let is_insert = row
+                    .datum_at(input_len + 1)
+                    .expect("op column must not be null")
+                    .into_int16()
+                    == Op::Insert.to_i16();
+
+                let same_key = match &cur_key {
+                    Some(key) => (&row).project(&group_key_indices).iter().eq(key.iter()),
+                    None => false,
+                };
+                if !same_key {
+                    if let Some(record) = take_compacted_record(&mut slot)
+                        && let Some(chunk) = chunk_builder.append_record(record)
+                    {
+                        yield chunk;
+                    }
+                    cur_key = Some((&row).project(&group_key_indices).into_owned_row());
+                }
+
+                let input_row = OwnedRow::new(row.as_inner()[..input_len].to_vec());
+                apply_change_to_slot(&mut slot, is_insert, input_row);
+            }
+        }
+
+        if let Some(record) = take_compacted_record(&mut slot)
+            && let Some(chunk) = chunk_builder.append_record(record)
+        {
+            yield chunk;
+        }
+        if let Some(chunk) = chunk_builder.take() {
+            yield chunk;
+        }
+    }
 }
 
 impl<S: StateStore> Execute for LocalityProviderExecutor<S> {
@@ -445,10 +634,18 @@ impl<S: StateStore> LocalityProviderExecutor<S> {
 
         let mut state_table = self.state_table;
         let mut progress_table = self.progress_table;
+        let mut sort_buffer_table = self.sort_buffer_table;
 
         // Initialize state tables
         state_table.init_epoch(first_epoch).await?;
         progress_table.init_epoch(first_epoch).await?;
+        if let Some(sort_table) = &mut sort_buffer_table {
+            sort_table.init_epoch(first_epoch).await?;
+        }
+
+        // The current write epoch, used as the generation (`gen`) of buffered changes in the
+        // sort buffer table. Updated at every barrier.
+        let mut cur_gen: u64 = first_epoch.curr;
 
         // Load backfill state from progress table
         let mut backfill_state = Self::load_backfill_state(&progress_table).await?;
@@ -505,6 +702,12 @@ impl<S: StateStore> LocalityProviderExecutor<S> {
                         progress_table
                             .commit_assert_no_update_vnode_bitmap(epoch)
                             .await?;
+                        if let Some(sort_table) = &mut sort_buffer_table {
+                            sort_table
+                                .commit_assert_no_update_vnode_bitmap(epoch)
+                                .await?;
+                        }
+                        cur_gen = epoch.curr;
 
                         yield Message::Barrier(barrier);
 
@@ -691,6 +894,12 @@ impl<S: StateStore> LocalityProviderExecutor<S> {
                 state_table
                     .commit_assert_no_update_vnode_bitmap(barrier_epoch)
                     .await?;
+                if let Some(sort_table) = &mut sort_buffer_table {
+                    sort_table
+                        .commit_assert_no_update_vnode_bitmap(barrier_epoch)
+                        .await?;
+                }
+                cur_gen = barrier_epoch.curr;
 
                 // Update progress with current epoch and snapshot read count
                 // Report both consumed rows and buffered rows separately for precise progress
@@ -738,7 +947,8 @@ impl<S: StateStore> LocalityProviderExecutor<S> {
 
         tracing::debug!("Locality provider backfill finished, forwarding upstream directly");
 
-        // Wait for first barrier after backfill completion to mark progress as finished
+        // Wait for the first barrier after snapshot EOF to mark progress as finished. Chunks in
+        // this transition are forwarded directly; the sort buffer starts only after this barrier.
         if need_backfill && !backfill_state.is_completed() {
             while let Some(Ok(msg)) = upstream.next().await {
                 match msg {
@@ -749,6 +959,12 @@ impl<S: StateStore> LocalityProviderExecutor<S> {
                         state_table
                             .commit_assert_no_update_vnode_bitmap(barrier.epoch)
                             .await?;
+                        if let Some(sort_table) = &mut sort_buffer_table {
+                            sort_table
+                                .commit_assert_no_update_vnode_bitmap(barrier.epoch)
+                                .await?;
+                        }
+                        cur_gen = barrier.epoch.curr;
 
                         // Mark all vnodes as completed
                         for vnode in state_table.vnodes().iter_vnodes() {
@@ -798,12 +1014,76 @@ impl<S: StateStore> LocalityProviderExecutor<S> {
             }
         }
 
-        // After backfill completion, forward messages directly
+        // After the completion barrier, forward messages directly. When the sort buffer is enabled
+        // and an epoch turns out to be amplified (row count exceeds the activation threshold),
+        // switch to buffering the rest of the epoch into the sort buffer table and replay it in
+        // locality order at the barrier, so that downstream operators process the amplified
+        // changes with much better cache locality, while the buffer memory stays bounded by the
+        // shared buffer (spillable to L0).
+        let sort_buffer_active = sort_buffer_table.is_some() && self.sort_buffer_settings.enabled;
+        let activate_threshold = self.sort_buffer_settings.activate_threshold;
+
+        // The group key (locality columns + stream key) for per-key compaction during replay.
+        // It equals the pk of the buffer state table (which is `gen` + group key + `seq`) without
+        // the `gen`/`seq` columns, and also equals the pk of the backfill state table.
+        let group_key_indices = state_table.pk_indices().to_vec();
+        let input_data_types = self.input_schema.data_types();
+        let input_len = self.input_schema.len();
+
+        // Per-epoch states of the sort buffer. `buffering` switches one way (pass-through ->
+        // buffering) within an epoch and resets at barriers, so that per-key ordering is
+        // preserved: the passed-through prefix is emitted before any buffered change.
+        let mut buffering = false;
+        let mut rows_in_epoch: u64 = 0;
+        let mut seq: i64 = 0;
+        // Advance the state-clean watermark at the next barrier: initially true to clean
+        // possible leftovers of previous incarnations after recovery, and set again after each
+        // buffered epoch to clean its generation.
+        let mut needs_cleanup = true;
+        // Watermark messages held back while buffering, keyed by column index. They are emitted
+        // after the replayed chunks so that they never precede the buffered rows they constrain.
+        let mut pending_watermarks: BTreeMap<usize, Watermark> = BTreeMap::new();
+
         #[for_await]
         for msg in upstream {
             let msg = msg?;
 
             match msg {
+                Message::Chunk(chunk) => {
+                    if !buffering {
+                        rows_in_epoch += chunk.cardinality() as u64;
+                        if sort_buffer_active && rows_in_epoch > activate_threshold {
+                            tracing::info!(
+                                actor_id = %self.actor_id,
+                                fragment_id = %self.fragment_id,
+                                rows_in_epoch,
+                                activate_threshold,
+                                "locality provider sort buffer activated for this epoch"
+                            );
+                            buffering = true;
+                        }
+                    }
+                    if buffering {
+                        let chunk = chunk.compact_vis();
+                        let sort_table = sort_buffer_table.as_mut().unwrap();
+                        Self::write_chunk_to_sort_buffer(
+                            sort_table,
+                            &chunk,
+                            cur_gen as i64,
+                            &mut seq,
+                        );
+                        sort_table.try_flush().await?;
+                    } else {
+                        yield Message::Chunk(chunk);
+                    }
+                }
+                Message::Watermark(watermark) => {
+                    if buffering {
+                        pending_watermarks.insert(watermark.col_idx, watermark);
+                    } else {
+                        yield Message::Watermark(watermark);
+                    }
+                }
                 Message::Barrier(barrier) => {
                     barrier.assume_no_update_vnode_bitmap(self.actor_id)?;
 
@@ -814,6 +1094,45 @@ impl<S: StateStore> LocalityProviderExecutor<S> {
                     progress_table
                         .commit_assert_no_update_vnode_bitmap(barrier.epoch)
                         .await?;
+
+                    if let Some(sort_table) = &mut sort_buffer_table {
+                        debug_assert_eq!(cur_gen, barrier.epoch.prev);
+
+                        if buffering || needs_cleanup {
+                            // Advancing the watermark to the current generation invalidates all
+                            // older generations, which have been fully replayed before their
+                            // barriers (or discarded by recovery). The current generation
+                            // survives (cleaning is exclusive) and gets cleaned at the next
+                            // such barrier.
+                            sort_table.update_watermark(ScalarImpl::Int64(cur_gen as i64));
+                        }
+                        // Commit *before* replay: sealing the epoch makes all buffered rows of
+                        // this epoch stably visible to the flushed snapshot reader.
+                        sort_table
+                            .commit_assert_no_update_vnode_bitmap(barrier.epoch)
+                            .await?;
+
+                        if buffering {
+                            let replay_stream = Self::make_sort_buffer_replay_stream(
+                                sort_table.flushed_snapshot_reader(),
+                                cur_gen as i64,
+                                group_key_indices.clone(),
+                                input_len,
+                                input_data_types.clone(),
+                                self.chunk_size,
+                            );
+                            pin_mut!(replay_stream);
+                            while let Some(chunk) = replay_stream.try_next().await? {
+                                yield Message::Chunk(chunk);
+                            }
+
+                            for (_, watermark) in std::mem::take(&mut pending_watermarks) {
+                                yield Message::Watermark(watermark);
+                            }
+                        }
+                        needs_cleanup = buffering;
+                    }
+
                     if report_finished_on_first_barrier {
                         // At completion, we report `total_snapshot_rows` as buffered rows to make progress accurate.
                         self.progress.finish_with_buffered_rows(
@@ -823,13 +1142,348 @@ impl<S: StateStore> LocalityProviderExecutor<S> {
                         );
                         report_finished_on_first_barrier = false;
                     }
+
+                    cur_gen = barrier.epoch.curr;
+                    buffering = false;
+                    rows_in_epoch = 0;
+                    seq = 0;
+
                     yield Message::Barrier(barrier);
-                }
-                _ => {
-                    // Forward all other messages directly
-                    yield msg;
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use risingwave_common::array::StreamChunkTestExt;
+    use risingwave_common::catalog::{ColumnDesc, ColumnId, Field, Schema, TableId};
+    use risingwave_common::hash::VirtualNode;
+    use risingwave_common::types::DataType;
+    use risingwave_common::util::epoch::{EpochPair, test_epoch};
+    use risingwave_common::util::sort_util::OrderType;
+    use risingwave_storage::memory::MemoryStateStore;
+    use tokio::time::timeout;
+
+    use super::*;
+    use crate::common::table::test_utils::gen_pbtable;
+    use crate::executor::test_utils::{MockSource, StreamExecutorTestExt};
+    use crate::task::LocalBarrierManager;
+
+    fn row(values: impl IntoIterator<Item = i32>) -> OwnedRow {
+        OwnedRow::new(
+            values
+                .into_iter()
+                .map(|v| Some(ScalarImpl::Int32(v)))
+                .collect(),
+        )
+    }
+
+    /// Destructure a record into comparable parts, as [`Record`] does not implement `PartialEq`.
+    fn parts(record: Option<Record<OwnedRow>>) -> Option<(&'static str, Vec<OwnedRow>)> {
+        record.map(|record| match record {
+            Record::Insert { new_row } => ("insert", vec![new_row]),
+            Record::Delete { old_row } => ("delete", vec![old_row]),
+            Record::Update { old_row, new_row } => ("update", vec![old_row, new_row]),
+        })
+    }
+
+    #[test]
+    fn test_per_key_compaction_slot() {
+        // Insert then delete cancels out.
+        let mut slot = None;
+        apply_change_to_slot(&mut slot, true, row([1]));
+        apply_change_to_slot(&mut slot, false, row([1]));
+        assert_eq!(parts(take_compacted_record(&mut slot)), None);
+
+        // Delete then insert becomes an update.
+        let mut slot = None;
+        apply_change_to_slot(&mut slot, false, row([1]));
+        apply_change_to_slot(&mut slot, true, row([2]));
+        assert_eq!(
+            parts(take_compacted_record(&mut slot)),
+            Some(("update", vec![row([1]), row([2])]))
+        );
+
+        // Delete, insert, delete collapses to a single delete of the original row.
+        let mut slot = None;
+        apply_change_to_slot(&mut slot, false, row([1]));
+        apply_change_to_slot(&mut slot, true, row([2]));
+        apply_change_to_slot(&mut slot, false, row([2]));
+        assert_eq!(
+            parts(take_compacted_record(&mut slot)),
+            Some(("delete", vec![row([1])]))
+        );
+
+        // No-op update (same old and new row) is dropped.
+        let mut slot = None;
+        apply_change_to_slot(&mut slot, false, row([1]));
+        apply_change_to_slot(&mut slot, true, row([1]));
+        assert_eq!(parts(take_compacted_record(&mut slot)), None);
+
+        // Plain insert is kept.
+        let mut slot = None;
+        apply_change_to_slot(&mut slot, true, row([1]));
+        assert_eq!(
+            parts(take_compacted_record(&mut slot)),
+            Some(("insert", vec![row([1])]))
+        );
+    }
+
+    /// Write interleaved changes of one epoch into the sort buffer table, commit, and replay.
+    /// Verifies that the replay is grouped by key (locality + stream key), per-key compacted,
+    /// and only covers the requested generation.
+    #[tokio::test]
+    async fn test_sort_buffer_write_and_replay() {
+        // Input schema: a (locality column), b (stream key), c (payload)
+        let input_data_types = vec![DataType::Int32, DataType::Int32, DataType::Int32];
+        let input_len = input_data_types.len();
+        let group_key_indices = vec![0, 1];
+
+        // Buffer table: input columns ++ [_rw_gen, _rw_op, _rw_seq],
+        // pk = gen + locality (a) + stream key (b) + seq
+        let column_descs = vec![
+            ColumnDesc::unnamed(ColumnId::new(0), DataType::Int32),
+            ColumnDesc::unnamed(ColumnId::new(1), DataType::Int32),
+            ColumnDesc::unnamed(ColumnId::new(2), DataType::Int32),
+            ColumnDesc::unnamed(ColumnId::new(3), DataType::Int64),
+            ColumnDesc::unnamed(ColumnId::new(4), DataType::Int16),
+            ColumnDesc::unnamed(ColumnId::new(5), DataType::Int64),
+        ];
+        let pk_indices = vec![3, 0, 1, 5];
+        let order_types = vec![OrderType::ascending(); 4];
+
+        let mut table = StateTable::from_table_catalog(
+            &gen_pbtable(TableId::new(1), column_descs, order_types, pk_indices, 0),
+            MemoryStateStore::new(),
+            None,
+        )
+        .await;
+
+        let mut epoch = EpochPair::new_test_epoch(test_epoch(1));
+        table.init_epoch(epoch).await.unwrap();
+
+        let generation = test_epoch(1) as i64;
+        let mut seq = 0;
+
+        // Changes of the current generation, arriving in arbitrary key order:
+        // - key (3, 1): insert then delete -> cancels out
+        // - key (1, 1): plain insert
+        // - key (2, 1): update pair
+        // - key (1, 2): insert
+        let chunk = StreamChunk::from_pretty(
+            "  i i i
+             + 3 1 100
+             + 1 1 10
+            U- 2 1 20
+            U+ 2 1 21
+             + 1 2 11
+             - 3 1 100",
+        );
+        LocalityProviderExecutor::<MemoryStateStore>::write_chunk_to_sort_buffer(
+            &mut table, &chunk, generation, &mut seq,
+        );
+        assert_eq!(seq, 6);
+
+        // Changes of a different (newer) generation must not appear in the replay.
+        let other_chunk = StreamChunk::from_pretty(
+            " i i i
+            + 9 9 99",
+        );
+        let mut other_seq = 0;
+        LocalityProviderExecutor::<MemoryStateStore>::write_chunk_to_sort_buffer(
+            &mut table,
+            &other_chunk,
+            test_epoch(2) as i64,
+            &mut other_seq,
+        );
+
+        // Commit before replay, mirroring the executor's barrier handling.
+        epoch.inc_for_test();
+        table.commit_for_test(epoch).await.unwrap();
+
+        let replay_stream =
+            LocalityProviderExecutor::<MemoryStateStore>::make_sort_buffer_replay_stream(
+                table.flushed_snapshot_reader(),
+                generation,
+                group_key_indices,
+                input_len,
+                input_data_types,
+                2,
+            );
+        pin_mut!(replay_stream);
+        let mut chunks = vec![];
+        while let Some(chunk) = replay_stream.try_next().await.unwrap() {
+            chunks.push(chunk);
+        }
+
+        // Replay is ordered by (a, b), per-key compacted, with the cancelled key dropped.
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(
+            chunks[0],
+            StreamChunk::from_pretty(
+                " i i i
+                + 1 1 10
+                + 1 2 11",
+            )
+        );
+        assert_eq!(
+            chunks[1],
+            StreamChunk::from_pretty(
+                "  i i i
+                U- 2 1 20
+                U+ 2 1 21",
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sort_buffer_starts_after_backfill_completion_barrier() {
+        let store = MemoryStateStore::new();
+        let input_schema = Schema::new(vec![
+            Field::unnamed(DataType::Int32),
+            Field::unnamed(DataType::Int32),
+            Field::unnamed(DataType::Int32),
+        ]);
+        let input_columns = vec![
+            ColumnDesc::unnamed(ColumnId::new(0), DataType::Int32),
+            ColumnDesc::unnamed(ColumnId::new(1), DataType::Int32),
+            ColumnDesc::unnamed(ColumnId::new(2), DataType::Int32),
+        ];
+
+        // State table: input columns, pk = locality column + stream key.
+        let state_table = StateTable::from_table_catalog(
+            &gen_pbtable(
+                TableId::new(1),
+                input_columns.clone(),
+                vec![OrderType::ascending(); 2],
+                vec![0, 1],
+                0,
+            ),
+            store.clone(),
+            None,
+        )
+        .await;
+
+        // Progress table: vnode + state-table pk + completion flag + processed rows.
+        let progress_catalog = gen_pbtable(
+            TableId::new(2),
+            vec![
+                ColumnDesc::unnamed(ColumnId::new(0), VirtualNode::RW_TYPE),
+                ColumnDesc::unnamed(ColumnId::new(1), DataType::Int32),
+                ColumnDesc::unnamed(ColumnId::new(2), DataType::Int32),
+                ColumnDesc::unnamed(ColumnId::new(3), DataType::Boolean),
+                ColumnDesc::unnamed(ColumnId::new(4), DataType::Int64),
+            ],
+            vec![OrderType::ascending()],
+            vec![0],
+            1,
+        );
+        let progress_table =
+            StateTable::from_table_catalog(&progress_catalog, store.clone(), None).await;
+
+        // Sort buffer: input columns ++ [gen, op, seq],
+        // pk = gen + locality column + stream key + seq.
+        let mut sort_buffer_catalog = gen_pbtable(
+            TableId::new(3),
+            vec![
+                input_columns[0].clone(),
+                input_columns[1].clone(),
+                input_columns[2].clone(),
+                ColumnDesc::unnamed(ColumnId::new(3), DataType::Int64),
+                ColumnDesc::unnamed(ColumnId::new(4), DataType::Int16),
+                ColumnDesc::unnamed(ColumnId::new(5), DataType::Int64),
+            ],
+            vec![OrderType::ascending(); 4],
+            vec![3, 0, 1, 5],
+            0,
+        );
+        sort_buffer_catalog.clean_watermark_indices = vec![3];
+        let sort_buffer_table =
+            StateTable::from_table_catalog_inconsistent_op(&sort_buffer_catalog, store, None).await;
+
+        let fragment_id: FragmentId = 1.into();
+        let progress = CreateMviewProgressReporter::for_test(LocalBarrierManager::for_test());
+        let (mut tx, source) = MockSource::channel();
+        let upstream = source.into_executor(input_schema.clone(), vec![1]);
+        let mut executor = LocalityProviderExecutor::new(
+            upstream,
+            vec![0],
+            state_table,
+            progress_table,
+            Some(sort_buffer_table),
+            SortBufferSettings {
+                enabled: true,
+                activate_threshold: 0,
+            },
+            input_schema,
+            progress,
+            Arc::new(StreamingMetrics::unused()),
+            1024,
+            fragment_id,
+        )
+        .boxed()
+        .execute();
+
+        tx.push_barrier(test_epoch(1), false);
+        assert_eq!(
+            executor.expect_barrier().await.epoch,
+            EpochPair::new_test_epoch(test_epoch(1))
+        );
+
+        tx.send_barrier(Barrier::new_test_barrier(test_epoch(2)).with_mutation(
+            Mutation::StartFragmentBackfill {
+                fragment_ids: [fragment_id].into(),
+            },
+        ));
+        assert_eq!(
+            executor.expect_barrier().await.epoch,
+            EpochPair::new_test_epoch(test_epoch(2))
+        );
+
+        // Drive the empty snapshot to EOF. The executor is now waiting for the barrier that
+        // persists completion, and must still pass through chunks even though the threshold is 0.
+        assert!(
+            timeout(Duration::from_millis(200), executor.next())
+                .await
+                .is_err()
+        );
+        let transition_chunk = StreamChunk::from_pretty(
+            " i i i
+            + 2 1 20
+            + 1 1 10",
+        );
+        tx.push_chunk(transition_chunk.clone());
+        assert_eq!(executor.expect_chunk().await, transition_chunk);
+
+        tx.push_barrier(test_epoch(3), false);
+        assert_eq!(
+            executor.expect_barrier().await.epoch,
+            EpochPair::new_test_epoch(test_epoch(3))
+        );
+
+        // Starting with the next epoch, the same unsorted input is buffered and replayed in
+        // locality order at the barrier.
+        tx.push_chunk(StreamChunk::from_pretty(
+            " i i i
+            + 4 1 40
+            + 3 1 30",
+        ));
+        tx.push_barrier(test_epoch(4), false);
+        assert_eq!(
+            executor.expect_chunk().await,
+            StreamChunk::from_pretty(
+                " i i i
+                + 3 1 30
+                + 4 1 40",
+            )
+        );
+        assert_eq!(
+            executor.expect_barrier().await.epoch,
+            EpochPair::new_test_epoch(test_epoch(4))
+        );
     }
 }

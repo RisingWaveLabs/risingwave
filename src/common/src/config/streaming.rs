@@ -331,6 +331,18 @@ pub struct StreamingDeveloperConfig {
     #[serde(default = "default::developer::enable_state_table_vnode_stats_pruning")]
     pub enable_state_table_vnode_stats_pruning: bool,
 
+    /// Runtime switch for the sort buffer of `LocalityProviderExecutor`. Only takes effect on
+    /// streaming jobs planned with the `enable_locality_sort_buffer` session variable enabled.
+    /// Setting it to false makes such locality providers always pass through input directly.
+    #[serde(default = "default::developer::enable_locality_sort_buffer")]
+    pub enable_locality_sort_buffer: bool,
+
+    /// The number of input rows within one epoch after which the sort buffer of
+    /// `LocalityProviderExecutor` activates. Below this threshold, input is passed through
+    /// directly without buffering, so that no extra latency is introduced for normal workloads.
+    #[serde(default = "default::developer::locality_sort_buffer_activate_threshold")]
+    pub locality_sort_buffer_activate_threshold: u64,
+
     /// Cache refill policy for streaming cache refill feature.
     /// Can be `enabled`, `disabled`, `streaming`, `serving` or `both`.
     #[serde(default = "default::developer::cache_refill_policy")]

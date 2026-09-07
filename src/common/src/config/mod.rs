@@ -481,6 +481,14 @@ pub mod default {
             false
         }
 
+        pub fn enable_locality_sort_buffer() -> bool {
+            true
+        }
+
+        pub fn locality_sort_buffer_activate_threshold() -> u64 {
+            65536
+        }
+
         pub fn cache_refill_policy() -> CacheRefillPolicy {
             CacheRefillPolicy::Enabled
         }

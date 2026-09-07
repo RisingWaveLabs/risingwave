@@ -44,6 +44,7 @@ user enable_datafusion_engine
 user enable_index_selection
 user enable_join_ordering
 user enable_locality_backfill
+user enable_locality_sort_buffer
 user enable_mv_selection
 user enable_serverless_backfill
 user enable_share_plan

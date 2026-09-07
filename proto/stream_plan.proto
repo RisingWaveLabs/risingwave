@@ -1140,6 +1140,10 @@ message LocalityProviderNode {
   optional catalog.Table state_table = 2;
   // Progress table for tracking backfill progress
   optional catalog.Table progress_table = 3;
+  // Ephemeral sorted log table for buffering and re-ordering amplified input
+  // within an epoch after backfill is finished. Only present when the sort
+  // buffer feature is enabled at plan time.
+  optional catalog.Table sort_buffer_table = 4;
 }
 
 message EowcGapFillNode {
