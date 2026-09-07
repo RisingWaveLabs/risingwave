@@ -1018,19 +1018,27 @@ impl<S: StateStore> SourceExecutor<S> {
 
                     if let Some(task_builder) = &mut wait_checkpoint_task_builder {
                         if let Some(pulsar_message_id_idx) = pulsar_message_id_idx {
-                            let pulsar_message_id_col = chunk.column_at(pulsar_message_id_idx);
-                            task_builder.update_task_on_chunk(
-                                self.actor_ctx.id,
-                                source_id,
-                                &latest_state,
-                                pulsar_message_id_col.clone(),
-                            );
+                            if chunk.capacity() > 0 {
+                                // Each Pulsar chunk comes from one split, so all rows have the same
+                                // split ID.
+                                let (_, row, _) = chunk.row_at(0);
+                                let split_id = SplitId::from(
+                                    row.datum_at(split_idx).unwrap().into_utf8().to_owned(),
+                                );
+                                let pulsar_message_id_col = chunk.column_at(pulsar_message_id_idx);
+                                task_builder.update_task_on_chunk(
+                                    self.actor_ctx.id,
+                                    source_id,
+                                    Some(&split_id),
+                                    pulsar_message_id_col.clone(),
+                                );
+                            }
                         } else {
                             let offset_col = chunk.column_at(offset_idx);
                             task_builder.update_task_on_chunk(
                                 self.actor_ctx.id,
                                 source_id,
-                                &latest_state,
+                                None,
                                 offset_col.clone(),
                             );
                         }
@@ -1120,7 +1128,7 @@ impl WaitCheckpointTaskBuilder {
         &mut self,
         actor_id: ActorId,
         source_id: SourceId,
-        latest_state: &HashMap<SplitId, SplitImpl>,
+        pulsar_split_id: Option<&SplitId>,
         offset_col: ArrayRef,
     ) {
         match &mut self.building_task {
@@ -1131,8 +1139,7 @@ impl WaitCheckpointTaskBuilder {
                 arrays.push(offset_col);
             }
             WaitCheckpointTask::AckPulsarMessage(arrays) => {
-                // each pulsar chunk will only contain one split
-                let split_id = latest_state.keys().next().unwrap();
+                let split_id = pulsar_split_id.expect("Pulsar chunk must have a split ID");
                 let pulsar_ack_channel_id =
                     build_pulsar_ack_channel_id(source_id, split_id, actor_id);
                 arrays.push((pulsar_ack_channel_id, offset_col));
@@ -1275,6 +1282,7 @@ impl<S: StateStore> WaitCheckpointWorker<S> {
 #[cfg(test)]
 mod tests {
     use maplit::{btreemap, convert_args, hashmap};
+    use risingwave_common::array::{Array, BytesArray};
     use risingwave_common::catalog::{ColumnId, Field};
     use risingwave_common::id::SourceId;
     use risingwave_common::system_param::local_manager::LocalSystemParamsManager;
@@ -1294,6 +1302,59 @@ mod tests {
     use crate::task::LocalBarrierManager;
 
     const MOCK_SOURCE_NAME: &str = "mock_source";
+
+    fn message_ids<const N: usize>(values: [Option<&[u8]>; N]) -> ArrayRef {
+        BytesArray::from_iter(values).into_ref()
+    }
+
+    #[test]
+    fn test_build_pulsar_ack_task_for_interleaved_splits() {
+        let (wait_checkpoint_tx, _wait_checkpoint_rx) = unbounded_channel();
+        let mut builder = WaitCheckpointTaskBuilder {
+            wait_checkpoint_tx,
+            building_task: WaitCheckpointTask::AckPulsarMessage(vec![]),
+        };
+        let actor_id = ActorId::new(11);
+        let source_id = SourceId::new(7);
+        let split_a = SplitId::from("persistent://public/default/topic-a");
+        let split_b = SplitId::from("persistent://public/default/topic-b");
+
+        builder.update_task_on_chunk(
+            actor_id,
+            source_id,
+            Some(&split_a),
+            message_ids([Some(b"a-0")]),
+        );
+        builder.update_task_on_chunk(
+            actor_id,
+            source_id,
+            Some(&split_b),
+            message_ids([Some(b"b-0")]),
+        );
+        builder.update_task_on_chunk(
+            actor_id,
+            source_id,
+            Some(&split_a),
+            message_ids([Some(b"a-1")]),
+        );
+
+        let WaitCheckpointTask::AckPulsarMessage(ack_arrays) = builder.building_task else {
+            unreachable!();
+        };
+        let channel_ids = ack_arrays
+            .into_iter()
+            .map(|(channel_id, _)| channel_id)
+            .collect_vec();
+
+        assert_eq!(
+            channel_ids,
+            vec![
+                build_pulsar_ack_channel_id(source_id, &split_a, actor_id),
+                build_pulsar_ack_channel_id(source_id, &split_b, actor_id),
+                build_pulsar_ack_channel_id(source_id, &split_a, actor_id),
+            ]
+        );
+    }
 
     #[tokio::test]
     async fn test_source_executor() {
