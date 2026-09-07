@@ -1,4 +1,4 @@
-// Copyright 2024 RisingWave Labs
+// Copyright 2026 RisingWave Labs
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -13,45 +13,55 @@
 // limitations under the License.
 
 use async_trait::async_trait;
+use risingwave_common::array::StreamChunk;
 
-use crate::sink::file_sink::opendal_sink::OpenDalSinkWriter;
 use crate::sink::log_store::{LogStoreReadItem, TruncateOffset};
 use crate::sink::{LogSinker, Result, SinkLogReader};
 
-/// `BatchingLogSinker` is used for a commit-decoupled sink that supports cross-barrier batching.
-/// Currently, it is only used for file sinks, so it contains an `OpenDalSinkWriter`.
-pub struct BatchingLogSinker {
-    writer: OpenDalSinkWriter,
+/// A sink writer that buffers rows across chunks and commits them in batches, driven by
+/// [`BatchingLogSinker`].
+#[async_trait]
+pub trait BatchingSinkWriter: Send + 'static {
+    async fn write_batch(&mut self, chunk: StreamChunk) -> Result<()>;
+
+    /// Commits buffered data if a batch is ready. Returning `true` means everything received so
+    /// far is visible downstream, allowing the log store to truncate up to this point.
+    async fn try_commit(&mut self) -> Result<bool>;
+
+    /// Called at a barrier. Returns whether the barrier may be truncated, i.e. everything received
+    /// so far is committed or was never buffered. Batching across barriers by returning `false`
+    /// while data is pending is only safe for sinks guaranteed to run decoupled: on the in-memory
+    /// log store, an untruncated checkpoint barrier blocks the checkpoint from completing. Sinks
+    /// that may run non-decoupled must flush here and return `true`.
+    async fn commit_on_barrier(&mut self) -> Result<bool>;
 }
 
-impl BatchingLogSinker {
-    /// Create a log sinker with a file sink writer.
-    pub fn new(writer: OpenDalSinkWriter) -> Self {
+/// Log sinker for sinks that batch rows across chunks: an offset is truncated only once a commit
+/// has made its rows visible downstream, preserving at-least-once delivery on restart.
+pub struct BatchingLogSinker<W> {
+    writer: W,
+}
+
+impl<W> BatchingLogSinker<W> {
+    pub fn new(writer: W) -> Self {
         BatchingLogSinker { writer }
     }
 }
 
 #[async_trait]
-impl LogSinker for BatchingLogSinker {
+impl<W: BatchingSinkWriter> LogSinker for BatchingLogSinker<W> {
     async fn consume_log_and_sink(self, mut log_reader: impl SinkLogReader) -> Result<!> {
         log_reader.start_from(None).await?;
         let mut sink_writer = self.writer;
-        #[derive(Debug)]
         enum LogConsumerState {
-            /// Mark that the log consumer is not initialized yet
             Uninitialized,
-
-            /// Mark that a new epoch has begun.
             EpochBegun { curr_epoch: u64 },
-
-            /// Mark that the consumer has just received a barrier
             BarrierReceived { prev_epoch: u64 },
         }
 
         let mut state = LogConsumerState::Uninitialized;
         loop {
             let (epoch, item): (u64, LogStoreReadItem) = log_reader.next_item().await?;
-            // begin_epoch when not previously began
             state = match state {
                 LogConsumerState::Uninitialized => {
                     LogConsumerState::EpochBegun { curr_epoch: epoch }
@@ -79,8 +89,7 @@ impl LogSinker for BatchingLogSinker {
                 LogStoreReadItem::StreamChunk { chunk, chunk_id } => {
                     sink_writer.write_batch(chunk).await?;
                     if sink_writer.try_commit().await? {
-                        // The file has been successfully written and is now visible to downstream consumers.
-                        // Truncate up to this chunk, which also covers any preceding barriers.
+                        // A chunk truncation also covers all preceding barriers.
                         log_reader.truncate(TruncateOffset::Chunk { epoch, chunk_id })?;
                     }
                 }
@@ -90,11 +99,8 @@ impl LogSinker for BatchingLogSinker {
                         _ => unreachable!("epoch must have begun before handling barrier"),
                     };
 
-                    // Truncate the barrier if either:
-                    // 1. try_commit succeeded (file was written and is now visible), or
-                    // 2. there is no pending data (no active writer), so the barrier can be safely discarded.
-                    // This avoids accumulating barriers in the log store during idle periods with no data.
-                    if sink_writer.try_commit().await? || !sink_writer.has_pending_data() {
+                    // Truncating in idle periods keeps barriers from accumulating in the log store.
+                    if sink_writer.commit_on_barrier().await? {
                         log_reader.truncate(TruncateOffset::Barrier { epoch: prev_epoch })?;
                     }
 

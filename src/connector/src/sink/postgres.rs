@@ -28,15 +28,13 @@ use thiserror_ext::AsReport;
 use tokio_postgres::types::Type as PgType;
 use with_options::WithOptions;
 
-use super::{
-    LogSinker, SINK_TYPE_APPEND_ONLY, SINK_TYPE_OPTION, SINK_TYPE_UPSERT, SinkError, SinkLogReader,
-};
+use super::{SINK_TYPE_APPEND_ONLY, SINK_TYPE_OPTION, SINK_TYPE_UPSERT, SinkError};
 use crate::connector_common::{
     PgConnectionConfig, PostgresExternalTable, SslMode, TcpKeepaliveConfig, create_pg_client,
 };
 use crate::enforce_secret::EnforceSecret;
 use crate::parser::scalar_adapter::{ScalarAdapter, validate_pg_type_to_rw_type};
-use crate::sink::log_store::{LogStoreReadItem, TruncateOffset};
+use crate::sink::batching_log_sink::{BatchingLogSinker, BatchingSinkWriter};
 use crate::sink::{Result, Sink, SinkParam, SinkWriterParam};
 
 pub const POSTGRES_SINK: &str = "postgres";
@@ -220,7 +218,7 @@ impl TryFrom<SinkParam> for PostgresSink {
 }
 
 impl Sink for PostgresSink {
-    type LogSinker = PostgresSinkWriter;
+    type LogSinker = BatchingLogSinker<PostgresSinkWriter>;
 
     const SINK_NAME: &'static str = POSTGRES_SINK;
 
@@ -330,13 +328,14 @@ impl Sink for PostgresSink {
     }
 
     async fn new_log_sinker(&self, _writer_param: SinkWriterParam) -> Result<Self::LogSinker> {
-        PostgresSinkWriter::new(
+        let writer = PostgresSinkWriter::new(
             self.config.clone(),
             self.schema.clone(),
             self.pk_indices.clone(),
             self.is_append_only,
         )
-        .await
+        .await?;
+        Ok(BatchingLogSinker::new(writer))
     }
 }
 
@@ -700,18 +699,29 @@ impl PostgresSinkWriter {
         transaction.commit().await?;
         Ok(())
     }
+}
 
-    /// Buffers the chunk, flushing once enough rows have been absorbed. Returns whether a flush
-    /// happened.
-    async fn write_chunk(&mut self, chunk: &StreamChunk) -> Result<bool> {
+#[async_trait]
+impl BatchingSinkWriter for PostgresSinkWriter {
+    async fn write_batch(&mut self, chunk: StreamChunk) -> Result<()> {
         self.pending
-            .absorb(chunk, &self.key_indices, &self.schema_types);
+            .absorb(&chunk, &self.key_indices, &self.schema_types);
+        Ok(())
+    }
+
+    async fn try_commit(&mut self) -> Result<bool> {
         if self.pending.absorbed() >= self.max_batch_rows {
             self.flush().await?;
             Ok(true)
         } else {
             Ok(false)
         }
+    }
+
+    /// Barriers bound the sink's visibility latency, so they always flush.
+    async fn commit_on_barrier(&mut self) -> Result<bool> {
+        self.flush().await?;
+        Ok(true)
     }
 }
 
@@ -754,30 +764,6 @@ async fn execute_batches(
     });
     futures::future::try_join_all(executions).await?;
     Ok(())
-}
-
-#[async_trait]
-impl LogSinker for PostgresSinkWriter {
-    async fn consume_log_and_sink(mut self, mut log_reader: impl SinkLogReader) -> Result<!> {
-        log_reader.start_from(None).await?;
-        loop {
-            let (epoch, item) = log_reader.next_item().await?;
-            match item {
-                LogStoreReadItem::StreamChunk { chunk, chunk_id } => {
-                    // Rows are buffered across chunks, so an offset may only be truncated once the
-                    // flush that commits its rows has succeeded. Offsets of chunks that are still
-                    // buffered are covered by a later truncation.
-                    if self.write_chunk(&chunk).await? {
-                        log_reader.truncate(TruncateOffset::Chunk { epoch, chunk_id })?;
-                    }
-                }
-                LogStoreReadItem::Barrier { .. } => {
-                    self.flush().await?;
-                    log_reader.truncate(TruncateOffset::Barrier { epoch })?;
-                }
-            }
-        }
-    }
 }
 
 /// `($1, $2), ($3, $4), ...`

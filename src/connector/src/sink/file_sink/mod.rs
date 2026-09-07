@@ -13,7 +13,6 @@
 // limitations under the License.
 
 pub mod azblob;
-pub mod batching_log_sink;
 pub mod fs;
 pub mod gcs;
 pub mod opendal_sink;

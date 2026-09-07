@@ -19,6 +19,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::anyhow;
+use async_trait::async_trait;
 use bytes::BytesMut;
 use chrono::{TimeZone, Utc};
 use opendal::{FuturesAsyncWriter, Operator, Writer as OpendalWriter};
@@ -39,12 +40,12 @@ use uuid::Uuid;
 use with_options::WithOptions;
 
 use crate::enforce_secret::EnforceSecret;
+use crate::sink::batching_log_sink::{BatchingLogSinker, BatchingSinkWriter};
 use crate::sink::catalog::SinkEncode;
 use crate::sink::encoder::{
     JsonEncoder, JsonbHandlingMode, RowEncoder, TimeHandlingMode, TimestampHandlingMode,
     TimestamptzHandlingMode,
 };
-use crate::sink::file_sink::batching_log_sink::BatchingLogSinker;
 use crate::sink::{
     Result, Sink, SinkDecouple, SinkError, SinkFormatDesc, SinkParam, UnknownFields,
 };
@@ -123,7 +124,7 @@ pub enum EngineType {
 }
 
 impl<S: OpendalSinkBackend> Sink for FileSink<S> {
-    type LogSinker = BatchingLogSinker;
+    type LogSinker = BatchingLogSinker<OpenDalSinkWriter>;
 
     const SINK_NAME: &'static str = S::SINK_NAME;
 
@@ -255,10 +256,9 @@ enum FileWriterEnum {
     FileWriter(OpendalWriter),
 }
 
-/// Public interface exposed to `BatchingLogSinker`, used to write chunk and commit files.
-impl OpenDalSinkWriter {
-    /// This method writes a chunk.
-    pub async fn write_batch(&mut self, chunk: StreamChunk) -> Result<()> {
+#[async_trait]
+impl BatchingSinkWriter for OpenDalSinkWriter {
+    async fn write_batch(&mut self, chunk: StreamChunk) -> Result<()> {
         if self.sink_writer.is_none() {
             assert_eq!(self.current_bached_row_num, 0);
             self.create_sink_writer().await?;
@@ -267,8 +267,28 @@ impl OpenDalSinkWriter {
         Ok(())
     }
 
-    /// This method close current writer, finish writing a file and returns whether the commit is successful.
-    pub async fn commit(&mut self) -> Result<bool> {
+    async fn try_commit(&mut self) -> Result<bool> {
+        if self.can_commit() {
+            return self.commit().await;
+        }
+        Ok(false)
+    }
+
+    /// A barrier may also be truncated without a commit when no writer is active.
+    async fn commit_on_barrier(&mut self) -> Result<bool> {
+        Ok(self.try_commit().await? || self.sink_writer.is_none())
+    }
+}
+
+/// Private methods related to batching.
+impl OpenDalSinkWriter {
+    fn can_commit(&self) -> bool {
+        self.duration_seconds_since_writer_created() >= self.batching_strategy.rollover_seconds
+            || self.current_bached_row_num >= self.batching_strategy.max_row_count
+    }
+
+    /// Closes the current writer, finishing the file. Returns `false` when no writer is active.
+    async fn commit(&mut self) -> Result<bool> {
         if let Some(sink_writer) = self.sink_writer.take() {
             match sink_writer {
                 FileWriterEnum::ParquetFileWriter(w) => {
@@ -295,28 +315,6 @@ impl OpenDalSinkWriter {
             return Ok(true);
         }
         Ok(false)
-    }
-
-    /// Returns whether there is pending data (i.e., an active writer that has not been committed yet).
-    pub fn has_pending_data(&self) -> bool {
-        self.sink_writer.is_some()
-    }
-
-    // Try commit if the batching condition is met.
-    pub async fn try_commit(&mut self) -> Result<bool> {
-        if self.can_commit() {
-            return self.commit().await;
-        }
-        Ok(false)
-    }
-}
-
-/// Private methods related to batching.
-impl OpenDalSinkWriter {
-    /// Method for judging whether batch condition is met.
-    fn can_commit(&self) -> bool {
-        self.duration_seconds_since_writer_created() >= self.batching_strategy.rollover_seconds
-            || self.current_bached_row_num >= self.batching_strategy.max_row_count
     }
 
     fn path_partition_prefix(&self, duration: &Duration) -> String {

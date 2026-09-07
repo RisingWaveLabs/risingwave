@@ -13,6 +13,7 @@
 // limitations under the License.
 
 feature_gated_sink_mod!(big_query, "bigquery");
+pub mod batching_log_sink;
 pub mod boxed;
 pub mod catalog;
 feature_gated_sink_mod!(clickhouse, ClickHouse, "clickhouse");
