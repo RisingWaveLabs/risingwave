@@ -31,7 +31,7 @@ clap = { workspace = true }
 datafusion = { version = "53", optional = true, features = [
     "nested_expressions",
 ] }
-datafusion-common = { version = "53", optional = true }
+datafusion-common = { version = "54", optional = true }
 downcast-rs = "2.0"
 dyn-clone = "1.0.14"
 easy-ext = "1"
