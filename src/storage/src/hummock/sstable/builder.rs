@@ -14,6 +14,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::mem;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::SystemTime;
 
@@ -21,6 +22,7 @@ use await_tree::{InstrumentAwait, SpanExt};
 use bytes::{Bytes, BytesMut};
 use risingwave_common::catalog::TableId;
 use risingwave_common::hash::VirtualNode;
+use risingwave_common::util::iter_util::ZipEqFast;
 use risingwave_common::util::row_serde::OrderedRowSerde;
 use risingwave_hummock_sdk::key::{FullKey, MAX_KEY_LEN, TABLE_PREFIX_LEN, UserKey, user_key};
 use risingwave_hummock_sdk::key_range::KeyRange;
@@ -29,10 +31,11 @@ use risingwave_hummock_sdk::table_stats::{TableStats, TableStatsMap};
 use risingwave_hummock_sdk::{HummockEpoch, HummockSstableObjectId, LocalSstableInfo};
 use risingwave_pb::hummock::{PbSstableFilterLayout, PbSstableFilterType};
 
+use super::meta::v3::{append_meta_partition_index, append_meta_shard};
 use super::utils::CompressionAlgorithm;
 use super::{
     BlockBuilder, BlockBuilderOptions, BlockMeta, DEFAULT_BLOCK_SIZE, DEFAULT_ENTRY_SIZE,
-    DEFAULT_RESTART_INTERVAL, SstableMeta, SstableWriter, VERSION,
+    DEFAULT_RESTART_INTERVAL, SstableMeta, SstableWriter, SstableWriterPayload, VERSION,
 };
 use crate::compaction_catalog_manager::{
     CompactionCatalogAgent, CompactionCatalogAgentRef, FilterKeyExtractorImpl,
@@ -161,12 +164,25 @@ pub struct SstableBuilder<W: SstableWriter, F: FilterBuilder> {
     last_table_stats: TableStats,
 
     filter_builder: F,
+    v3_builder_state: Option<V3BuilderState>,
 
     epoch_set: BTreeSet<u64>,
     memory_limiter: Option<Arc<MemoryLimiter>>,
 
     block_size_vec: Vec<usize>, // for statistics
     vnode_range_collector: Option<VnodeUserKeyRangeCollector>,
+}
+
+struct V3BuilderState {
+    blocks_per_shard: NonZeroUsize,
+    finished_filters: Vec<Vec<u8>>,
+    finished_filter_bytes: usize,
+}
+
+struct V3MetadataSuffix {
+    bytes: Vec<u8>,
+    index_offset: usize,
+    filter_size: usize,
 }
 
 impl<W: SstableWriter> SstableBuilder<W, Xor16FilterBuilder> {
@@ -226,6 +242,7 @@ impl<W: SstableWriter, F: FilterBuilder> SstableBuilder<W, F> {
                 compression_algorithm: options.compression_algorithm,
             }),
             filter_builder,
+            v3_builder_state: None,
             block_metas: Vec::with_capacity(options.capacity / options.block_capacity + 1),
             table_ids: BTreeSet::new(),
             last_table_id: None,
@@ -240,6 +257,31 @@ impl<W: SstableWriter, F: FilterBuilder> SstableBuilder<W, F> {
             memory_limiter,
             block_size_vec: Vec::new(),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn enable_v3_for_test(&mut self, blocks_per_shard: NonZeroUsize) {
+        assert!(self.v3_builder_state.is_none());
+        assert!(self.block_metas.is_empty());
+        assert!(self.block_builder.is_empty());
+        self.filter_builder = F::create(self.v3_filter_builder_options(blocks_per_shard));
+        self.v3_builder_state = Some(V3BuilderState {
+            blocks_per_shard,
+            finished_filters: Vec::new(),
+            finished_filter_bytes: 0,
+        });
+    }
+
+    fn v3_filter_builder_options(&self, blocks_per_shard: NonZeroUsize) -> FilterBuilderOptions {
+        let mut options = self.options.filter_builder_options();
+        let estimated_block_count = blocks_per_shard.get().min(options.estimated_block_count);
+        options.estimated_key_count = options
+            .estimated_key_count
+            .saturating_mul(estimated_block_count)
+            .div_ceil(options.estimated_block_count)
+            .max(1);
+        options.estimated_block_count = estimated_block_count;
+        options
     }
 
     /// Add kv pair to sstable.
@@ -478,6 +520,53 @@ impl<W: SstableWriter, F: FilterBuilder> SstableBuilder<W, F> {
         Ok(())
     }
 
+    fn build_v3_metadata_suffix(&mut self, mut state: V3BuilderState) -> V3MetadataSuffix {
+        assert!(!self.block_metas.is_empty());
+
+        // Finish the final partial shard filter, if block flushing did not finish it already.
+        if !self
+            .block_metas
+            .len()
+            .is_multiple_of(state.blocks_per_shard.get())
+        {
+            let filter = self
+                .filter_builder
+                .finish(self.memory_limiter.clone())
+                .unwrap_or_default();
+            state.finished_filter_bytes += filter.len();
+            state.finished_filters.push(filter);
+        }
+        assert_eq!(
+            state.finished_filters.len(),
+            self.block_metas
+                .len()
+                .div_ceil(state.blocks_per_shard.get())
+        );
+
+        let blocks_per_shard = state.blocks_per_shard;
+        let filter_size = state.finished_filter_bytes;
+        let finished_filters = state.finished_filters;
+
+        // Append contiguous shard bodies first, then append the partition index after them.
+        let mut bytes = Vec::new();
+        let mut shards = Vec::with_capacity(finished_filters.len());
+        for (block_metas, filter) in self
+            .block_metas
+            .chunks(blocks_per_shard.get())
+            .zip_eq_fast(finished_filters)
+        {
+            shards.push(append_meta_shard(&mut bytes, block_metas, &filter));
+        }
+        let index_offset = bytes.len();
+        append_meta_partition_index(&mut bytes, shards);
+
+        V3MetadataSuffix {
+            bytes,
+            index_offset,
+            filter_size,
+        }
+    }
+
     /// Finish building sst.
     ///
     /// # Format
@@ -504,28 +593,17 @@ impl<W: SstableWriter, F: FilterBuilder> SstableBuilder<W, F> {
             self.table_ids.len()
         );
 
+        // Complete the data region before deriving any metadata offsets.
         self.build_block()
             .instrument_await("sstable_finish_build_block".verbose())
             .await?;
         let right_exclusive = false;
-        let meta_offset = self.writer.data_len() as u64;
-
-        let filter_data = self.filter_builder.finish(self.memory_limiter.clone());
-        let (filter_type, filter_layout) = if filter_data.is_none() {
-            (
-                PbSstableFilterType::SstableFilterNone,
-                PbSstableFilterLayout::Unspecified,
-            )
-        } else if self.filter_builder.support_blocked_raw_data() {
-            (
-                self.filter_builder.filter_type(),
-                PbSstableFilterLayout::Blocked,
-            )
-        } else {
-            (
-                self.filter_builder.filter_type(),
-                PbSstableFilterLayout::Plain,
-            )
+        let data_end = self.writer.data_len() as u64;
+        let meta_offset;
+        let key_range = KeyRange {
+            left: Bytes::from(smallest_key.clone()),
+            right: Bytes::from(largest_key.clone()),
+            right_exclusive,
         };
 
         let total_key_count = self
@@ -544,45 +622,128 @@ impl<W: SstableWriter, F: FilterBuilder> SstableBuilder<W, F> {
             .map(|block_meta| block_meta.uncompressed_size as u64)
             .sum::<u64>();
 
-        #[expect(deprecated)]
-        let mut meta = SstableMeta {
-            block_metas: self.block_metas,
-            bloom_filter: filter_data.unwrap_or_default(),
-            estimated_size: 0,
-            key_count: utils::checked_into_u32(total_key_count).unwrap_or_else(|_| {
-                panic!(
-                    "WARN overflow can't convert total_key_count {} into u32 tables {:?}",
-                    total_key_count, self.table_ids,
-                )
-            }),
-            smallest_key,
-            largest_key,
-            version: VERSION,
-            meta_offset,
-            monotonic_tombstone_events: vec![],
-        };
+        if !self.block_metas.is_empty() {
+            // fill total_compressed_size
+            let mut last_table_id = self.block_metas[0].table_id();
+            let mut last_table_stats = self.table_stats.get_mut(&last_table_id).unwrap();
+            for block_meta in &self.block_metas {
+                let block_table_id = block_meta.table_id();
+                if last_table_id != block_table_id {
+                    last_table_id = block_table_id;
+                    last_table_stats = self.table_stats.get_mut(&last_table_id).unwrap();
+                }
 
-        let meta_encode_size = meta.encoded_size();
-        let encoded_size_u32 = utils::checked_into_u32(meta_encode_size).unwrap_or_else(|_| {
-            panic!(
-                "WARN overflow can't convert meta_encoded_size {} into u32 tables {:?}",
-                meta_encode_size, self.table_ids,
-            )
-        });
-        let meta_offset_u32 = utils::checked_into_u32(meta_offset).unwrap_or_else(|_| {
-            panic!(
-                "WARN overflow can't convert meta_offset {} into u32 tables {:?}",
-                meta_offset, self.table_ids,
-            )
-        });
-        meta.estimated_size = encoded_size_u32
-            .checked_add(meta_offset_u32)
-            .unwrap_or_else(|| {
-                panic!(
-                    "WARN overflow encoded_size_u32 {} meta_offset_u32 {} table_id {:?} table_ids {:?}",
-                    encoded_size_u32, meta_offset_u32, self.last_table_id, self.table_ids
+                last_table_stats.total_compressed_size += block_meta.len as u64;
+            }
+        }
+
+        let (writer_payload, metadata_size, file_size, filter_size, filter_type, filter_layout) =
+            if let Some(state) = self.v3_builder_state.take() {
+                let suffix = self.build_v3_metadata_suffix(state);
+                meta_offset = data_end
+                    .checked_add(suffix.index_offset as u64)
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "WARN overflow data_end {} shard_bytes {} table_ids {:?}",
+                            data_end, suffix.index_offset, self.table_ids
+                        )
+                    });
+
+                let metadata_size = suffix.bytes.len() as u64;
+                let file_size = data_end.checked_add(metadata_size).unwrap_or_else(|| {
+                    panic!(
+                        "WARN overflow data_end {} metadata_size {} table_ids {:?}",
+                        data_end, metadata_size, self.table_ids
+                    )
+                });
+                let filter_type = self.filter_builder.filter_type();
+                let filter_layout = if filter_type == PbSstableFilterType::SstableFilterNone {
+                    PbSstableFilterLayout::Unspecified
+                } else if self.filter_builder.support_blocked_raw_data() {
+                    PbSstableFilterLayout::Blocked
+                } else {
+                    PbSstableFilterLayout::Plain
+                };
+                (
+                    SstableWriterPayload::V3(Bytes::from(suffix.bytes)),
+                    metadata_size,
+                    file_size,
+                    suffix.filter_size,
+                    filter_type,
+                    filter_layout,
                 )
-            });
+            } else {
+                let filter_data = self.filter_builder.finish(self.memory_limiter.clone());
+                let (filter_type, filter_layout) = if filter_data.is_none() {
+                    (
+                        PbSstableFilterType::SstableFilterNone,
+                        PbSstableFilterLayout::Unspecified,
+                    )
+                } else if self.filter_builder.support_blocked_raw_data() {
+                    (
+                        self.filter_builder.filter_type(),
+                        PbSstableFilterLayout::Blocked,
+                    )
+                } else {
+                    (
+                        self.filter_builder.filter_type(),
+                        PbSstableFilterLayout::Plain,
+                    )
+                };
+
+                meta_offset = data_end;
+
+                #[expect(deprecated)]
+                let mut meta = SstableMeta {
+                    block_metas: self.block_metas,
+                    bloom_filter: filter_data.unwrap_or_default(),
+                    estimated_size: 0,
+                    key_count: utils::checked_into_u32(total_key_count).unwrap_or_else(|_| {
+                        panic!(
+                            "WARN overflow can't convert total_key_count {} into u32 tables {:?}",
+                            total_key_count, self.table_ids,
+                        )
+                    }),
+                    smallest_key,
+                    largest_key,
+                    version: VERSION,
+                    meta_offset,
+                    monotonic_tombstone_events: vec![],
+                };
+
+                let meta_encode_size = meta.encoded_size();
+                let encoded_size_u32 =
+                    utils::checked_into_u32(meta_encode_size).unwrap_or_else(|_| {
+                        panic!(
+                            "WARN overflow can't convert meta_encoded_size {} into u32 tables {:?}",
+                            meta_encode_size, self.table_ids,
+                        )
+                    });
+                let meta_offset_u32 = utils::checked_into_u32(meta_offset).unwrap_or_else(|_| {
+                    panic!(
+                        "WARN overflow can't convert meta_offset {} into u32 tables {:?}",
+                        meta_offset, self.table_ids,
+                    )
+                });
+                meta.estimated_size = encoded_size_u32
+                    .checked_add(meta_offset_u32)
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "WARN overflow encoded_size_u32 {} meta_offset_u32 {} table_id {:?} table_ids {:?}",
+                            encoded_size_u32, meta_offset_u32, self.last_table_id, self.table_ids
+                        )
+                    });
+                let file_size = meta.estimated_size as u64;
+                let filter_size = meta.bloom_filter.len();
+                (
+                    SstableWriterPayload::V2(meta),
+                    meta_encode_size as u64,
+                    file_size,
+                    filter_size,
+                    filter_type,
+                    filter_layout,
+                )
+            };
 
         let (avg_key_size, avg_value_size) = if self.table_stats.is_empty() {
             (0, 0)
@@ -631,21 +792,17 @@ impl<W: SstableWriter, F: FilterBuilder> SstableBuilder<W, F> {
             object_id: self.sst_object_id,
             // use the same sst_id as object_id for initial sst
             sst_id: self.sst_object_id.as_raw_id().into(),
-            key_range: KeyRange {
-                left: Bytes::from(meta.smallest_key.clone()),
-                right: Bytes::from(meta.largest_key.clone()),
-                right_exclusive,
-            },
-            file_size: meta.estimated_size as u64,
+            key_range,
+            file_size,
             table_ids: self.table_ids.into_iter().collect(),
-            meta_offset: meta.meta_offset,
+            meta_offset,
             stale_key_count,
             total_key_count,
-            uncompressed_file_size: uncompressed_file_size + meta.encoded_size() as u64,
+            uncompressed_file_size: uncompressed_file_size + metadata_size,
             min_epoch,
             max_epoch,
             range_tombstone_count: 0,
-            sst_size: meta.estimated_size as u64,
+            sst_size: file_size,
             filter_type,
             filter_layout,
             vnode_statistics: vnode_user_key_ranges,
@@ -654,37 +811,22 @@ impl<W: SstableWriter, F: FilterBuilder> SstableBuilder<W, F> {
 
         tracing::trace!(
             "meta_size {} filter_size {} add_key_counts {} stale_key_count {} min_epoch {} max_epoch {} epoch_count {}",
-            meta.encoded_size(),
-            meta.bloom_filter.len(),
+            metadata_size,
+            filter_size,
             total_key_count,
             stale_key_count,
             min_epoch,
             max_epoch,
             self.epoch_set.len()
         );
-        let filter_size = meta.bloom_filter.len();
         let sstable_file_size = sst_info.file_size as usize;
-
-        if !meta.block_metas.is_empty() {
-            // fill total_compressed_size
-            let mut last_table_id = meta.block_metas[0].table_id();
-            let mut last_table_stats = self.table_stats.get_mut(&last_table_id).unwrap();
-            for block_meta in &meta.block_metas {
-                let block_table_id = block_meta.table_id();
-                if last_table_id != block_table_id {
-                    last_table_id = block_table_id;
-                    last_table_stats = self.table_stats.get_mut(&last_table_id).unwrap();
-                }
-
-                last_table_stats.total_compressed_size += block_meta.len as u64;
-            }
-        }
 
         let writer_output = self
             .writer
-            .finish(meta)
+            .finish(writer_payload)
             .instrument_await("sstable_writer_finish".verbose())
             .await?;
+
         // The timestamp is only used during full GC.
         //
         // Ideally object store object's last_modified should be used.
@@ -715,6 +857,10 @@ impl<W: SstableWriter, F: FilterBuilder> SstableBuilder<W, F> {
         self.writer.data_len()
             + self.block_builder.approximate_len()
             + self.filter_builder.approximate_len()
+            + self
+                .v3_builder_state
+                .as_ref()
+                .map_or(0, |state| state.finished_filter_bytes)
     }
 
     pub async fn build_block(&mut self) -> HummockResult<()> {
@@ -755,6 +901,23 @@ impl<W: SstableWriter, F: FilterBuilder> SstableBuilder<W, F> {
 
         self.filter_builder
             .switch_block(self.memory_limiter.clone());
+
+        let blocks_per_shard = self.v3_builder_state.as_ref().and_then(|state| {
+            self.block_metas
+                .len()
+                .is_multiple_of(state.blocks_per_shard.get())
+                .then_some(state.blocks_per_shard)
+        });
+        if let Some(blocks_per_shard) = blocks_per_shard {
+            let filter = self
+                .filter_builder
+                .finish(self.memory_limiter.clone())
+                .unwrap_or_default();
+            let state = self.v3_builder_state.as_mut().unwrap();
+            state.finished_filter_bytes += filter.len();
+            state.finished_filters.push(filter);
+            self.filter_builder = F::create(self.v3_filter_builder_options(blocks_per_shard));
+        }
 
         if data_len as usize > self.options.capacity * 2 {
             tracing::warn!(
@@ -1271,11 +1434,10 @@ pub(super) mod tests {
             test_key_of(TEST_KEYS_COUNT - 1).encode(),
             info.key_range.right
         );
-        let (data, meta) = output.writer_output;
-        assert_eq!(info.file_size, meta.estimated_size as u64);
+        let data = output.writer_output;
         let offset = info.meta_offset as usize;
-        let meta2 = SstableMeta::decode(&data[offset..]).unwrap();
-        assert_eq!(meta2, meta);
+        let meta = SstableMeta::decode(&data[offset..]).unwrap();
+        assert_eq!(info.file_size, meta.estimated_size as u64);
     }
 
     async fn test_with_xor_filter_builder<F: FilterBuilder>(

@@ -41,10 +41,15 @@ pub trait SstableWriter: Send {
     async fn write_block_bytes(&mut self, block: Bytes, meta: &BlockMeta) -> HummockResult<()>;
 
     /// Finish writing the SST.
-    async fn finish(self, meta: SstableMeta) -> HummockResult<Self::Output>;
+    async fn finish(self, payload: SstableWriterPayload) -> HummockResult<Self::Output>;
 
     /// Get the length of data that has already been written.
     fn data_len(&self) -> usize;
+}
+
+pub enum SstableWriterPayload {
+    V2(SstableMeta),
+    V3(Bytes),
 }
 
 /// Append SST data to a buffer. Used for tests and benchmarks.
@@ -68,7 +73,7 @@ impl From<&SstableBuilderOptions> for InMemWriter {
 
 #[async_trait::async_trait]
 impl SstableWriter for InMemWriter {
-    type Output = (Bytes, SstableMeta);
+    type Output = Bytes;
 
     async fn write_block(&mut self, block: &[u8], _meta: &BlockMeta) -> HummockResult<()> {
         self.buf.extend_from_slice(block);
@@ -80,9 +85,12 @@ impl SstableWriter for InMemWriter {
         Ok(())
     }
 
-    async fn finish(mut self, meta: SstableMeta) -> HummockResult<Self::Output> {
-        meta.encode_to(&mut self.buf);
-        Ok((Bytes::from(self.buf), meta))
+    async fn finish(mut self, payload: SstableWriterPayload) -> HummockResult<Self::Output> {
+        match payload {
+            SstableWriterPayload::V2(meta) => meta.encode_to(&mut self.buf),
+            SstableWriterPayload::V3(metadata) => self.buf.extend_from_slice(&metadata),
+        }
+        Ok(Bytes::from(self.buf))
     }
 
     fn data_len(&self) -> usize {
@@ -196,10 +204,19 @@ impl SstableWriter for BatchUploadWriter {
         Ok(())
     }
 
-    async fn finish(mut self, meta: SstableMeta) -> HummockResult<Self::Output> {
+    async fn finish(mut self, payload: SstableWriterPayload) -> HummockResult<Self::Output> {
         fail_point!("data_upload_err");
         let join_handle = tokio::spawn(async move {
-            meta.encode_to(&mut self.buf);
+            let meta = match payload {
+                SstableWriterPayload::V2(meta) => {
+                    meta.encode_to(&mut self.buf);
+                    Some(meta)
+                }
+                SstableWriterPayload::V3(metadata) => {
+                    self.buf.extend_from_slice(&metadata);
+                    None
+                }
+            };
             let data = Bytes::from(self.buf);
             let _tracker = self.tracker.map(|mut t| {
                 if !t.try_increase_memory(data.capacity() as u64) {
@@ -214,7 +231,9 @@ impl SstableWriter for BatchUploadWriter {
                 .clone()
                 .put_sst_data(self.object_id, data)
                 .await?;
-            self.sstable_store.insert_meta_cache(self.object_id, meta);
+            if let Some(meta) = meta {
+                self.sstable_store.insert_meta_cache(self.object_id, meta);
+            }
 
             // Only update recent filter with sst obj id is okay here, for l0 is only filter by sst obj id with recent filter.
             self.sstable_store
@@ -306,8 +325,11 @@ impl SstableWriter for StreamingUploadWriter {
             .map_err(Into::into)
     }
 
-    async fn finish(mut self, meta: SstableMeta) -> HummockResult<UploadJoinHandle> {
-        let metadata = Bytes::from(meta.encode_to_bytes());
+    async fn finish(mut self, payload: SstableWriterPayload) -> HummockResult<UploadJoinHandle> {
+        let (metadata, meta) = match payload {
+            SstableWriterPayload::V2(meta) => (Bytes::from(meta.encode_to_bytes()), Some(meta)),
+            SstableWriterPayload::V3(metadata) => (metadata, None),
+        };
 
         self.object_uploader.write_bytes(metadata).await?;
         let join_handle = tokio::spawn(async move {
@@ -320,12 +342,15 @@ impl SstableWriter for StreamingUploadWriter {
                     t
                 });
 
-            assert!(!meta.block_metas.is_empty());
-
+            if let Some(meta) = meta.as_ref() {
+                assert!(!meta.block_metas.is_empty());
+            }
             // Upload data to object store.
             self.object_uploader.finish().await?;
             // Add meta cache.
-            self.sstable_store.insert_meta_cache(self.object_id, meta);
+            if let Some(meta) = meta {
+                self.sstable_store.insert_meta_cache(self.object_id, meta);
+            }
 
             // Add block cache.
             if let CachePolicy::Fill(hint) = self.policy
@@ -391,7 +416,9 @@ mod tests {
     use risingwave_common::util::iter_util::ZipEqFast;
 
     use crate::hummock::sstable::VERSION;
-    use crate::hummock::{BlockMeta, InMemWriter, SstableMeta, SstableWriter};
+    use crate::hummock::{
+        BlockMeta, InMemWriter, SstableMeta, SstableWriter, SstableWriterPayload,
+    };
 
     fn get_sst() -> (Bytes, Vec<Bytes>, SstableMeta) {
         let mut rng = rand::rngs::StdRng::seed_from_u64(0);
@@ -436,7 +463,12 @@ mod tests {
         }
 
         let meta_offset = meta.meta_offset as usize;
-        let (output_data, _) = writer.finish(meta).await.unwrap();
+        let data_end = writer.data_len();
+        let output_data = writer
+            .finish(SstableWriterPayload::V2(meta.clone()))
+            .await
+            .unwrap();
         assert_eq!(output_data.slice(0..meta_offset), data);
+        assert_eq!(SstableMeta::decode(&output_data[data_end..]).unwrap(), meta);
     }
 }

@@ -477,12 +477,24 @@ fn decode_block_meta_checked(buf: &mut &[u8]) -> HummockResult<BlockMeta> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+    use std::num::NonZeroUsize;
+    use std::ops::Bound;
+
+    use bytes::Bytes;
     use risingwave_common::catalog::TableId;
+    use risingwave_common::hash::VirtualNode;
     use risingwave_common::util::epoch::test_epoch;
     use risingwave_common::util::panic::rw_catch_unwind;
-    use risingwave_hummock_sdk::key::FullKey;
+    use risingwave_hummock_sdk::key::{FullKey, user_key};
+    use risingwave_hummock_sdk::sstable_info::SstableInfo;
 
     use super::*;
+    use crate::hummock::sstable::{
+        Sstable, SstableBuilder, SstableBuilderOptions, Xor16FilterBuilder, XorFilterReader,
+    };
+    use crate::hummock::test_utils::{mock_sst_writer, test_key_of};
+    use crate::hummock::{HummockValue, SstableMeta};
 
     fn test_key(idx: usize) -> Vec<u8> {
         FullKey::for_test(
@@ -801,6 +813,173 @@ mod tests {
         };
 
         assert!(desc.decode_body(&body).is_err());
+    }
+
+    #[tokio::test]
+    async fn test_v3_writer_raw_byte_oracle() {
+        let cases = [
+            ("partial", OracleCase::MoreThanBlocks),
+            ("singleton", OracleCase::One),
+            ("mixed", OracleCase::OneLessThanBlocks),
+            ("same-user-epochs", OracleCase::SameUserEpochs),
+        ];
+
+        for (name, case) in cases {
+            let entries = oracle_entries(case);
+            let (v2_bytes, v2_info) = build_oracle_sst(&entries, None).await;
+            let v2_meta = SstableMeta::decode(&v2_bytes[v2_info.meta_offset as usize..]).unwrap();
+            let block_count = v2_meta.block_metas.len();
+            assert!(block_count >= 3, "{name} needs at least three data blocks");
+
+            let blocks_per_shard = match case {
+                OracleCase::MoreThanBlocks => block_count + 1,
+                OracleCase::One => 1,
+                OracleCase::OneLessThanBlocks => block_count - 1,
+                OracleCase::SameUserEpochs => 2,
+            };
+            if matches!(case, OracleCase::SameUserEpochs) {
+                assert_eq!(
+                    user_key(&v2_meta.block_metas[blocks_per_shard - 1].smallest_key),
+                    user_key(&v2_meta.block_metas[blocks_per_shard].smallest_key),
+                    "{name}: shard boundary must split epochs of one user key"
+                );
+            }
+            let (v3_bytes, v3_info) =
+                build_oracle_sst(&entries, Some(NonZeroUsize::new(blocks_per_shard).unwrap()))
+                    .await;
+
+            let data_end = v2_info.meta_offset as usize;
+            assert_eq!(
+                &v2_bytes[..data_end],
+                &v3_bytes[..data_end],
+                "{name}: data prefix differs"
+            );
+            assert_eq!(
+                v3_bytes.len() as u64,
+                v3_info.file_size,
+                "{name}: file size"
+            );
+            assert_eq!(v3_info.file_size, v3_info.sst_size, "{name}: SST size");
+
+            let meta_offset = v3_info.meta_offset as usize;
+            let index =
+                MetaPartitionIndex::decode(&v3_bytes[meta_offset..], v3_info.meta_offset).unwrap();
+            let mut body_start = data_end;
+            assert_eq!(
+                index.shards.len(),
+                block_count.div_ceil(blocks_per_shard),
+                "{name}: shard count"
+            );
+            let mut flattened = Vec::with_capacity(block_count);
+            for desc in &index.shards {
+                let body_end = body_start + desc.len as usize;
+                assert!(
+                    body_end <= meta_offset,
+                    "{name}: shard body must stay before index"
+                );
+                let shard = desc.decode_body(&v3_bytes[body_start..body_end]).unwrap();
+                let expected_block_count = (block_count - flattened.len()).min(blocks_per_shard);
+                assert_eq!(
+                    desc.block_count as usize, expected_block_count,
+                    "{name}: descriptor block count"
+                );
+                assert_eq!(
+                    shard.block_metas.len(),
+                    expected_block_count,
+                    "{name}: decoded shard block count"
+                );
+                let first_full_key = &shard.block_metas[0].smallest_key;
+                let full_key = FullKey::decode(first_full_key);
+                let hash = Sstable::hash_for_filter(
+                    user_key(first_full_key),
+                    full_key.user_key.table_id.as_raw_id(),
+                );
+                let first_user_key = full_key.user_key;
+                let filter_reader = XorFilterReader::new(&shard.filter, &shard.block_metas);
+                assert!(
+                    filter_reader.may_match(
+                        &shard.block_metas,
+                        &(
+                            Bound::Included(first_user_key),
+                            Bound::Included(first_user_key),
+                        ),
+                        hash,
+                    ),
+                    "{name}: shard filter misses its first user key"
+                );
+                flattened.extend(shard.block_metas);
+                body_start = body_end;
+            }
+            assert_eq!(
+                body_start, meta_offset,
+                "{name}: shards must end at the index"
+            );
+            assert_eq!(
+                flattened, v2_meta.block_metas,
+                "{name}: flattened block metas"
+            );
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum OracleCase {
+        MoreThanBlocks,
+        One,
+        OneLessThanBlocks,
+        SameUserEpochs,
+    }
+
+    fn oracle_entries(case: OracleCase) -> Vec<(FullKey<Vec<u8>>, Vec<u8>)> {
+        match case {
+            OracleCase::SameUserEpochs => (0..4)
+                .flat_map(|user_idx| {
+                    [3, 2, 1].into_iter().map(move |epoch| {
+                        (
+                            FullKey::for_test(
+                                TableId::default(),
+                                test_key_of(user_idx).user_key.table_key.to_vec(),
+                                test_epoch(epoch),
+                            ),
+                            vec![user_idx as u8; 256],
+                        )
+                    })
+                })
+                .collect(),
+            _ => (0..6)
+                .map(|idx| (test_key_of(idx), vec![idx as u8; 256]))
+                .collect(),
+        }
+    }
+
+    async fn build_oracle_sst(
+        entries: &[(FullKey<Vec<u8>>, Vec<u8>)],
+        blocks_per_shard: Option<NonZeroUsize>,
+    ) -> (Bytes, SstableInfo) {
+        let options = SstableBuilderOptions {
+            capacity: 4 * 1024,
+            block_capacity: 128,
+            restart_interval: 1,
+            bloom_false_positive: 0.1,
+            ..Default::default()
+        };
+        let mut builder = SstableBuilder::<_, Xor16FilterBuilder>::for_test(
+            1,
+            mock_sst_writer(&options),
+            options,
+            HashMap::from([(TableId::default(), VirtualNode::COUNT_FOR_TEST)]),
+            HashMap::from([(TableId::default(), None)]),
+        );
+        if let Some(blocks_per_shard) = blocks_per_shard {
+            builder.enable_v3_for_test(blocks_per_shard);
+        }
+        for (key, value) in entries {
+            builder
+                .add_for_test(key.to_ref(), HummockValue::put(value))
+                .await
+                .unwrap();
+        }
+        let output = builder.finish().await.unwrap();
+        (output.writer_output, output.sst_info.sst_info)
     }
 
     fn assert_decode_returns_err_without_panicking<T>(f: impl FnOnce() -> HummockResult<T>) {

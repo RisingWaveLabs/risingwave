@@ -37,6 +37,7 @@ use risingwave_hummock_sdk::{
 use super::iterator::test_utils::iterator_test_table_key_of;
 use super::{
     DEFAULT_RESTART_INTERVAL, HummockResult, InMemWriter, SstableMeta, SstableWriterOptions,
+    SstableWriterPayload,
 };
 use crate::StateStore;
 use crate::compaction_catalog_manager::{
@@ -183,7 +184,10 @@ pub async fn gen_test_sstable_data(
             .unwrap();
     }
     let output = b.finish().await.unwrap();
-    output.writer_output
+    let data = output.writer_output;
+    let meta_offset = output.sst_info.sst_info.meta_offset as usize;
+    let meta = SstableMeta::decode(&data[meta_offset..]).unwrap();
+    (data, meta)
 }
 
 /// Write the data and meta to `sstable_store`.
@@ -238,7 +242,7 @@ pub async fn put_sst(
         ..Default::default()
     }
     .into();
-    let writer_output = writer.finish(meta).await?;
+    let writer_output = writer.finish(SstableWriterPayload::V2(meta)).await?;
     writer_output.await.unwrap()?;
     Ok(sst)
 }
