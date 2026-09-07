@@ -234,12 +234,13 @@ impl<S: StateStore> ParallelizedCdcBackfillExecutor<S> {
             let mut actor_cdc_offset_low: Option<CdcOffset> = None;
             // Find next split that need backfill.
             let mut next_unfinished_split = None;
-            'restore_split_state: for (idx, split) in actor_snapshot_splits.iter().enumerate() {
+
+            for (idx, split) in actor_snapshot_splits.iter().enumerate() {
                 let state = state_impl.restore_state(split.split_id).await?;
 
                 if !state.is_finished {
                     next_unfinished_split = Some((idx, state));
-                    break 'restore_split_state;
+                    break;
                 }
 
                 extends_current_actor_bound(&mut current_actor_bounds, split);
@@ -656,7 +657,7 @@ impl<S: StateStore> ParallelizedCdcBackfillExecutor<S> {
                                     self.actor_ctx.id,
                                     self.actor_ctx.fragment_id,
                                 ));
-                                let table_reader = 'rebuild_reader: loop {
+                                let table_reader = loop {
                                     match build_reader_and_poll_upstream(&mut upstream, &mut future)
                                         .await?
                                     {
@@ -765,7 +766,7 @@ impl<S: StateStore> ParallelizedCdcBackfillExecutor<S> {
                                             }
                                         }
                                         Either::Right(table_reader) => {
-                                            break 'rebuild_reader table_reader;
+                                            break table_reader;
                                         }
                                     }
                                 };
@@ -841,7 +842,7 @@ impl<S: StateStore> ParallelizedCdcBackfillExecutor<S> {
             // we can forward messages directly to the downstream,
             // as backfill is finished.
             #[for_await]
-            'forward_upstream: for msg in &mut upstream {
+            for msg in &mut upstream {
                 let msg = msg?;
                 match msg {
                     Message::Barrier(barrier) => {
@@ -886,7 +887,7 @@ impl<S: StateStore> ParallelizedCdcBackfillExecutor<S> {
                     }
                     Message::Chunk(chunk) => {
                         if actor_snapshot_splits.is_empty() || !chunk.has_visible_rows() {
-                            continue 'forward_upstream;
+                            continue;
                         }
 
                         let chunk_cdc_offset =
@@ -1052,13 +1053,13 @@ fn filter_stream_chunk(
     }
     let mut new_bitmap = BitmapBuilder::with_capacity(chunk.capacity());
     let (ops, columns, visibility) = chunk.into_inner();
-    'filter_rows: for (row_split_key, v) in columns[snapshot_split_column_index]
+    for (row_split_key, v) in columns[snapshot_split_column_index]
         .iter()
         .zip_eq_fast(visibility.iter())
     {
         if !v {
             new_bitmap.append(false);
-            continue 'filter_rows;
+            continue;
         }
         let mut is_in_range = true;
         if !is_leftmost_bound {
