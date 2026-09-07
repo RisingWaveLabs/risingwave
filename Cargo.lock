@@ -15237,9 +15237,9 @@ dependencies = [
 
 [[package]]
 name = "sea-schema"
-version = "0.16.0"
+version = "0.16.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aab1592d17860a9a8584d9b549aebcd06f7bdc3ff615f71752486ba0b05b1e6e"
+checksum = "2239ff574c04858ca77485f112afea1a15e53135d3097d0c86509cef1def1338"
 dependencies = [
  "futures",
  "sea-query",
