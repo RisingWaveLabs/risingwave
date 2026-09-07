@@ -243,6 +243,7 @@ fn non_keyword_datatype<S: TokenStream>(input: &mut StatefulStream<S>) -> ModalR
     match type_name.to_string().to_ascii_lowercase().as_str() {
         // PostgreSQL built-in data types that are not keywords.
         "jsonb" => Ok(DataType::Jsonb),
+        "variant" => Ok(DataType::Variant),
         "regclass" => Ok(DataType::Regclass),
         "regproc" => Ok(DataType::Regproc),
         "map" => cut_err(map_type_arguments).parse_next(input),

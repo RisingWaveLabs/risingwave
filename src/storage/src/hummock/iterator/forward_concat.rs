@@ -22,13 +22,20 @@ pub type ConcatIterator = ConcatIteratorInner<SstableIterator>;
 mod tests {
     use std::sync::Arc;
 
+    #[cfg(feature = "failpoints")]
+    use foyer::Hint;
+
     use super::*;
+    #[cfg(feature = "failpoints")]
+    use crate::hummock::CachePolicy;
     use crate::hummock::iterator::HummockIterator;
     use crate::hummock::iterator::test_utils::{
         TEST_KEYS_COUNT, default_builder_opt_for_test, gen_iterator_test_sstable_info,
         iterator_test_key_of, iterator_test_value_of, mock_sstable_store,
     };
     use crate::hummock::sstable::SstableIteratorReadOptions;
+    #[cfg(feature = "failpoints")]
+    use crate::monitor::StoreLocalStatistic;
 
     #[tokio::test]
     async fn test_concat_iterator() {
@@ -222,6 +229,73 @@ mod tests {
         assert_eq!(
             val.into_user_value().unwrap(),
             iterator_test_value_of(TEST_KEYS_COUNT * 4).as_slice()
+        );
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "failpoints")]
+    async fn test_concat_init_error_retains_current_iterator_and_candidate_stats() {
+        let sstable_store = mock_sstable_store().await;
+        let table0 = gen_iterator_test_sstable_info(
+            0,
+            default_builder_opt_for_test(),
+            |x| x,
+            sstable_store.clone(),
+            TEST_KEYS_COUNT,
+        )
+        .await;
+        let table1 = gen_iterator_test_sstable_info(
+            1,
+            default_builder_opt_for_test(),
+            |x| TEST_KEYS_COUNT + x,
+            sstable_store.clone(),
+            TEST_KEYS_COUNT,
+        )
+        .await;
+
+        // Warm the candidate's first block so its initialization records a cache hit.
+        let mut warmup_stats = StoreLocalStatistic::default();
+        let sstable = sstable_store
+            .sstable(&table1, &mut warmup_stats)
+            .await
+            .unwrap();
+        sstable_store
+            .get(
+                &sstable,
+                0,
+                CachePolicy::Fill(Hint::Normal),
+                &mut warmup_stats,
+            )
+            .await
+            .unwrap();
+        warmup_stats.discard();
+
+        let mut iter = ConcatIterator::new(
+            vec![table0, table1],
+            sstable_store,
+            Arc::new(SstableIteratorReadOptions::default()),
+        );
+        iter.rewind().await.unwrap();
+
+        let mut before = StoreLocalStatistic::default();
+        iter.collect_local_statistic(&mut before);
+
+        fail::cfg("concat_iter_after_seek_before_init_complete", "return").unwrap();
+        let result = iter
+            .seek(iterator_test_key_of(TEST_KEYS_COUNT).to_ref())
+            .await;
+        fail::remove("concat_iter_after_seek_before_init_complete");
+
+        assert!(result.is_err());
+        assert!(iter.is_valid());
+        assert_eq!(iter.key(), iterator_test_key_of(0).to_ref());
+
+        let mut after = StoreLocalStatistic::default();
+        iter.collect_local_statistic(&mut after);
+        assert_eq!(
+            after.cache_data_block_total,
+            before.cache_data_block_total + 1,
+            "failed candidate initialization must settle its cache-hit statistic"
         );
     }
 }

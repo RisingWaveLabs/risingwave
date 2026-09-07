@@ -1,0 +1,32 @@
+init_sqls = [
+    'CREATE SCHEMA IF NOT EXISTS demo_db',
+    'DROP TABLE IF EXISTS demo_db.manifest_rewrite_vacuum_table PURGE',
+    '''
+    CREATE TABLE demo_db.manifest_rewrite_vacuum_table (
+        id int
+    ) USING iceberg TBLPROPERTIES (
+        'format-version' = '2'
+    );
+    ''',
+]
+
+slt = 'test_case/manifest_rewrite_vacuum.slt'
+
+verify_schema = ['long', 'long', 'long']
+
+verify_sql = '''
+SELECT
+    count(*),
+    sum(added_data_files_count + existing_data_files_count),
+    (SELECT count(*) FROM demo_db.manifest_rewrite_vacuum_table)
+FROM demo_db.manifest_rewrite_vacuum_table.manifests
+'''
+
+verify_data = """
+1,3,3
+"""
+
+drop_sqls = [
+    'DROP TABLE IF EXISTS demo_db.manifest_rewrite_vacuum_table PURGE',
+    'DROP SCHEMA IF EXISTS demo_db',
+]

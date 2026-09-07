@@ -52,7 +52,6 @@ pub const STARROCKS_SINK: &str = "starrocks";
 const STARROCK_MYSQL_PREFER_SOCKET: &str = "false";
 const STARROCK_MYSQL_MAX_ALLOWED_PACKET: usize = 1024;
 const STARROCK_MYSQL_WAIT_TIMEOUT: usize = 28800;
-
 pub const fn _default_stream_load_http_timeout_ms() -> u64 {
     30 * 1000
 }
@@ -128,8 +127,20 @@ pub struct StarrocksConfig {
     #[serde(rename = "starrocks.partial_update")]
     pub partial_update: Option<String>,
 
+    /// The maximum size in bytes for each `StarRocks` stream load request payload.
+    /// Defaults to unlimited.
+    #[serde(rename = "starrocks.max_batch_size_bytes")]
+    #[serde_as(as = "Option<DisplayFromStr>")]
+    #[with_option(allow_alter_on_fly)]
+    pub max_batch_size_bytes: Option<u64>,
+
     pub r#type: String, // accept "append-only" or "upsert"
+
+    #[serde(flatten)]
+    pub unknown_fields: std::collections::HashMap<String, String>,
 }
+
+crate::impl_sink_unknown_fields!(StarrocksConfig);
 
 impl EnforceSecret for StarrocksConfig {
     fn enforce_one(prop: &str) -> crate::error::ConnectorResult<()> {
@@ -159,8 +170,50 @@ impl StarrocksConfig {
                 "`commit_checkpoint_interval` must be greater than 0"
             )));
         }
+        if let Some(0) = config.max_batch_size_bytes {
+            return Err(SinkError::Config(anyhow!(
+                "`starrocks.max_batch_size_bytes` must be greater than 0"
+            )));
+        }
         Ok(config)
     }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct LoadRequestSizeDecision {
+    finish_current_load: bool,
+    next_batch_size_bytes: u64,
+}
+
+fn decide_load_request_size(
+    current_batch_size_bytes: u64,
+    row_size: u64,
+    max_batch_size_bytes: u64,
+) -> Result<LoadRequestSizeDecision> {
+    if row_size > max_batch_size_bytes {
+        return Err(SinkError::Starrocks(format!(
+            "single row payload size {} bytes exceeds `starrocks.max_batch_size_bytes` limit {} bytes",
+            row_size, max_batch_size_bytes
+        )));
+    }
+
+    if current_batch_size_bytes > 0
+        && current_batch_size_bytes
+            .checked_add(row_size)
+            .is_none_or(|next_batch_size_bytes| next_batch_size_bytes > max_batch_size_bytes)
+    {
+        return Ok(LoadRequestSizeDecision {
+            finish_current_load: true,
+            next_batch_size_bytes: row_size,
+        });
+    }
+
+    Ok(LoadRequestSizeDecision {
+        finish_current_load: false,
+        next_batch_size_bytes: current_batch_size_bytes
+            .checked_add(row_size)
+            .expect("sum is checked against max_batch_size_bytes above"),
+    })
 }
 
 #[derive(Debug)]
@@ -292,6 +345,9 @@ impl StarrocksSink {
                 "BYTEA is not supported for Starrocks sink. Please convert to VARCHAR or other supported types.".to_owned(),
             )),
             risingwave_common::types::DataType::Jsonb => Ok(starrocks_data_type.contains("json")),
+            risingwave_common::types::DataType::Variant => Err(SinkError::Starrocks(
+                "VARIANT is not supported for Starrocks sink.".to_owned(),
+            )),
             risingwave_common::types::DataType::Serial => {
                 Ok(starrocks_data_type.contains("bigint"))
             }
@@ -312,6 +368,8 @@ impl Sink for StarrocksSink {
     type LogSinker = DecoupleCheckpointLogSinkerOf<StarrocksSinkWriter>;
 
     const SINK_NAME: &'static str = STARROCKS_SINK;
+
+    crate::impl_validate_sink_unknown_fields!();
 
     async fn validate(&self) -> Result<()> {
         if !self.is_append_only && self.pk_indices.is_empty() {
@@ -382,7 +440,6 @@ impl Sink for StarrocksSink {
 }
 
 pub struct StarrocksSinkWriter {
-    pub config: StarrocksConfig,
     #[expect(dead_code)]
     schema: Schema,
     #[expect(dead_code)]
@@ -392,6 +449,8 @@ pub struct StarrocksSinkWriter {
     txn_client: Arc<StarrocksTxnClient>,
     row_encoder: JsonEncoder,
     curr_txn_label: Option<String>,
+    max_batch_size_bytes: Option<u64>,
+    current_batch_size_bytes: u64,
 }
 
 impl TryFrom<SinkParam> for StarrocksSink {
@@ -446,7 +505,6 @@ impl StarrocksSinkWriter {
             StarrocksTxnRequestBuilder::new(url, header, config.stream_load_http_timeout_ms)?;
 
         Ok(Self {
-            config,
             schema: schema.clone(),
             pk_indices,
             is_append_only,
@@ -454,7 +512,58 @@ impl StarrocksSinkWriter {
             txn_client: Arc::new(StarrocksTxnClient::new(txn_request_builder)),
             row_encoder: JsonEncoder::new_with_starrocks(schema, None, time_zone),
             curr_txn_label: None,
+            max_batch_size_bytes: config.max_batch_size_bytes,
+            current_batch_size_bytes: 0,
         })
+    }
+
+    async fn finish_load_request(&mut self) -> Result<()> {
+        if let Some(client) = self.client.take() {
+            client.finish().await?;
+            self.current_batch_size_bytes = 0;
+        }
+        Ok(())
+    }
+
+    async fn ensure_load_request(&mut self) -> Result<()> {
+        if self.client.is_none() {
+            let txn_label = self.curr_txn_label.clone().ok_or_else(|| {
+                SinkError::Starrocks("Can't find current starrocks transaction label".to_owned())
+            })?;
+            self.client = Some(StarrocksClient::new(self.txn_client.load(txn_label).await?));
+            self.current_batch_size_bytes = 0;
+        }
+        Ok(())
+    }
+
+    async fn write_row_json(&mut self, row_json_string: String) -> Result<()> {
+        let row_size = row_json_string.len() as u64;
+        let size_decision = self
+            .max_batch_size_bytes
+            .map(|max_batch_size_bytes| {
+                decide_load_request_size(
+                    self.current_batch_size_bytes,
+                    row_size,
+                    max_batch_size_bytes,
+                )
+            })
+            .transpose()?;
+        if size_decision
+            .as_ref()
+            .is_some_and(|decision| decision.finish_current_load)
+        {
+            self.finish_load_request().await?;
+        }
+        self.ensure_load_request().await?;
+        self.client
+            .as_mut()
+            .ok_or_else(|| SinkError::Starrocks("Can't find starrocks sink insert".to_owned()))?
+            .write(row_json_string.into())
+            .await?;
+        if let Some(size_decision) = size_decision {
+            self.current_batch_size_bytes = size_decision.next_batch_size_bytes;
+        }
+        Ok(())
     }
 
     async fn append_only(&mut self, chunk: StreamChunk) -> Result<()> {
@@ -463,11 +572,7 @@ impl StarrocksSinkWriter {
                 continue;
             }
             let row_json_string = Value::Object(self.row_encoder.encode(row)?).to_string();
-            self.client
-                .as_mut()
-                .ok_or_else(|| SinkError::Starrocks("Can't find starrocks sink insert".to_owned()))?
-                .write(row_json_string.into())
-                .await?;
+            self.write_row_json(row_json_string).await?;
         }
         Ok(())
     }
@@ -482,15 +587,9 @@ impl StarrocksSinkWriter {
                         Value::String("0".to_owned()),
                     );
                     let row_json_string = serde_json::to_string(&row_json_value).map_err(|e| {
-                        SinkError::Starrocks(format!("Json derialize error: {}", e.as_report()))
+                        SinkError::Starrocks(format!("Json serialize error: {}", e.as_report()))
                     })?;
-                    self.client
-                        .as_mut()
-                        .ok_or_else(|| {
-                            SinkError::Starrocks("Can't find starrocks sink insert".to_owned())
-                        })?
-                        .write(row_json_string.into())
-                        .await?;
+                    self.write_row_json(row_json_string).await?;
                 }
                 Op::Delete => {
                     let mut row_json_value = self.row_encoder.encode(row)?;
@@ -499,15 +598,9 @@ impl StarrocksSinkWriter {
                         Value::String("1".to_owned()),
                     );
                     let row_json_string = serde_json::to_string(&row_json_value).map_err(|e| {
-                        SinkError::Starrocks(format!("Json derialize error: {}", e.as_report()))
+                        SinkError::Starrocks(format!("Json serialize error: {}", e.as_report()))
                     })?;
-                    self.client
-                        .as_mut()
-                        .ok_or_else(|| {
-                            SinkError::Starrocks("Can't find starrocks sink insert".to_owned())
-                        })?
-                        .write(row_json_string.into())
-                        .await?;
+                    self.write_row_json(row_json_string).await?;
                 }
                 Op::UpdateDelete => {}
                 Op::UpdateInsert => {
@@ -517,15 +610,9 @@ impl StarrocksSinkWriter {
                         Value::String("0".to_owned()),
                     );
                     let row_json_string = serde_json::to_string(&row_json_value).map_err(|e| {
-                        SinkError::Starrocks(format!("Json derialize error: {}", e.as_report()))
+                        SinkError::Starrocks(format!("Json serialize error: {}", e.as_report()))
                     })?;
-                    self.client
-                        .as_mut()
-                        .ok_or_else(|| {
-                            SinkError::Starrocks("Can't find starrocks sink insert".to_owned())
-                        })?
-                        .write(row_json_string.into())
-                        .await?;
+                    self.write_row_json(row_json_string).await?;
                 }
             }
         }
@@ -600,13 +687,7 @@ impl SinkWriter for StarrocksSinkWriter {
                     txn_label, txn_label_res
                 )));
             }
-            self.curr_txn_label = Some(txn_label.clone());
-        }
-        if self.client.is_none() {
-            let txn_label = self.curr_txn_label.clone();
-            self.client = Some(StarrocksClient::new(
-                self.txn_client.load(txn_label.unwrap()).await?,
-            ));
+            self.curr_txn_label = Some(txn_label);
         }
         if self.is_append_only {
             self.append_only(chunk).await
@@ -616,14 +697,12 @@ impl SinkWriter for StarrocksSinkWriter {
     }
 
     async fn barrier(&mut self, is_checkpoint: bool) -> Result<()> {
-        if let Some(client) = self.client.take() {
-            // Here we finish the `/api/transaction/load` request when a barrier is received. Therefore,
-            // one or more load requests should be made within one commit_checkpoint_interval period.
-            // StarRocks will take care of merging those splits into a larger one during prepare transaction.
-            // Thus, only one version will be produced when the transaction is committed. See Stream Load
-            // transaction interface for more information.
-            client.finish().await?;
-        }
+        // Here we finish the `/api/transaction/load` request when a barrier is received. Therefore,
+        // one or more load requests should be made within one commit_checkpoint_interval period.
+        // StarRocks will take care of merging those splits into a larger one during prepare transaction.
+        // Thus, only one version will be produced when the transaction is committed. See Stream Load
+        // transaction interface for more information.
+        self.finish_load_request().await?;
 
         if is_checkpoint
             && let Some(txn_label) = self.curr_txn_label.take()
@@ -916,4 +995,88 @@ mod tests {
         }
     }
 
+    fn base_properties() -> BTreeMap<String, String> {
+        BTreeMap::from([
+            ("starrocks.host".to_owned(), "127.0.0.1".to_owned()),
+            ("starrocks.mysqlport".to_owned(), "9030".to_owned()),
+            ("starrocks.httpport".to_owned(), "8030".to_owned()),
+            ("starrocks.user".to_owned(), "root".to_owned()),
+            ("starrocks.password".to_owned(), "".to_owned()),
+            ("starrocks.database".to_owned(), "demo".to_owned()),
+            ("starrocks.table".to_owned(), "sink_table".to_owned()),
+            ("type".to_owned(), SINK_TYPE_APPEND_ONLY.to_owned()),
+        ])
+    }
+
+    #[test]
+    fn starrocks_max_batch_size_bytes_defaults_to_none() {
+        let config = StarrocksConfig::from_btreemap(base_properties()).unwrap();
+
+        assert_eq!(config.max_batch_size_bytes, None);
+    }
+
+    #[test]
+    fn starrocks_max_batch_size_bytes_parses() {
+        let mut properties = base_properties();
+        properties.insert("starrocks.max_batch_size_bytes".to_owned(), "2".to_owned());
+
+        let config = StarrocksConfig::from_btreemap(properties).unwrap();
+
+        assert_eq!(config.max_batch_size_bytes, Some(2));
+    }
+
+    #[test]
+    fn starrocks_max_batch_size_bytes_rejects_zero() {
+        let mut properties = base_properties();
+        properties.insert("starrocks.max_batch_size_bytes".to_owned(), "0".to_owned());
+
+        let err = StarrocksConfig::from_btreemap(properties).unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("`starrocks.max_batch_size_bytes` must be greater than 0")
+        );
+    }
+
+    #[test]
+    fn starrocks_batch_size_allows_exact_limit() {
+        assert_eq!(
+            decide_load_request_size(3, 2, 5).unwrap(),
+            LoadRequestSizeDecision {
+                finish_current_load: false,
+                next_batch_size_bytes: 5,
+            }
+        );
+    }
+
+    #[test]
+    fn starrocks_batch_size_rolls_over_before_exceeding_limit() {
+        assert_eq!(
+            decide_load_request_size(4, 2, 5).unwrap(),
+            LoadRequestSizeDecision {
+                finish_current_load: true,
+                next_batch_size_bytes: 2,
+            }
+        );
+    }
+
+    #[test]
+    fn starrocks_batch_size_rejects_single_oversized_row() {
+        let err = decide_load_request_size(0, 6, 5).unwrap_err();
+
+        assert!(err.to_string().contains(
+            "single row payload size 6 bytes exceeds `starrocks.max_batch_size_bytes` limit 5 bytes"
+        ));
+    }
+
+    #[test]
+    fn starrocks_batch_size_rolls_over_on_u64_overflow() {
+        assert_eq!(
+            decide_load_request_size(u64::MAX, 1, u64::MAX).unwrap(),
+            LoadRequestSizeDecision {
+                finish_current_load: true,
+                next_batch_size_bytes: 1,
+            }
+        );
+    }
 }

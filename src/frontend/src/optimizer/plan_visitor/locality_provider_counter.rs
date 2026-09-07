@@ -12,21 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::{DefaultBehavior, Merge, StreamPlanVisitor};
-use crate::optimizer::plan_node::{PlanTreeNodeUnary, StreamLocalityProvider, StreamPlanRef};
+use super::{DefaultBehavior, LogicalPlanVisitor, Merge};
+use crate::optimizer::plan_node::{LogicalLocalityProvider, LogicalPlanRef, PlanTreeNodeUnary};
 use crate::optimizer::plan_visitor::PlanVisitor;
 
 #[derive(Debug, Clone, Default)]
 pub struct LocalityProviderCounter {}
 
 impl LocalityProviderCounter {
-    pub fn count(plan: StreamPlanRef) -> usize {
+    pub fn count(plan: LogicalPlanRef) -> usize {
         let mut locality_provider_counter = Self::default();
         locality_provider_counter.visit(plan)
     }
 }
 
-impl StreamPlanVisitor for LocalityProviderCounter {
+impl LogicalPlanVisitor for LocalityProviderCounter {
     type Result = usize;
 
     type DefaultBehavior = impl DefaultBehavior<Self::Result>;
@@ -35,9 +35,9 @@ impl StreamPlanVisitor for LocalityProviderCounter {
         Merge(|a: usize, b| a + b)
     }
 
-    fn visit_stream_locality_provider(
+    fn visit_logical_locality_provider(
         &mut self,
-        locality_provider: &StreamLocalityProvider,
+        locality_provider: &LogicalLocalityProvider,
     ) -> Self::Result {
         1 + self.visit(locality_provider.input())
     }

@@ -1,0 +1,501 @@
+statement ok
+create table variant_table_definition (
+    id int primary key,
+    payload variant,
+    payloads variant[]
+);
+
+query TTTTTT
+select
+    variant_typeof('1'::variant),
+    variant_typeof('1.5'::variant),
+    variant_typeof(to_variant(1::int4)),
+    variant_typeof(to_variant(1::int8)),
+    variant_typeof(to_variant(1.0::decimal)),
+    variant_typeof(to_variant(1.0::double precision));
+----
+int64 double int32 int64 decimal16 double
+
+statement ok
+create table variant_full_type_t (
+    b boolean,
+    i2 smallint,
+    i4 integer,
+    i8 bigint,
+    f4 real,
+    f8 double precision,
+    dec decimal,
+    str varchar,
+    bin bytea,
+    d date,
+    tm time,
+    ts timestamp,
+    tstz timestamptz,
+    js jsonb,
+    arr integer[],
+    st struct<a int, b varchar>,
+    mp map(varchar, int)
+);
+
+statement ok
+insert into variant_full_type_t values (
+    true,
+    1::smallint,
+    1::integer,
+    1::bigint,
+    1.5::real,
+    1.5::double precision,
+    123.45::decimal,
+    'hello',
+    '\x1234'::bytea,
+    date '2024-01-02',
+    time '03:04:05.006',
+    timestamp '2024-01-02 03:04:05.006',
+    '2024-01-02 03:04:05.006+00:00'::timestamptz,
+    '{"a":1}'::jsonb,
+    array[1, 2]::integer[],
+    row(1, 'a'),
+    map{'k': 1}
+);
+
+statement ok
+flush
+
+query TT rowsort
+with typed as (
+    select _row_id, * from variant_full_type_t
+), variants(input_type, value) as (
+    values
+        ('sql_null', to_variant(null::integer)),
+        ('parse_json_null', 'null'::variant),
+        ('parse_json_boolean', 'true'::variant),
+        ('parse_json_integer', '1'::variant),
+        ('parse_json_float', '1.5'::variant),
+        ('parse_json_string', '"hello"'::variant),
+        ('parse_json_array', '[1,2]'::variant),
+        ('parse_json_object', '{"a":1}'::variant)
+    union all
+    select 'boolean', to_variant(b) from typed
+    union all
+    select 'int2', to_variant(i2) from typed
+    union all
+    select 'int4', to_variant(i4) from typed
+    union all
+    select 'int8', to_variant(i8) from typed
+    union all
+    select 'serial', to_variant(_row_id) from typed
+    union all
+    select 'float4', to_variant(f4) from typed
+    union all
+    select 'float8', to_variant(f8) from typed
+    union all
+    select 'decimal', to_variant(dec) from typed
+    union all
+    select 'varchar', to_variant(str) from typed
+    union all
+    select 'bytea', to_variant(bin) from typed
+    union all
+    select 'date', to_variant(d) from typed
+    union all
+    select 'time', to_variant(tm) from typed
+    union all
+    select 'timestamp', to_variant(ts) from typed
+    union all
+    select 'timestamptz', to_variant(tstz) from typed
+    union all
+    select 'jsonb', to_variant(js) from typed
+    union all
+    select 'list', to_variant(arr) from typed
+    union all
+    select 'struct', to_variant(st) from typed
+    union all
+    select 'map', to_variant(mp) from typed
+    union all
+    select 'variant', to_variant(to_variant(i4)) from typed
+)
+select input_type, variant_typeof(value) from variants;
+----
+boolean boolean
+bytea binary
+date date
+decimal decimal16
+float4 double
+float8 double
+int2 int16
+int4 int32
+int8 int64
+jsonb object
+list array
+map object
+parse_json_array array
+parse_json_boolean boolean
+parse_json_float double
+parse_json_integer int64
+parse_json_null null
+parse_json_object object
+parse_json_string string
+serial int64
+sql_null null
+struct object
+time time
+timestamp timestamp_ntz_micros
+timestamptz timestamp_micros
+varchar string
+variant int32
+
+query TT
+select
+    variant_typeof(variant_get(to_variant(map {'k': 1}), '$.k')),
+    variant_typeof(variant_get(to_variant(map {1: 10}), '$["1"]'));
+----
+int32 int32
+
+query TTTTTTTTT
+with v as (
+    select '{"a":[1,1.5,true,null,"x",{"b":[2]}]}'::variant as value
+)
+select
+    variant_typeof(variant_get(value, '$.a')),
+    variant_typeof(variant_get(value, '$.a[0]')),
+    variant_typeof(variant_get(value, '$.a[1]')),
+    variant_typeof(variant_get(value, '$.a[2]')),
+    variant_typeof(variant_get(value, '$.a[3]')),
+    variant_typeof(variant_get(value, '$.a[4]')),
+    variant_typeof(variant_get(value, '$.a[5]')),
+    variant_typeof(variant_get(value, '$.a[5].b')),
+    variant_typeof(variant_get(value, '$.a[5].b[0]'))
+from v;
+----
+array int64 double boolean null string object array int64
+
+query BBB
+with v as (
+    select '{"a":[1]}'::variant as value
+)
+select
+    variant_get(value, '$.missing') is null,
+    try_variant_get(value, '$.') is null,
+    try_variant_get(value, '$.missing') is null
+from v;
+----
+t t t
+
+statement error invalid variant path
+select variant_get('{"a":[1]}'::variant, '$.');
+
+query TTTTTTT
+with v as (
+    select
+        to_variant(array[array[1, 2], array[3, 4]]::integer[][]) as nested_ints,
+        to_variant(array[
+            to_variant(1::smallint),
+            to_variant(1::integer),
+            '1'::variant
+        ]::variant[]) as variant_values
+)
+select
+    variant_typeof(nested_ints),
+    variant_typeof(variant_get(nested_ints, '$[0]')),
+    variant_typeof(variant_get(nested_ints, '$[0][0]')),
+    variant_typeof(variant_values),
+    variant_typeof(variant_get(variant_values, '$[0]')),
+    variant_typeof(variant_get(variant_values, '$[1]')),
+    variant_typeof(variant_get(variant_values, '$[2]'))
+from v;
+----
+array array int32 array int16 int32 int64
+
+# Non-finite floats normalize to canonical variant doubles and render as strings,
+# following to_jsonb on float8.
+query TTTTTT
+select
+    variant_typeof(to_variant('NaN'::float8)),
+    to_variant('NaN'::float8)::varchar,
+    to_variant('NaN'::float8)::jsonb = '"NaN"'::jsonb,
+    to_variant('Infinity'::float8)::varchar,
+    to_variant('-Infinity'::float8)::varchar,
+    variant_typeof('"NaN"'::variant);
+----
+double "NaN" t "Infinity" "-Infinity" string
+
+# Variant V1 has no primitive for these, so they are stored as text, exactly as to_jsonb does.
+
+query TBTBTB
+select
+    variant_typeof(to_variant(interval '1 day')),
+    to_variant(interval '1 day')::varchar = to_jsonb(interval '1 day')::varchar,
+    variant_typeof(to_variant(hex_to_int256('0x11'))),
+    to_variant(hex_to_int256('0x11'))::varchar = to_jsonb(hex_to_int256('0x11'))::varchar,
+    variant_typeof(to_variant('[1,2,3]'::vector(3))),
+    to_variant('[1,2,3]'::vector(3))::varchar = to_jsonb('[1,2,3]'::vector(3))::varchar;
+----
+string t string t string t
+
+# Nested inside a list, struct or map they are stored the same way.
+
+query TTT
+select
+    variant_typeof(variant_get(to_variant(array[interval '1 day']), '$[0]')),
+    variant_typeof(variant_get(to_variant(row(interval '1 day')), '$.f1')),
+    variant_typeof(variant_get(to_variant(map{'k': interval '1 day'}), '$.k'));
+----
+string string string
+
+# Variant objects require unique field names while RisingWave struct types do not.
+
+statement error duplicate field name
+select to_variant(row(1, 'x')::struct<a int, a varchar>);
+
+statement error duplicate field name
+select to_variant(row(row(1, 'x')::struct<a int, a varchar>)::struct<s struct<a int, a varchar>>);
+
+statement ok
+drop table variant_full_type_t;
+
+statement ok
+drop table variant_table_definition;
+
+# VARIANT must be rejected from storage keys: table pk, index keys, and MV ORDER BY.
+
+statement error is part of the storage primary key
+create table variant_pk_t (v variant primary key);
+
+statement error is part of the storage primary key
+create table variant_nested_pk_t (s struct<v variant> primary key);
+
+statement ok
+create table variant_key_source_t (id int primary key, payload variant);
+
+statement error is part of the storage primary key
+create index variant_idx on variant_key_source_t (payload);
+
+statement error is part of the storage primary key
+create materialized view variant_order_mv as
+select payload from variant_key_source_t order by payload;
+
+statement ok
+drop table variant_key_source_t;
+
+# VARIANT has byte-wise equality only, so batch grouping, ordering and set operations are
+# rejected too.
+
+statement ok
+create table variant_batch_t (id int, v variant, s struct<v variant>, arr variant[]);
+
+statement error should not be in the aggregation group key
+select v, count(*) from variant_batch_t group by v;
+
+statement error should not be in the aggregation group key
+select distinct v from variant_batch_t;
+
+statement error should not be in the aggregation group key
+select distinct s from variant_batch_t;
+
+statement error should not be in the aggregation group key
+select v from variant_batch_t union select v from variant_batch_t;
+
+statement error should not be in the aggregation group key
+select v from variant_batch_t intersect select v from variant_batch_t;
+
+statement error should not be in the aggregation group key
+select v from variant_batch_t except select v from variant_batch_t;
+
+statement error should not be in the ORDER BY
+select v from variant_batch_t order by v;
+
+statement error should not be in the TopN order key
+select v from variant_batch_t order by v limit 10;
+
+# An aggregate call's own ORDER BY / DISTINCT compares by value too.
+
+statement error should not be in the aggregation order key
+select array_agg(id order by v) from variant_batch_t;
+
+# `count(distinct)` is splittable, so logical optimization turns the distinct into a group key
+# before the batch check runs. `array_agg(distinct)` is not, and keeps the distinct argument.
+statement error should not be in the aggregation group key
+select count(distinct v) from variant_batch_t;
+
+statement error should not be in the distinct aggregation argument
+select array_agg(distinct v) from variant_batch_t;
+
+# A bare VARIANT has no equality function at all, so a join on it never binds.
+
+statement error function equal\(variant, variant\) does not exist
+select a.id from variant_batch_t a join variant_batch_t b on a.v = b.v;
+
+# Wrapping it in a list or a struct picks up the generic `anyarray` / `struct` equality, which is
+# how a VARIANT can still reach a join key. Batch has no state table to catch it later.
+
+statement error should not be in the join key
+select a.id from variant_batch_t a join variant_batch_t b on a.s = b.s;
+
+statement error should not be in the join key
+select a.id from variant_batch_t a join variant_batch_t b on a.arr = b.arr;
+
+statement error should not be in the join key
+select id from variant_batch_t where arr in (select arr from variant_batch_t);
+
+statement error should not be in the join key
+create materialized view variant_join_mv as
+select a.id from variant_batch_t a join variant_batch_t b on a.arr = b.arr;
+
+# Positions that neither compare nor deduplicate stay allowed.
+
+statement ok
+select v from variant_batch_t union all select v from variant_batch_t;
+
+statement ok
+select v, variant_typeof(v) from variant_batch_t order by id;
+
+statement ok
+select count(*) from variant_batch_t;
+
+statement ok
+drop table variant_batch_t;
+
+# VARIANT columns are rejected for row encodings without variant parser support.
+
+statement error is not supported for this source encoding yet
+create table variant_json_encode_t (id int, payload variant)
+with (
+    connector = 'posix_fs',
+    posix_fs.root = '/tmp',
+    match_pattern = '*.json'
+) format plain encode json;
+
+# Nested VARIANT is rejected too.
+
+statement error is not supported for this source encoding yet
+create table variant_json_encode_arr_t (id int, payloads variant[])
+with (
+    connector = 'posix_fs',
+    posix_fs.root = '/tmp',
+    match_pattern = '*.json'
+) format plain encode json;
+
+statement error is not supported for this source encoding yet
+create table variant_json_encode_struct_t (id int, s struct<v variant>)
+with (
+    connector = 'posix_fs',
+    posix_fs.root = '/tmp',
+    match_pattern = '*.json'
+) format plain encode json;
+
+# ALTER SOURCE ADD COLUMN must be gated the same way as CREATE.
+
+statement ok
+create source variant_alter_source_t (id int)
+with (
+    connector = 'datagen',
+    fields.id.kind = 'sequence',
+    fields.id.start = '1',
+    fields.id.end = '10',
+    datagen.rows.per.second = '1',
+    datagen.split.num = '1'
+) format plain encode json;
+
+statement error is not supported for this source encoding yet
+alter source variant_alter_source_t add column v variant;
+
+statement error is not supported for this source encoding yet
+alter source variant_alter_source_t add column s struct<v variant>;
+
+statement ok
+drop source variant_alter_source_t;
+
+# ENCODE PARQUET reads variant via the Parquet Variant extension type, so ALTER may add one.
+# Skipped under madsim: once the source is created, the meta split enumerator lists the
+# directory via real tokio::fs, which panics outside a tokio runtime.
+
+skipif madsim
+statement ok
+create source variant_alter_parquet_source_t (id int)
+with (
+    connector = 'posix_fs',
+    posix_fs.root = '/tmp',
+    match_pattern = '*.parquet'
+) format plain encode parquet;
+
+skipif madsim
+statement ok
+alter source variant_alter_parquet_source_t add column v variant;
+
+skipif madsim
+statement ok
+drop source variant_alter_parquet_source_t;
+
+# VARIANT is rejected in non-SQL UDF signatures (both argument and return types).
+
+statement error VARIANT is not supported in UDFs yet
+create function variant_arg_udf(variant) returns int as 'variant_arg_udf' using link 'http://localhost:8815';
+
+statement error VARIANT is not supported in UDFs yet
+create function variant_ret_udf(int) returns variant as 'variant_ret_udf' using link 'http://localhost:8815';
+
+# Most external encoders cannot serialize VARIANT values yet: creation is rejected
+# unless the sink does not encode (blackhole, sink-into-table). Iceberg is supported
+# separately through its native Parquet Variant layout.
+
+statement ok
+create table variant_sink_t (id int primary key, v variant, s struct<sv variant>);
+
+# External sink with a variant column: rejected before any connection is attempted.
+statement error sinking VARIANT columns is not supported yet
+create sink variant_sink_rejected from variant_sink_t
+with (connector = 'kafka', properties.bootstrap.server = 'localhost:29092', topic = 'variant_sink')
+format upsert encode json;
+
+# A variant nested inside a struct is rejected too.
+statement error sinking VARIANT columns is not supported yet
+create sink variant_sink_rejected as select id, s from variant_sink_t
+with (connector = 'kafka', properties.bootstrap.server = 'localhost:29092', topic = 'variant_sink')
+format upsert encode json;
+
+# Blackhole sinks do not encode values: allowed.
+statement ok
+create sink variant_sink_blackhole from variant_sink_t with (connector = 'blackhole');
+
+statement ok
+drop sink variant_sink_blackhole;
+
+# Sink-into-table does not use an external encoder: allowed.
+statement ok
+create table variant_sink_target (id int primary key, v variant, s struct<sv variant>);
+
+statement ok
+create sink variant_sink_into_table into variant_sink_target from variant_sink_t;
+
+statement ok
+drop sink variant_sink_into_table;
+
+statement ok
+drop table variant_sink_target;
+
+statement ok
+drop table variant_sink_t;
+
+# ALTER TABLE on a plain table may add and drop VARIANT columns, with data intact.
+
+statement ok
+create table variant_alter_plain_t (id int primary key);
+
+statement ok
+alter table variant_alter_plain_t add column v variant;
+
+statement ok
+insert into variant_alter_plain_t values (1, '{"a":1}'::variant);
+
+statement ok
+flush;
+
+query T
+select v::jsonb = '{"a":1}'::jsonb from variant_alter_plain_t;
+----
+t
+
+statement ok
+alter table variant_alter_plain_t drop column v;
+
+statement ok
+drop table variant_alter_plain_t;

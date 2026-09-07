@@ -117,7 +117,10 @@ jobs:
           commit_sha: ${{ needs.get-target-release-branches.outputs.pr_sha || '' }}
           pr_branch: ${{ matrix.branch }}
           pr_labels: "cherry-pick"
-          pr_body: "Cherry picking #${{ needs.get-target-release-branches.outputs.pr_number }} onto branch ${{ matrix.branch }}"
+          pr_body: |
+            Cherry picking #${{ needs.get-target-release-branches.outputs.pr_number }} onto branch ${{ matrix.branch }}
+
+            Original-PR: ${{ github.repository }}#${{ needs.get-target-release-branches.outputs.pr_number }}
         env:
           GITHUB_TOKEN: ${{ secrets.RISINGWAVE_CI_GITHUB_TOKEN }}
 

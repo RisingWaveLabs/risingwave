@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::{Context, Poll};
 
@@ -24,10 +23,22 @@ use tower::{Layer, Service};
 /// Manages the await-trees of `gRPC` requests that are currently served by a node.
 pub type AwaitTreeRegistryRef = await_tree::Registry;
 
+static NEXT_GRPC_CALL_ID: AtomicU64 = AtomicU64::new(0);
+
 /// Await-tree key type for `gRPC` calls.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct GrpcCall {
     pub desc: String,
+}
+
+impl GrpcCall {
+    /// Creates a key with an ID shared by all middleware layers and registries in this process.
+    pub fn new(desc: impl Into<String>) -> Self {
+        let id = NEXT_GRPC_CALL_ID.fetch_add(1, Ordering::Relaxed);
+        Self {
+            desc: format!("{} - {id}", desc.into()),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -54,7 +65,6 @@ impl<S> Layer<S> for AwaitTreeMiddlewareLayer {
         AwaitTreeMiddleware {
             inner: service,
             registry: self.registry.clone(),
-            next_id: Default::default(),
         }
     }
 }
@@ -63,7 +73,6 @@ impl<S> Layer<S> for AwaitTreeMiddlewareLayer {
 pub struct AwaitTreeMiddleware<S> {
     inner: S,
     registry: Option<AwaitTreeRegistryRef>,
-    next_id: Arc<AtomicU64>,
 }
 
 impl<S> Service<http::Request<Body>> for AwaitTreeMiddleware<S>
@@ -90,13 +99,11 @@ where
         let clone = self.inner.clone();
         let mut inner = std::mem::replace(&mut self.inner, clone);
 
-        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
-        let desc = if let Some(authority) = req.uri().authority() {
-            format!("{authority} - {id}")
-        } else {
-            format!("?? - {id}")
-        };
-        let key = GrpcCall { desc };
+        let desc = req
+            .uri()
+            .authority()
+            .map_or("??", |authority| authority.as_str());
+        let key = GrpcCall::new(desc);
 
         Either::Right(async move {
             let root = registry.register(key, req.uri().path());

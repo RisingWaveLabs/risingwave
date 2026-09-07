@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::BTreeMap;
+
 use risingwave_common::catalog::Schema;
 use tonic::async_trait;
 
@@ -65,6 +67,10 @@ impl Sink for ElasticSearchSink {
 
     const SINK_NAME: &'static str = ES_SINK;
 
+    fn validate_unknown_fields(&self) -> Result<()> {
+        crate::sink::validate_sink_unknown_fields(&self.config)
+    }
+
     fn support_schema_change() -> bool {
         true
     }
@@ -73,6 +79,11 @@ impl Sink for ElasticSearchSink {
         self.config.validate_config(&self.schema)?;
         let client = self.config.build_client(Self::SINK_NAME)?;
         client.ping().await?;
+        Ok(())
+    }
+
+    fn validate_alter_config(config: &BTreeMap<String, String>) -> Result<()> {
+        ElasticSearchConfig::from_btreemap(config.clone())?;
         Ok(())
     }
 

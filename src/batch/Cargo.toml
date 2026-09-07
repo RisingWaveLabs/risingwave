@@ -12,6 +12,7 @@ anyhow = "1"
 assert_matches = "1"
 async-recursion = "1"
 async-trait = "0.1"
+await-tree = { workspace = true }
 either = "1"
 futures = { version = "0.3", default-features = false, features = ["alloc"] }
 futures-async-stream = { workspace = true }

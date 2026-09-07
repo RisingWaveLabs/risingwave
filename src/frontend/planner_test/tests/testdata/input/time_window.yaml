@@ -82,6 +82,22 @@
   - stream_plan
   - logical_plan
   - batch_plan
+- name: hop window does not preserve input order across window lanes
+  sql: |
+    create table t1 (id int primary key, created_at date);
+    select id, created_at
+    from hop(t1, created_at, interval '1' day, interval '3' day)
+    order by id;
+  expected_outputs:
+  - batch_plan
+- name: single-lane hop window preserves input order
+  sql: |
+    create table t1 (id int primary key, created_at date);
+    select id, created_at
+    from hop(t1, created_at, interval '1' day, interval '1' day)
+    order by id;
+  expected_outputs:
+  - batch_plan
 - sql: |
     create table t1 (id int, created_at date);
     select t_hop.id, t_hop.created_at from hop(t1, created_at, interval '1' day, interval '3' day) as t_hop;

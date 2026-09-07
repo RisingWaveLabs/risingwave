@@ -82,7 +82,12 @@ pub struct DynamoDbConfig {
     )]
     #[serde_as(as = "DisplayFromStr")]
     pub batch_write_retry_backoff_ms: u64,
+
+    #[serde(flatten)]
+    pub unknown_fields: std::collections::HashMap<String, String>,
 }
+
+crate::impl_sink_unknown_fields!(DynamoDbConfig);
 
 impl EnforceSecret for DynamoDbConfig {
     fn enforce_one(prop: &str) -> crate::error::ConnectorResult<()> {
@@ -146,6 +151,8 @@ impl Sink for DynamoDbSink {
     type LogSinker = AsyncTruncateLogSinkerOf<DynamoDbSinkWriter>;
 
     const SINK_NAME: &'static str = DYNAMO_DB_SINK;
+
+    crate::impl_validate_sink_unknown_fields!();
 
     async fn validate(&self) -> Result<()> {
         risingwave_common::license::Feature::DynamoDbSink
@@ -353,6 +360,9 @@ fn map_data(scalar_ref: Option<ScalarRefImpl<'_>>, data_type: &DataType) -> Resu
         | DataType::Timestamp
         | DataType::Timestamptz
         | DataType::Jsonb => AttributeValue::S(scalar_ref.to_text_with_type(data_type)),
+        DataType::Variant => {
+            return Err(SinkError::DynamoDb(anyhow!("variant is not supported yet")));
+        }
         DataType::Boolean => AttributeValue::Bool(scalar_ref.into_bool()),
         DataType::Bytea => AttributeValue::B(Blob::new(scalar_ref.into_bytea())),
         DataType::List(lt) => {
@@ -453,8 +463,9 @@ mod write_chunk_future {
     use futures::{FutureExt, StreamExt, TryFuture, TryStreamExt, stream};
     use itertools::Itertools;
     use maplit::hashmap;
+    use risingwave_common::util::retry::exponential_backoff;
     use tokio::time::sleep;
-    use tokio_retry::strategy::{ExponentialBackoff, jitter};
+    use tokio_retry::strategy::jitter;
 
     use super::{DynamoDbRequest, SinkError};
 
@@ -537,11 +548,11 @@ mod write_chunk_future {
                     async move {
                         let mut req_items = req_items;
                         let mut retry_count = 0;
-                        let mut retry_backoff = ExponentialBackoff::from_millis(
-                            batch_write_retry_backoff_ms,
+                        let mut retry_backoff = exponential_backoff(
+                            Duration::from_millis(batch_write_retry_backoff_ms),
+                            2,
+                            Duration::from_millis(MAX_BATCH_WRITE_RETRY_DELAY_MS),
                         )
-                        .factor(2)
-                        .max_delay(Duration::from_millis(MAX_BATCH_WRITE_RETRY_DELAY_MS))
                         .map(jitter)
                         .take(batch_write_retry_times);
 

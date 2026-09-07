@@ -453,13 +453,13 @@ pub trait StateStoreReadVector: StaticSendSync {
     ) -> impl StorageFuture<'a, Vec<O>>;
 }
 
-/// If `prefetch` is true, prefetch will be enabled. Prefetching may increase the memory
-/// footprint of the CN process because the prefetched blocks cannot be evicted.
-/// Since the streaming-read of object-storage may hung in some case, we still use sync short read
-/// for both batch-query and streaming process. So this configure is unused.
+/// Controls block-stream prefetch for range scans. Prefetching may increase the memory footprint
+/// of the CN process because the prefetched blocks cannot be evicted.
 #[derive(Default, Clone, Copy)]
 pub struct PrefetchOptions {
+    /// Enables prefetch for range-scan iterators. Point gets do not inherit this setting.
     pub prefetch: bool,
+    /// Caller and tracing classification for large queries. Leaf SST iterators do not consume it.
     pub for_large_query: bool,
 }
 

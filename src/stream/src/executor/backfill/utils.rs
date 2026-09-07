@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::borrow::Cow;
-use std::cmp::{max, min};
+use std::cmp::{Ordering, max, min};
 use std::collections::HashMap;
 use std::ops::Bound;
 
@@ -27,11 +27,11 @@ use risingwave_common::bail;
 use risingwave_common::bitmap::BitmapBuilder;
 use risingwave_common::hash::{VirtualNode, VnodeBitmapExt};
 use risingwave_common::row::{OwnedRow, Row, RowExt};
-use risingwave_common::types::{DataType, Datum};
+use risingwave_common::types::{DataType, Datum, DatumRef, ScalarRefImpl};
 use risingwave_common::util::chunk_coalesce::DataChunkBuilder;
 use risingwave_common::util::epoch::EpochPair;
 use risingwave_common::util::iter_util::ZipEqDebug;
-use risingwave_common::util::sort_util::{OrderType, cmp_datum_iter};
+use risingwave_common::util::sort_util::{OrderType, cmp_datum, cmp_datum_iter};
 use risingwave_common::util::value_encoding::BasicSerde;
 use risingwave_common_rate_limit::RateLimit;
 use risingwave_connector::error::ConnectorError;
@@ -303,6 +303,7 @@ pub(crate) fn mark_cdc_chunk(
     current_pos: &OwnedRow,
     pk_in_output_indices: &[usize],
     pk_order: &[OrderType],
+    pk_needs_unsigned_i64_compare: &[bool],
     last_cdc_offset: Option<CdcOffset>,
 ) -> StreamExecutorResult<StreamChunk> {
     let chunk = chunk.compact_vis();
@@ -313,7 +314,49 @@ pub(crate) fn mark_cdc_chunk(
         last_cdc_offset,
         pk_in_output_indices,
         pk_order,
+        pk_needs_unsigned_i64_compare,
     )
+}
+
+/// Compare two primary-key rows column by column, recovering the upstream unsigned order
+/// for `BIGINT UNSIGNED` pk columns.
+///
+/// `pk_needs_unsigned_i64_compare[i]` is true only for upstream `BIGINT UNSIGNED`. Frontend
+/// up-casts narrower unsigned integers so they stay non-negative in RisingWave, and unsigned
+/// float/double/decimal types must keep their native comparison semantics. Only `BIGINT UNSIGNED`
+/// can overflow into a negative `i64`, so we reinterpret both sides as `u64` to restore upstream
+/// MySQL ordering. The `ScalarRefImpl::Int64` match below is a defensive guard for that contract.
+pub(crate) fn cmp_pk_unsigned_aware<'a>(
+    lhs: impl Iterator<Item = DatumRef<'a>>,
+    rhs: impl Iterator<Item = DatumRef<'a>>,
+    pk_order: &[OrderType],
+    pk_needs_unsigned_i64_compare: &[bool],
+) -> Ordering {
+    for (((l, r), order), &needs_unsigned_i64_compare) in lhs
+        .zip_eq_debug(rhs)
+        .zip_eq_debug(pk_order.iter())
+        .zip_eq_debug(pk_needs_unsigned_i64_compare.iter())
+    {
+        let ord = match (needs_unsigned_i64_compare, l, r) {
+            (true, Some(ScalarRefImpl::Int64(a)), Some(ScalarRefImpl::Int64(b))) => {
+                let ord = (a as u64).cmp(&(b as u64));
+                // Apply the column's sort direction, matching `cmp_datum`. CDC backfill always
+                // reads the snapshot ascending, so the descending branch is only for parity.
+                if order.is_descending() {
+                    ord.reverse()
+                } else {
+                    ord
+                }
+            }
+            // Signed column, NULL, up-cast unsigned integer, or non-integer unsigned column:
+            // the original comparison is already correct.
+            _ => cmp_datum(l, r, *order),
+        };
+        if ord != Ordering::Equal {
+            return ord;
+        }
+    }
+    Ordering::Equal
 }
 
 /// Mark chunk:
@@ -428,6 +471,7 @@ fn mark_cdc_chunk_inner(
     last_cdc_offset: Option<CdcOffset>,
     pk_in_output_indices: &[usize],
     pk_order: &[OrderType],
+    pk_needs_unsigned_i64_compare: &[bool],
 ) -> StreamExecutorResult<StreamChunk> {
     let (data, ops) = chunk.into_parts();
     let mut new_visibility = BitmapBuilder::with_capacity(ops.len());
@@ -448,7 +492,13 @@ fn mark_cdc_chunk_inner(
             if in_binlog_range {
                 let lhs = row.project(pk_in_output_indices);
                 let rhs = current_pos;
-                cmp_datum_iter(lhs.iter(), rhs.iter(), pk_order.iter().copied()).is_le()
+                cmp_pk_unsigned_aware(
+                    lhs.iter(),
+                    rhs.iter(),
+                    pk_order,
+                    pk_needs_unsigned_i64_compare,
+                )
+                .is_le()
             } else {
                 false
             }

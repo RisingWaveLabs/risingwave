@@ -155,7 +155,16 @@ macro_rules! feature_gated_sink_mod {
             #[doc = "A dummy sink that always returns an error, as the feature `sink-" $sink_name "` is currently not enabled."]
             pub type [<$struct_prefix:camel Sink>] = FeatureNotEnabledSink<[<$struct_prefix:camel NotEnabled>]>;
             #[doc = "A dummy sink config that is empty, as the feature `sink-" $sink_name "` is currently not enabled."]
-            pub struct [<$struct_prefix:camel Config>];
+            #[derive(serde::Deserialize)]
+            pub struct [<$struct_prefix:camel Config>] {
+                #[serde(flatten)]
+                pub unknown_fields: std::collections::HashMap<String, String>,
+            }
+            impl crate::sink::UnknownFields for [<$struct_prefix:camel Config>] {
+                fn unknown_fields(&self) -> std::collections::HashMap<String, String> {
+                    std::collections::HashMap::new()
+                }
+            }
         }
         }
     };

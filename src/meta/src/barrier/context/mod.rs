@@ -20,7 +20,7 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 use risingwave_common::catalog::{DatabaseId, TableId};
-use risingwave_common::id::JobId;
+use risingwave_common::id::{JobId, PartialGraphId};
 use risingwave_meta_model::SinkId;
 use risingwave_pb::common::WorkerNode;
 use risingwave_pb::hummock::HummockVersionStats;
@@ -28,7 +28,6 @@ use risingwave_pb::stream_service::barrier_complete_response::{
     IcebergPkIndexSinkMetadata as PbIcebergPkIndexSinkMetadata, PbListFinishedSource,
     PbLoadFinishedSource,
 };
-use risingwave_pb::stream_service::streaming_control_stream_request::PbInitRequest;
 use risingwave_rpc_client::StreamingControlHandle;
 
 use crate::MetaResult;
@@ -42,9 +41,11 @@ use crate::barrier::{
     RecoveryReason, Scheduled, SnapshotBackfillInfo,
 };
 use crate::hummock::{CommitEpochInfo, HummockManagerRef};
+use crate::manager::iceberg_compaction::IcebergCompactionManagerRef;
 use crate::manager::iceberg_pk_index_sink::IcebergPkIndexSinkManager;
 use crate::manager::sink_coordination::SinkCoordinatorManager;
 use crate::manager::{MetaSrvEnv, MetadataManager};
+use crate::serving::ServingVnodeMappingRef;
 use crate::stream::source_manager::SplitAssignment;
 use crate::stream::{GlobalRefreshManagerRef, ScaleControllerRef, SourceManagerRef};
 
@@ -102,6 +103,10 @@ pub(super) trait GlobalBarrierWorkerContext: Send + Sync + 'static {
         since_epoch: u64,
     ) -> impl Future<Output = MetaResult<SinceTimestampResolvedEpoch>> + Send + 'a;
 
+    async fn refresh_table_refill_runtime_state_after_recovery(&self) -> MetaResult<()> {
+        Ok(())
+    }
+
     fn post_collect_command(
         &self,
         command: PostCollectCommand,
@@ -126,7 +131,6 @@ pub(super) trait GlobalBarrierWorkerContext: Send + Sync + 'static {
     fn new_control_stream<'a>(
         &'a self,
         node: &'a WorkerNode,
-        init_request: &'a PbInitRequest,
     ) -> impl Future<Output = MetaResult<StreamingControlHandle>> + Send + 'a;
 
     fn reload_runtime_info(
@@ -171,6 +175,12 @@ pub(super) trait GlobalBarrierWorkerContext: Send + Sync + 'static {
         &self,
         sink_ids: Vec<SinkId>,
     ) -> impl Future<Output = MetaResult<()>> + Send + '_;
+
+    /// Advance per-database pk-index committed epochs after a checkpoint completion.
+    fn advance_iceberg_pk_index_sink_committed_epochs(
+        &self,
+        epochs: impl IntoIterator<Item = (PartialGraphId, u64)>,
+    );
 }
 
 pub(super) struct GlobalBarrierWorkerContextImpl {
@@ -181,6 +191,8 @@ pub(super) struct GlobalBarrierWorkerContextImpl {
     pub(super) metadata_manager: MetadataManager,
 
     hummock_manager: HummockManagerRef,
+
+    serving_vnode_mapping: ServingVnodeMappingRef,
 
     source_manager: SourceManagerRef,
 
@@ -196,6 +208,8 @@ pub(super) struct GlobalBarrierWorkerContextImpl {
     sink_manager: SinkCoordinatorManager,
 
     pub(super) iceberg_pk_index_sink_manager: IcebergPkIndexSinkManager,
+
+    pub(super) iceberg_compaction_manager: IcebergCompactionManagerRef,
 }
 
 impl GlobalBarrierWorkerContextImpl {
@@ -205,6 +219,7 @@ impl GlobalBarrierWorkerContextImpl {
         status: Arc<ArcSwap<BarrierManagerStatus>>,
         metadata_manager: MetadataManager,
         hummock_manager: HummockManagerRef,
+        serving_vnode_mapping: ServingVnodeMappingRef,
         source_manager: SourceManagerRef,
         scale_controller: ScaleControllerRef,
         env: MetaSrvEnv,
@@ -212,12 +227,14 @@ impl GlobalBarrierWorkerContextImpl {
         refresh_manager: GlobalRefreshManagerRef,
         sink_manager: SinkCoordinatorManager,
         iceberg_pk_index_sink_manager: IcebergPkIndexSinkManager,
+        iceberg_compaction_manager: IcebergCompactionManagerRef,
     ) -> Self {
         Self {
             scheduled_barriers,
             status,
             metadata_manager,
             hummock_manager,
+            serving_vnode_mapping,
             source_manager,
             _scale_controller: scale_controller,
             env,
@@ -225,6 +242,7 @@ impl GlobalBarrierWorkerContextImpl {
             refresh_manager,
             sink_manager,
             iceberg_pk_index_sink_manager,
+            iceberg_compaction_manager,
         }
     }
 

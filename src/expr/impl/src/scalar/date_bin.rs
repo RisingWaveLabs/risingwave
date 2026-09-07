@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use chrono::DateTime;
 use risingwave_common::types::{Interval, Timestamp, Timestamptz};
 use risingwave_expr::{ExprError, Result, function};
 
@@ -22,11 +21,7 @@ pub fn date_bin_ts(stride: Interval, source: Timestamp, origin: Timestamp) -> Re
     let origin_us = origin.0.and_utc().timestamp_micros(); // origin to microseconds
 
     let binned_source_us = date_bin_inner(stride, source_us, origin_us)?;
-    Ok(Timestamp(
-        DateTime::from_timestamp_micros(binned_source_us)
-            .unwrap()
-            .naive_utc(),
-    ))
+    Timestamp::with_micros(binned_source_us).map_err(|_| ExprError::NumericOutOfRange)
 }
 
 #[function("date_bin(interval, timestamptz, timestamptz) -> timestamptz")]
@@ -39,7 +34,7 @@ pub fn date_bin_tstz(
     let origin_us = origin.timestamp_micros(); // origin to microseconds
 
     let binned_source_us = date_bin_inner(stride, source_us, origin_us)?;
-    Ok(Timestamptz::from_micros(binned_source_us))
+    Timestamptz::from_micros(binned_source_us).ok_or(ExprError::NumericOutOfRange)
 }
 
 fn date_bin_inner(stride: Interval, source_us: i64, origin_us: i64) -> Result<i64> {

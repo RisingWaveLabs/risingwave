@@ -14,8 +14,9 @@
 
 use std::time::Duration;
 
-use anyhow::Result;
-use risingwave_simulation::cluster::{Cluster, Configuration};
+use anyhow::{Result, anyhow};
+use risingwave_common::error::AsReport;
+use risingwave_simulation::cluster::{Cluster, Configuration, Session};
 use risingwave_simulation::ctl_ext::predicate::{identity_contains, no_identity_contains};
 use risingwave_simulation::utils::AssertResult;
 use tokio::time::sleep;
@@ -129,6 +130,7 @@ async fn test_background_ddl_scale_during_backfill() -> Result<()> {
     session
         .run("create materialized view m as select * from t;")
         .await?;
+    wait_for_materialized_view(&mut session, "m").await?;
 
     for parallelism in [1, 2, 3] {
         session
@@ -171,6 +173,23 @@ async fn test_background_ddl_scale_during_backfill() -> Result<()> {
         .assert_result_eq("60");
 
     Ok(())
+}
+
+async fn wait_for_materialized_view(session: &mut Session, name: &str) -> Result<()> {
+    let sql = format!("show create materialized view {name};");
+    let mut last_error = String::new();
+    for _ in 0..60 {
+        match session.run(sql.clone()).await {
+            Ok(_) => return Ok(()),
+            Err(err) => {
+                last_error = err.as_report().to_string();
+                sleep(Duration::from_millis(200)).await;
+            }
+        }
+    }
+    Err(anyhow!(
+        "timed out waiting for materialized view `{name}` to become visible, last error: {last_error}"
+    ))
 }
 
 #[tokio::test]

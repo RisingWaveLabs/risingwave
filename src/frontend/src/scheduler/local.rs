@@ -590,9 +590,10 @@ impl LocalQueryExecution {
                             .inner_side_table_desc
                             .as_ref()
                             .expect("no side table desc");
-                        let mapping = self
-                            .worker_node_manager
-                            .fragment_mapping(self.get_fragment_id(side_table_desc.table_id)?)?;
+                        let mapping = self.worker_node_manager.fragment_mapping(
+                            self.get_fragment_id(side_table_desc.table_id)?,
+                            self.query.batch_parallelism(),
+                        )?;
 
                         // TODO: should we use `pb::WorkerSlotMapping` here?
                         node.inner_side_vnode_mapping =

@@ -1,0 +1,170 @@
+statement ok
+set sink_decouple = false;
+
+statement ok
+create table variant_sink_input (
+    id int primary key,
+    payload variant,
+    nested struct<
+        top_variant variant,
+        variant_list variant[],
+        variant_map map(varchar, variant)
+    >
+);
+
+# Write to an existing Iceberg v3 table through the upsert writer. VARIANT is not a key.
+statement ok
+create sink variant_sink_existing as
+select id, payload, nested from variant_sink_input
+with (
+    connector = 'iceberg',
+    type = 'upsert',
+    primary_key = 'id',
+    catalog.name = 'demo',
+    catalog.type = 'storage',
+    warehouse.path = 's3a://icebergdata/demo',
+    database.name = 'demo_db',
+    table.name = 'test_variant_sink',
+    s3.endpoint = 'http://127.0.0.1:9301',
+    s3.region = 'us-east-1',
+    s3.access.key = 'hummockadmin',
+    s3.secret.key = 'hummockadmin',
+    commit_checkpoint_interval = 1
+);
+
+# Auto-created tables with VARIANT columns must be v3. This sink exercises nested
+# VARIANT fields under struct, list, and map value as well as the top-level column.
+statement ok
+create sink variant_sink_auto as
+select id, payload, nested from variant_sink_input
+with (
+    connector = 'iceberg',
+    type = 'append-only',
+    force_append_only = 'true',
+    catalog.name = 'demo',
+    catalog.type = 'storage',
+    warehouse.path = 's3a://icebergdata/demo',
+    database.name = 'demo_db',
+    table.name = 'test_variant_sink_auto',
+    s3.endpoint = 'http://127.0.0.1:9301',
+    s3.region = 'us-east-1',
+    s3.access.key = 'hummockadmin',
+    s3.secret.key = 'hummockadmin',
+    create_table_if_not_exists = 'true',
+    format_version = '3',
+    commit_checkpoint_interval = 1
+);
+
+# A v1/v2 table cannot legally contain the Iceberg VARIANT type. Reject the
+# request before creating a partially configured external table.
+statement error creating an Iceberg table with VARIANT column `payload` requires `format_version = '3'`
+create sink variant_sink_v2_rejected as
+select id, payload, nested from variant_sink_input
+with (
+    connector = 'iceberg',
+    type = 'append-only',
+    force_append_only = 'true',
+    catalog.name = 'demo',
+    catalog.type = 'storage',
+    warehouse.path = 's3a://icebergdata/demo',
+    database.name = 'demo_db',
+    table.name = 'test_variant_sink_v2_rejected',
+    s3.endpoint = 'http://127.0.0.1:9301',
+    s3.region = 'us-east-1',
+    s3.access.key = 'hummockadmin',
+    s3.secret.key = 'hummockadmin',
+    create_table_if_not_exists = 'true',
+    format_version = '2'
+);
+
+statement ok
+insert into variant_sink_input values
+    (
+        1,
+        '{"a":[1,true,null],"s":"x"}'::variant,
+        row(
+            '"inner"'::variant,
+            array['7'::variant, '{"nested":2}'::variant],
+            map {'k': '{"n":2}'::variant}
+        )
+    ),
+    (
+        2,
+        'null'::variant,
+        row(
+            '"plain"'::variant,
+            array['true'::variant],
+            map {'k': '"map-string"'::variant}
+        )
+    ),
+    (3, null, null);
+
+statement ok
+flush;
+
+sleep 5s
+
+statement ok retry 6 backoff 1s
+create source variant_sink_existing_source with (
+    connector = 'iceberg',
+    catalog.name = 'demo',
+    catalog.type = 'storage',
+    warehouse.path = 's3a://icebergdata/demo',
+    database.name = 'demo_db',
+    table.name = 'test_variant_sink',
+    s3.endpoint = 'http://127.0.0.1:9301',
+    s3.region = 'us-east-1',
+    s3.access.key = 'hummockadmin',
+    s3.secret.key = 'hummockadmin'
+);
+
+statement ok retry 6 backoff 1s
+create source variant_sink_auto_source with (
+    connector = 'iceberg',
+    catalog.name = 'demo',
+    catalog.type = 'storage',
+    warehouse.path = 's3a://icebergdata/demo',
+    database.name = 'demo_db',
+    table.name = 'test_variant_sink_auto',
+    s3.endpoint = 'http://127.0.0.1:9301',
+    s3.region = 'us-east-1',
+    s3.access.key = 'hummockadmin',
+    s3.secret.key = 'hummockadmin'
+);
+
+query TITTTT retry 6 backoff 1s
+select
+    origin,
+    id,
+    coalesce(payload::varchar, '<sql-null>'),
+    coalesce((nested).top_variant::varchar, '<sql-null>'),
+    coalesce((nested).variant_list[1]::varchar, '<sql-null>'),
+    coalesce((nested).variant_map['k']::varchar, '<sql-null>')
+from (
+    select 'existing' as origin, id, payload, nested from variant_sink_existing_source
+    union all
+    select 'auto' as origin, id, payload, nested from variant_sink_auto_source
+)
+order by origin, id;
+----
+auto 1 {"a":[1,true,null],"s":"x"} "inner" 7 {"n":2}
+auto 2 null "plain" true "map-string"
+auto 3 <sql-null> <sql-null> <sql-null> <sql-null>
+existing 1 {"a":[1,true,null],"s":"x"} "inner" 7 {"n":2}
+existing 2 null "plain" true "map-string"
+existing 3 <sql-null> <sql-null> <sql-null> <sql-null>
+
+statement ok
+drop source variant_sink_existing_source;
+
+statement ok
+drop source variant_sink_auto_source;
+
+statement ok
+drop sink variant_sink_existing;
+
+statement ok
+drop sink variant_sink_auto;
+
+statement ok
+drop table variant_sink_input;

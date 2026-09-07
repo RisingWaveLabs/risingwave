@@ -23,7 +23,8 @@ use crate::expr::NowProcTimeFinder;
 use crate::optimizer::PlanRef;
 use crate::optimizer::heuristic_optimizer::{ApplyOrder, HeuristicOptimizer};
 use crate::optimizer::plan_node::{
-    ColumnPruningContext, PredicatePushdownContext, VisitExprsRecursive,
+    ColPrunable, ColumnPruningContext, PredicatePushdown, PredicatePushdownContext,
+    VisitExprsRecursive,
 };
 use crate::optimizer::plan_rewriter::ShareSourceRewriter;
 #[cfg(debug_assertions)]
@@ -611,10 +612,10 @@ impl LogicalOptimizer {
         explain_trace: bool,
         ctx: &OptimizerContextRef,
     ) -> LogicalPlanRef {
-        let plan = plan.predicate_pushdown(
-            Condition::true_cond(),
-            &mut PredicatePushdownContext::new(plan.clone()),
-        );
+        // Go through the trait method instead of `PredicatePushdownContext::run` so that the
+        // top-level `check_equivalent_plan` debug check covers the whole pass.
+        let mut pushdown_ctx = PredicatePushdownContext::new(plan.clone());
+        let plan = plan.predicate_pushdown(Condition::true_cond(), &mut pushdown_ctx);
         if explain_trace {
             ctx.trace("Predicate Push Down:");
             ctx.trace(plan.explain_to_string());
@@ -662,22 +663,14 @@ impl LogicalOptimizer {
         ctx: &OptimizerContextRef,
     ) -> LogicalPlanRef {
         let required_cols = (0..plan.schema().len()).collect_vec();
+        // Go through the trait method instead of `ColumnPruningContext::run` so that the
+        // top-level `check_equivalent_plan` debug check covers the whole pass.
         let mut column_pruning_ctx = ColumnPruningContext::new(plan.clone());
         plan = plan.prune_col(&required_cols, &mut column_pruning_ctx);
         // Column pruning may introduce additional projects, and filter can be pushed again.
         if explain_trace {
             ctx.trace("Prune Columns:");
             ctx.trace(plan.explain_to_string());
-        }
-
-        if column_pruning_ctx.need_second_round() {
-            // Second round of column pruning and reuse the column pruning context.
-            // Try to replace original share operator with the new one.
-            plan = plan.prune_col(&required_cols, &mut column_pruning_ctx);
-            if explain_trace {
-                ctx.trace("Prune Columns (For DAG):");
-                ctx.trace(plan.explain_to_string());
-            }
         }
         plan
     }

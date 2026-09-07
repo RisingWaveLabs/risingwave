@@ -1,0 +1,96 @@
+control substitution on
+
+system ok
+mysql -e "
+    CREATE DATABASE IF NOT EXISTS risedev;
+    USE risedev;
+    DROP TABLE IF EXISTS mysql_auto_schema_change_type_compat;
+    CREATE TABLE mysql_auto_schema_change_type_compat (
+        id INT NOT NULL PRIMARY KEY,
+        v_int INT DEFAULT 1,
+        v_float FLOAT,
+        v_unsigned_int INT UNSIGNED,
+        v_unsigned_bigint BIGINT UNSIGNED,
+        note VARCHAR(50)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+    INSERT INTO mysql_auto_schema_change_type_compat VALUES
+        (1, 10, 1.5, 4294967295, 18446744073709551615, 'before');
+"
+
+statement ok
+create source s_mysql_auto_schema_change_type_compat with (
+  ${RISEDEV_MYSQL_WITH_OPTIONS_COMMON},
+  username = '${RISEDEV_MYSQL_USER}',
+  password = '${MYSQL_PWD}',
+  database.name = 'risedev',
+  auto.schema.change = 'true',
+  debezium.bigint.unsigned.handling.mode = 'precise'
+);
+
+sleep 2s
+
+statement ok
+create table rw_mysql_auto_schema_change_type_compat (
+  id INT,
+  v_int BIGINT,
+  v_float DOUBLE PRECISION,
+  v_unsigned_int BIGINT,
+  v_unsigned_bigint DECIMAL,
+  note VARCHAR,
+  primary key (id)
+) with (
+  snapshot = 'true',
+  snapshot.batch_size = 1
+) from s_mysql_auto_schema_change_type_compat table 'risedev.mysql_auto_schema_change_type_compat';
+
+query TTTTTT retry 10 backoff 1s
+select id, v_int, v_float, v_unsigned_int, v_unsigned_bigint, note
+from rw_mysql_auto_schema_change_type_compat
+order by id;
+----
+1 10 1.5 4294967295 18446744073709551615 before
+
+system ok
+mysql -e "
+    USE risedev;
+    ALTER TABLE mysql_auto_schema_change_type_compat ADD COLUMN added INT DEFAULT 9;
+    INSERT INTO mysql_auto_schema_change_type_compat
+        (id, v_float, v_unsigned_int, v_unsigned_bigint, note, added)
+    VALUES
+        (2, 2.5, 2147483648, 9223372036854775808, 'after', 10);
+"
+
+query TTTTTTT retry 10 backoff 1s
+select id, v_int, v_float, v_unsigned_int, v_unsigned_bigint, note, added
+from rw_mysql_auto_schema_change_type_compat
+order by id;
+----
+1 10 1.5 4294967295 18446744073709551615 before 9
+2 1 2.5 2147483648 9223372036854775808 after 10
+
+query TTTT retry 10 backoff 1s
+describe rw_mysql_auto_schema_change_type_compat;
+----
+id integer false NULL
+v_int bigint false NULL
+v_float double precision false NULL
+v_unsigned_int bigint false NULL
+v_unsigned_bigint numeric false NULL
+note character varying false NULL
+added integer false NULL
+_rw_timestamp timestamp with time zone true NULL
+primary key id NULL NULL
+distribution key id NULL NULL
+table description rw_mysql_auto_schema_change_type_compat NULL NULL
+
+statement ok
+drop table rw_mysql_auto_schema_change_type_compat;
+
+statement ok
+drop source s_mysql_auto_schema_change_type_compat cascade;
+
+system ok
+mysql -e "
+    USE risedev;
+    DROP TABLE IF EXISTS mysql_auto_schema_change_type_compat;
+"

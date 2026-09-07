@@ -1,0 +1,36 @@
+statement ok
+set enable_index_selection = true;
+
+statement ok
+drop table if exists backfill_order_fact cascade;
+
+statement ok
+drop table if exists backfill_order_dim cascade;
+
+statement ok
+create table backfill_order_fact(v1 int);
+
+statement ok
+create table backfill_order_dim(v1 int, v2 int);
+
+statement ok
+create index idx_backfill_order_dim_v1 on backfill_order_dim(v1);
+
+statement ok
+create materialized view mv_fixed_backfill_order_index
+    with (backfill_order = FIXED(backfill_order_fact -> backfill_order_dim))
+    as
+      select count(*)
+      from backfill_order_fact
+      join backfill_order_dim
+        on backfill_order_fact.v1 = backfill_order_dim.v1
+      group by backfill_order_fact.v1;
+
+statement ok
+drop materialized view mv_fixed_backfill_order_index;
+
+statement ok
+drop table backfill_order_fact;
+
+statement ok
+drop table backfill_order_dim cascade;

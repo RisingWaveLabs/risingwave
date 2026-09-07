@@ -35,6 +35,7 @@ impl DataType {
             DataType::Timestamptz => AstDataType::Timestamp(true),
             DataType::Interval => AstDataType::Interval,
             DataType::Jsonb => AstDataType::Jsonb,
+            DataType::Variant => AstDataType::Variant,
             DataType::Bytea => AstDataType::Bytea,
             DataType::List(list) => AstDataType::Array(Box::new(list.elem().to_ast())),
             DataType::Struct(fields) => {

@@ -304,7 +304,11 @@ macro_rules! impl_split {
                 fn try_from(split: SplitImpl) -> std::result::Result<Self, Self::Error> {
                     match split {
                         SplitImpl::$variant_name(inner) => Ok(inner),
-                        other => risingwave_common::bail!("expect {} but get {:?}", stringify!($split), other),
+                        other => risingwave_common::bail!(
+                            "expected {} but got {:?}",
+                            stringify!($split),
+                            other
+                        ),
                     }
                 }
             }

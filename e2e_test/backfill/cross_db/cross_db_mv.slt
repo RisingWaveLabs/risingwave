@@ -99,7 +99,61 @@ select count(*) from mv1;
 10000
 
 statement ok
+set database to d1;
+
+statement ok
+create table t_rate_limit(v1 int);
+
+statement ok
+create subscription sub_rate_limit from t_rate_limit with(retention = '1D');
+
+statement ok
 set database to d2;
+
+statement ok
+create materialized view mv_rate_limit as select * from d1.public.t_rate_limit;
+
+statement ok
+wait
+
+statement ok
+alter materialized view mv_rate_limit set backfill_rate_limit = 0;
+
+statement ok
+set database to d1;
+
+statement ok
+insert into t_rate_limit select * from generate_series(1, 10000);
+
+sleep 5s
+
+statement ok
+flush;
+
+statement ok
+set database to d2;
+
+query ok
+select count(*) from mv_rate_limit;
+----
+0
+
+statement ok
+alter materialized view mv_rate_limit set backfill_rate_limit = 1000;
+
+statement ok
+flush;
+
+query ok retry 10 backoff 1s
+select count(*) from mv_rate_limit;
+----
+10000
+
+statement ok
+set database to d2;
+
+statement ok
+drop materialized view mv_rate_limit;
 
 statement ok
 drop materialized view mv1;
@@ -114,6 +168,9 @@ statement ok
 drop subscription sub_order;
 
 statement ok
+drop subscription sub_rate_limit;
+
+statement ok
 drop subscription sub;
 
 statement ok
@@ -121,6 +178,9 @@ drop materialized view mv_order_src;
 
 statement ok
 drop table t_order;
+
+statement ok
+drop table t_rate_limit;
 
 statement ok
 drop table t1;

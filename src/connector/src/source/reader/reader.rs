@@ -137,7 +137,7 @@ impl SourceReader {
                             a,
                         ))
                     }
-                    AckPolicy::None => None,
+                    AckPolicy::None | AckPolicy::FlowControl => None,
                 }
             }
             ConnectorProperties::Pulsar(_) => Some(WaitCheckpointTask::AckPulsarMessage(vec![])),

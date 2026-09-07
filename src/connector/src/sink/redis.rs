@@ -234,7 +234,12 @@ impl RedisCommon {
 pub struct RedisConfig {
     #[serde(flatten)]
     pub common: RedisCommon,
+
+    #[serde(flatten)]
+    pub unknown_fields: std::collections::HashMap<String, String>,
 }
+
+crate::impl_sink_unknown_fields!(RedisConfig);
 
 impl EnforceSecret for RedisConfig {
     fn enforce_secret<'a>(prop_iter: impl Iterator<Item = &'a str>) -> ConnectorResult<()> {
@@ -301,6 +306,8 @@ impl Sink for RedisSink {
     type LogSinker = AsyncTruncateLogSinkerOf<RedisSinkWriter>;
 
     const SINK_NAME: &'static str = "redis";
+
+    crate::impl_validate_sink_unknown_fields!();
 
     async fn new_log_sinker(&self, _writer_param: SinkWriterParam) -> Result<Self::LogSinker> {
         Ok(RedisSinkWriter::new(

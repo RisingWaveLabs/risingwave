@@ -184,16 +184,17 @@ def _(outer_panels: Panels):
                             [90, "max"],
                         ),
                         panels.target(
-                            f"histogram_quantile(0.99, sum(rate({metric('compute_refill_cache_duration_bucket')}[$__rate_interval])) by (le))",
-                            "compute_apply_version_duration_p99",
+                            f"histogram_quantile(0.99, sum(rate({metric('refill_duration_bucket')}[$__rate_interval])) by (le, type, op, {COMPONENT_LABEL}))",
+                            "refill_duration_p99 - {{type}} {{op}} - {{%s}}"
+                            % COMPONENT_LABEL,
                         ),
                         panels.target(
                             f"sum by(le)(rate({metric('compactor_compact_task_duration_sum')}[$__rate_interval])) / sum by(le)(rate({metric('compactor_compact_task_duration_count')}[$__rate_interval])) > 0",
                             "compact-task avg",
                         ),
                         panels.target(
-                            f"sum by(le)(rate({metric('state_store_compact_sst_duration_sum')}[$__rate_interval])) / sum by(le)(rate({metric('state_store_compact_sst_duration_count')}[$__rate_interval])) > 0",
-                            "compact-key-range avg",
+                            f"sum by({COMPONENT_LABEL})(rate({metric('compactor_compact_sst_duration_sum')}[$__rate_interval])) / sum by({COMPONENT_LABEL})(rate({metric('compactor_compact_sst_duration_count')}[$__rate_interval])) > 0",
+                            "compact-key-range avg - {{%s}}" % COMPONENT_LABEL,
                         ),
                     ],
                 ),

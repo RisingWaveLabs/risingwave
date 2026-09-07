@@ -277,11 +277,6 @@ impl StreamingUploadWriter {
     }
 }
 
-pub enum UnifiedSstableWriter {
-    StreamingSstableWriter(StreamingUploadWriter),
-    BatchSstableWriter(BatchUploadWriter),
-}
-
 #[async_trait::async_trait]
 impl SstableWriter for StreamingUploadWriter {
     type Output = JoinHandle<HummockResult<()>>;
@@ -366,48 +361,6 @@ impl StreamingSstableWriterFactory {
         StreamingSstableWriterFactory { sstable_store }
     }
 }
-pub struct UnifiedSstableWriterFactory {
-    sstable_store: SstableStoreRef,
-}
-
-impl UnifiedSstableWriterFactory {
-    pub fn new(sstable_store: SstableStoreRef) -> Self {
-        UnifiedSstableWriterFactory { sstable_store }
-    }
-}
-
-#[async_trait::async_trait]
-impl SstableWriterFactory for UnifiedSstableWriterFactory {
-    type Writer = UnifiedSstableWriter;
-
-    async fn create_sst_writer(
-        &mut self,
-        object_id: impl Into<HummockSstableObjectId> + Send,
-        options: SstableWriterOptions,
-    ) -> HummockResult<Self::Writer> {
-        let object_id = object_id.into();
-        if self.sstable_store.store().support_streaming_upload() {
-            let path = self.sstable_store.get_sst_data_path(object_id);
-            let uploader = self.sstable_store.create_streaming_uploader(&path).await?;
-            let streaming_uploader_writer = StreamingUploadWriter::new(
-                object_id,
-                self.sstable_store.clone(),
-                uploader,
-                options,
-            );
-
-            Ok(UnifiedSstableWriter::StreamingSstableWriter(
-                streaming_uploader_writer,
-            ))
-        } else {
-            let batch_uploader_writer =
-                BatchUploadWriter::new(object_id, self.sstable_store.clone(), options);
-            Ok(UnifiedSstableWriter::BatchSstableWriter(
-                batch_uploader_writer,
-            ))
-        }
-    }
-}
 
 #[async_trait::async_trait]
 impl SstableWriterFactory for StreamingSstableWriterFactory {
@@ -427,47 +380,6 @@ impl SstableWriterFactory for StreamingSstableWriterFactory {
             uploader,
             options,
         ))
-    }
-}
-
-#[async_trait::async_trait]
-impl SstableWriter for UnifiedSstableWriter {
-    type Output = JoinHandle<HummockResult<()>>;
-
-    async fn write_block(&mut self, block_data: &[u8], meta: &BlockMeta) -> HummockResult<()> {
-        match self {
-            UnifiedSstableWriter::StreamingSstableWriter(stream) => {
-                stream.write_block(block_data, meta).await
-            }
-            UnifiedSstableWriter::BatchSstableWriter(batch) => {
-                batch.write_block(block_data, meta).await
-            }
-        }
-    }
-
-    async fn write_block_bytes(&mut self, block: Bytes, meta: &BlockMeta) -> HummockResult<()> {
-        match self {
-            UnifiedSstableWriter::StreamingSstableWriter(stream) => {
-                stream.write_block_bytes(block, meta).await
-            }
-            UnifiedSstableWriter::BatchSstableWriter(batch) => {
-                batch.write_block_bytes(block, meta).await
-            }
-        }
-    }
-
-    async fn finish(self, meta: SstableMeta) -> HummockResult<UploadJoinHandle> {
-        match self {
-            UnifiedSstableWriter::StreamingSstableWriter(stream) => stream.finish(meta).await,
-            UnifiedSstableWriter::BatchSstableWriter(batch) => batch.finish(meta).await,
-        }
-    }
-
-    fn data_len(&self) -> usize {
-        match self {
-            UnifiedSstableWriter::StreamingSstableWriter(stream) => stream.data_len(),
-            UnifiedSstableWriter::BatchSstableWriter(batch) => batch.data_len(),
-        }
     }
 }
 

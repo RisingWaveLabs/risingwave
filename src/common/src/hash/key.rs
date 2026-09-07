@@ -36,7 +36,7 @@ use static_assertions::const_assert_eq;
 use crate::array::{ListValue, MapValue, StructValue, VectorVal};
 use crate::types::{
     DataType, Date, Decimal, F32, F64, Int256, Int256Ref, JsonbVal, Scalar, ScalarRef,
-    ScalarRefImpl, Serial, Time, Timestamp, Timestamptz,
+    ScalarRefImpl, Serial, Time, Timestamp, Timestamptz, VariantVal,
 };
 use crate::util::hash_util::{Crc32FastBuilder, XxHash64Builder};
 use crate::util::sort_util::OrderType;
@@ -615,13 +615,14 @@ impl HashKeySer<'_> for Timestamptz {
 
 impl HashKeyDe for Timestamptz {
     fn deserialize(_data_type: &DataType, mut buf: impl Buf) -> Self {
-        Timestamptz::from_micros(buf.get_i64_ne())
+        Timestamptz::from_micros_uncheck(buf.get_i64_ne())
     }
 }
 
 impl_value_encoding_hash_key_serde!(Box<str>);
 impl_value_encoding_hash_key_serde!(Box<[u8]>);
 impl_value_encoding_hash_key_serde!(JsonbVal);
+impl_value_encoding_hash_key_serde!(VariantVal);
 
 // It's possible there's `Decimal` or `Interval` in these composite types, so we currently always
 // use the memcmp encoding for safety.

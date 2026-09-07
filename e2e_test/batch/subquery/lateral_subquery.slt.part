@@ -111,3 +111,54 @@ JOIN LATERAL
 
 statement ok
 DROP TABLE r CASCADE;
+
+# A lateral table function nested under another join can reference every enclosing left input.
+# Duplicate outer rows verify that decorrelating nested Apply nodes preserves multiplicity.
+statement ok
+CREATE TABLE issue_12238_a(a1 INT);
+
+statement ok
+CREATE TABLE issue_12238_b(b1 INT);
+
+statement ok
+INSERT INTO issue_12238_a VALUES (1), (2), (2);
+
+statement ok
+INSERT INTO issue_12238_b VALUES (10), (20);
+
+query III rowsort
+SELECT a1, b1, x
+FROM issue_12238_a,
+  issue_12238_b CROSS JOIN UNNEST(ARRAY[a1, b1]) AS u(x);
+----
+1 10 1
+1 10 10
+1 20 1
+1 20 20
+2 10 10
+2 10 10
+2 10 2
+2 10 2
+2 20 2
+2 20 2
+2 20 20
+2 20 20
+
+# This mixed join tree cannot be fixed by reassociating pure cross joins.
+query III rowsort
+SELECT a1, b1, x
+FROM issue_12238_a,
+  issue_12238_b LEFT JOIN LATERAL (SELECT a1 + b1 AS x) z ON true;
+----
+1 10 11
+1 20 21
+2 10 12
+2 10 12
+2 20 22
+2 20 22
+
+statement ok
+DROP TABLE issue_12238_a;
+
+statement ok
+DROP TABLE issue_12238_b;

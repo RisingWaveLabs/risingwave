@@ -160,7 +160,7 @@ pub enum ErrorCode {
     InsertViolation(String),
     #[error("Invalid input syntax: {0}")]
     InvalidInputSyntax(#[message] String),
-    #[error("Can not compare in memory: {0}")]
+    #[error("Cannot compare in memory: {0}")]
     MemComparableError(#[from] memcomparable::Error),
     #[error("Error while de/se values: {0}")]
     ValueEncodingError(
@@ -173,7 +173,7 @@ pub enum ErrorCode {
         config_entry: String,
         config_value: String,
     },
-    #[error("Invalid Parameter Value: {0}")]
+    #[error("Invalid parameter value: {0}")]
     InvalidParameterValue(String),
     #[error("Sink error: {0}")]
     SinkError(
@@ -183,7 +183,7 @@ pub enum ErrorCode {
     ),
     #[error("Permission denied: {0}")]
     PermissionDenied(#[message] String),
-    #[error("Failed to get/set session config: {0}")]
+    #[error("Failed to get or set session config: {0}")]
     SessionConfig(
         #[from]
         #[backtrace]

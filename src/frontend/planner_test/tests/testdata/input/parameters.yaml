@@ -15,3 +15,9 @@
     explain select * from t where id in($1, 123)
   expected_outputs:
     - explain_output
+- id: explain multiple parameters in in-expr
+  sql: |
+    create table t (id int primary key, a int);
+    explain select * from t where id in($1, $2, $3, 123)
+  expected_outputs:
+    - explain_output

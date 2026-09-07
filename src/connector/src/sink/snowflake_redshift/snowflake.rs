@@ -149,7 +149,12 @@ pub struct SnowflakeV2Config {
 
     #[serde(rename = "stage")]
     pub stage: Option<String>,
+
+    #[serde(flatten)]
+    pub unknown_fields: std::collections::HashMap<String, String>,
 }
+
+crate::impl_sink_unknown_fields!(SnowflakeV2Config);
 
 fn default_target_interval_schedule() -> u64 {
     3600 // Default to 1 hour
@@ -486,6 +491,8 @@ impl Sink for SnowflakeV2Sink {
     type LogSinker = CoordinatedLogSinker<SnowflakeSinkWriter>;
 
     const SINK_NAME: &'static str = SNOWFLAKE_SINK_V2;
+
+    crate::impl_validate_sink_unknown_fields!();
 
     async fn validate(&self) -> Result<()> {
         risingwave_common::license::Feature::SnowflakeSink

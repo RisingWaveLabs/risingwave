@@ -1,0 +1,56 @@
+# A parquet file whose nested layout diverges from the declared schema must decode by the
+# declared fields at every depth: struct children inside list elements / map values are
+# aligned by name, extra file-side children are dropped, and missing ones read as NULL.
+# Before the fix, decode below a list/map boundary followed the file-side layout, producing
+# chunk columns whose type silently diverged from the catalog.
+#
+# The committed fixture `data/nested_declared_schema/data.parquet` was written by
+# RisingWave's own fs parquet sink (`format plain encode parquet`): the writer table's
+# element struct <b, a, extra> is a reordered superset of the reader's declared element
+# <a, b>, and the map value struct <y, x> is a reordered superset of the declared value <x>.
+# To regenerate, sink this table through an fs sink and commit the produced file:
+#   create table w (id int, l struct<b varchar, a int, extra int>[],
+#                   m map(varchar, struct<y int, x int>)) append only;
+#   insert into w values
+#       (1, array[row('x', 10, 9), row('y', 20, 8)]::struct<b varchar, a int, extra int>[],
+#        map {'k1': row(7, 42)::struct<y int, x int>, 'k2': row(6, 43)::struct<y int, x int>}),
+#       (2, null, null),
+#       (3, array[row(null, 30, 7)]::struct<b varchar, a int, extra int>[],
+#        map {'k3': row(5, null)::struct<y int, x int>});
+
+statement ok
+create table parquet_nested_declared_schema (
+    id int,
+    l struct<a int, b varchar>[],
+    m map(varchar, struct<x int>)
+) with (
+    connector = 'posix_fs',
+    posix_fs.root = 'e2e_test/source_inline/fs/data/nested_declared_schema'
+) format plain encode parquet;
+
+query I retry 60 backoff 1s
+select count(*) from parquet_nested_declared_schema;
+----
+3
+
+query IITII
+select
+    id,
+    (l[1]).a,
+    (l[1]).b,
+    (l[2]).a,
+    (m['k1']).x
+from parquet_nested_declared_schema order by id;
+----
+1 10 x 20 42
+2 NULL NULL NULL NULL
+3 30 NULL NULL NULL
+
+query II
+select (m['k2']).x, (m['k3']).x from parquet_nested_declared_schema where id in (1, 3) order by id;
+----
+43 NULL
+NULL NULL
+
+statement ok
+drop table parquet_nested_declared_schema;

@@ -51,8 +51,7 @@ impl<Src: OpendalSource> OpendalEnumerator<Src> {
         }
         let op: Operator = Operator::new(builder)?
             .layer(LoggingLayer::default())
-            .layer(RetryLayer::default())
-            .finish();
+            .layer(RetryLayer::default());
 
         let (prefix, matcher) = if let Some(pattern) = azblob_properties.match_pattern.as_ref() {
             let prefix = get_prefix(pattern);

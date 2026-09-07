@@ -1,11 +1,13 @@
 - sql: |
     set enable_locality_backfill = true;
+    set locality_backfill_mode = always;
     create table t (a int, b int, c int);
     select count(*) from t group by b;
   expected_outputs:
     - stream_plan
 - sql: |
     set enable_locality_backfill = true;
+    set locality_backfill_mode = always;
     create table t1 (a int, b int, c int);
     create table t2 (a int, b int, c int);
     select count(*) from t1 join t2 on t1.a = t2.a group by t1.b;
@@ -13,18 +15,21 @@
     - stream_plan
 - sql: |
     set enable_locality_backfill = true;
+    set locality_backfill_mode = always;
     create table t (a int, b int, c int, primary key (b, a));
     select count(*) from t group by a, b;
   expected_outputs:
     - stream_plan
 - sql: |
     set enable_locality_backfill = true;
+    set locality_backfill_mode = always;
     create table t (a int, b int, c int);
     select count(*) from t where c > 1 group by a, b;
   expected_outputs:
     - stream_plan
 - sql: |
     set enable_locality_backfill = true;
+    set locality_backfill_mode = always;
     create table t1 (a int, b int, c int);
     create table t2 (a int, b int, c int);
     select count(*) from t1 join t2 on t1.a = t2.a where t1.c > t2.c group by t1.b;
@@ -32,6 +37,7 @@
     - stream_plan
 - sql: |
     set enable_locality_backfill = true;
+    set locality_backfill_mode = always;
     create table t (a int, b int, c int);
     select RANK() OVER (PARTITION BY a ORDER BY b) as rank from t;
   expected_outputs:
@@ -39,6 +45,7 @@
 - name: enforce locality for temporal join for both sides.
   sql: |
     set enable_locality_backfill = true;
+    set locality_backfill_mode = always;
     create table stream(id1 int, a1 int, b1 int);
     create table version(id2 int, a2 int, b2 int, primary key (id2));
     create index idx2 on version (a2, b2);
@@ -47,12 +54,22 @@
     - stream_plan
 - sql: |
     set enable_locality_backfill = true;
+    set locality_backfill_mode = always;
     create table t(a int, b int, c int) append only;
     select distinct on(a) * from t ;
   expected_outputs:
     - stream_plan
+- name: dedup provides locality on its dedup columns, so no extra locality provider is needed for the downstream agg.
+  sql: |
+    set enable_locality_backfill = true;
+    set locality_backfill_mode = always;
+    create table t(a int, b int, c int) append only;
+    select count(*) from (select distinct on(a, b) * from t) group by a;
+  expected_outputs:
+    - stream_plan
 - sql: |
     set enable_locality_backfill = true;
+    set locality_backfill_mode = always;
     create table t(a int, b int, c int);
     SELECT * FROM (
     SELECT
@@ -64,6 +81,7 @@
     - stream_plan
 - sql: |
     set enable_locality_backfill = true;
+    set locality_backfill_mode = always;
     create table t(a int, b int, c int);
     SELECT
       row_number() OVER (PARTITION BY b ORDER BY a) AS rank2
@@ -79,6 +97,7 @@
     - stream_plan
 - sql: |
     set enable_locality_backfill = true;
+    set locality_backfill_mode = always;
     create table t(a int, b int, c int);
     SELECT
       rank1,
@@ -93,6 +112,7 @@
     - stream_plan
 - sql: |
     set enable_locality_backfill = true;
+    set locality_backfill_mode = always;
     create table t(a int, b int, c int);
     SELECT
       rank1,
@@ -107,6 +127,7 @@
     - stream_plan
 - sql: |
     set enable_locality_backfill = true;
+    set locality_backfill_mode = always;
     create table t (
       id int
     , p1 int
@@ -127,6 +148,7 @@
     - stream_plan
 - sql: |
     set enable_locality_backfill = true;
+    set locality_backfill_mode = always;
     create table t (a int, b int, c int);
     select
       max(num) as max_num
@@ -141,6 +163,7 @@
     - stream_plan
 - sql: |
     set enable_locality_backfill = true;
+    set locality_backfill_mode = always;
     create table t (a int, b int, c int);
     select
       max(num) as max_num

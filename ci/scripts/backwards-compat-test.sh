@@ -102,7 +102,7 @@ fi
 # Try to download the pre-built Java connector-node tarball for a specific
 # release from GitHub. Returns 0 on success (connector extracted and
 # CONNECTOR_LIBS_PATH exported), non-zero if the release asset is unavailable.
-download_old_connector_artifact() {
+download_release_connector_artifact() {
   local version="$1"
   local tarball="risingwave-connector-v${version}.tar.gz"
   local url="https://github.com/risingwavelabs/risingwave/releases/download/v${version}/${tarball}"
@@ -119,8 +119,10 @@ download_old_connector_artifact() {
   return 0
 }
 
-setup_old_cluster() {
-  echo "--- Build risedev for $OLD_VERSION, it may not be backwards compatible"
+setup_release_cluster() {
+  local version="$1"
+
+  echo "--- Build risedev for $version, it may not be backwards compatible"
   git config --global --add safe.directory /risingwave
   # `common.sh` exports GIT_SHA=$BUILDKITE_COMMIT (the PR tip). After we
   # check out an old tag, vergen's VERGEN_GIT_SHA reflects the old commit,
@@ -128,39 +130,60 @@ setup_old_cluster() {
   # panics because the two SHAs disagree. Drop GIT_SHA so the old build
   # only relies on VERGEN_GIT_SHA.
   unset GIT_SHA
-  git checkout "v${OLD_VERSION}"
+  git checkout "v${version}"
   cargo build -p risedev
-  echo "--- Get RisingWave binary for $OLD_VERSION"
-  OLD_URL=https://github.com/risingwavelabs/risingwave/releases/download/v${OLD_VERSION}/risingwave-v${OLD_VERSION}-x86_64-unknown-linux.tar.gz
+  echo "--- Get RisingWave binary for $version"
+  local archive="risingwave-v${version}-x86_64-unknown-linux.tar.gz"
+  local url="https://github.com/risingwavelabs/risingwave/releases/download/v${version}/${archive}"
   local enable_build_rust="false"
-  set +e
-  wget --no-verbose "$OLD_URL"
-  wget_rc=$?
-  set -e
-  if [[ "$wget_rc" -ne 0 ]]; then
-    echo "Failed to download ${OLD_VERSION} from github releases, build from source later during \`risedev d\`"
+  rm -f "$archive"
+  if ! wget --no-verbose "$url" -O "$archive"; then
+    rm -f "$archive"
+    echo "Failed to download ${version} from github releases, build from source later during \`risedev d\`"
     enable_build_rust="true"
-  elif [[ $OLD_VERSION = '1.10.0' || $OLD_VERSION = '1.10.1' || $OLD_VERSION = '1.10.2' || $OLD_VERSION = '2.0.0' ]]; then
+  elif [[ $version = '1.10.0' || $version = '1.10.1' || $version = '1.10.2' || $version = '2.0.0' ]]; then
     echo "1.10.x, 2.0.0 have dynamically linked openssl, build from source later during \`risedev d\`"
     enable_build_rust="true"
   else
-    tar -xvf risingwave-v"${OLD_VERSION}"-x86_64-unknown-linux.tar.gz
+    rm -f risingwave
+    tar -xvf "$archive"
     mv risingwave target/debug/risingwave
 
-    echo "--- Start cluster on tag $OLD_VERSION"
+    echo "--- Prepared cluster binary from tag $version"
     git config --global --add safe.directory /risingwave
   fi
 
   # Try to reuse the pre-built Java connector from the old release. Falls back
   # to building from source (inside `risedev d`) when the asset is unavailable.
   local build_connector="true"
-  if download_old_connector_artifact "$OLD_VERSION"; then
+  if download_release_connector_artifact "$version"; then
     build_connector="false"
   else
-    echo "Pre-built Java connector for $OLD_VERSION not found, build from source later during \`risedev d\`"
+    echo "Pre-built Java connector for $version not found, build from source later during \`risedev d\`"
   fi
 
-  configure_rw "$OLD_VERSION" "$enable_build_rust" "$build_connector"
+  configure_rw "$version" "$enable_build_rust" "$build_connector"
+}
+
+setup_old_cluster() {
+  setup_release_cluster "$OLD_VERSION"
+}
+
+upgrade_through_intermediate_versions() {
+  local version
+
+  while read -r version; do
+    [[ -z "$version" ]] && continue
+
+    echo "--- Upgrade through intermediate version $version"
+    setup_release_cluster "$version"
+    rm -rf .risingwave/config
+    ENABLE_UDF=1 ./risedev d full-without-monitoring
+    if version_le "$RECOVER_COMMAND_MIN_VERSION" "$version"; then
+      wait_for_recovery "$version"
+    fi
+    kill_cluster
+  done < <(get_intermediate_versions)
 }
 
 setup_new_cluster() {
@@ -182,6 +205,8 @@ main() {
 
   setup_old_cluster
   seed_old_cluster "$OLD_VERSION"
+
+  upgrade_through_intermediate_versions
 
   setup_new_cluster
   # Assume we use the latest version, so we just set to some large number.

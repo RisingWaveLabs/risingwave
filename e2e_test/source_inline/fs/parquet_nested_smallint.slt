@@ -1,0 +1,37 @@
+# Guard test for smallint inside a struct read from a foreign parquet file.
+#
+# The parquet parser renders the declared schema through the iceberg-flavored
+# to_arrow_field, which widens smallint to int32 (iceberg has no 16-bit int).
+# A file that physically stores the child as arrow int16 still matches the
+# schema, so decode must follow the array's real type and stamp the struct with
+# the decoded child type. Stamping the widened expected type instead would trip
+# the parser's declared-type check on every batch.
+#
+# RisingWave's own parquet sink writes smallint as int32, so the committed
+# fixture `data/nested_smallint/data.parquet` was generated with parquet-rs
+# 58.1.0 (ArrowWriter):
+#   id: int32                 = [1, 2]
+#   s:  struct<a: int16>      = [{7}, {-3}]
+
+statement ok
+create table parquet_nested_smallint (
+    id int,
+    s struct<a smallint>
+) with (
+    connector = 'posix_fs',
+    posix_fs.root = 'e2e_test/source_inline/fs/data/nested_smallint'
+) format plain encode parquet;
+
+query I retry 60 backoff 1s
+select count(*) from parquet_nested_smallint;
+----
+2
+
+query II
+select id, (s).a from parquet_nested_smallint order by id;
+----
+1 7
+2 -3
+
+statement ok
+drop table parquet_nested_smallint;

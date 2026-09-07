@@ -20,8 +20,16 @@ use crate::optimizer::plan_node::generic::GenericPlanRef;
 use crate::optimizer::plan_node::*;
 use crate::optimizer::plan_visitor::PlanVisitor;
 
-#[derive(Debug, Clone, Default)]
-pub struct StreamKeyChecker;
+/// Finds the first plan position where the checked type would become part of a key, and names the
+/// SQL clause responsible so the error points at what the user wrote.
+///
+/// Positions checked only for `Variant` are deliberately not checked for `Jsonb`: widening the
+/// pre-existing JSONB gate would be a breaking change.
+#[derive(Debug, Clone, Copy)]
+pub enum StreamKeyChecker {
+    Jsonb,
+    Variant,
+}
 
 impl StreamKeyChecker {
     fn visit_inputs(&mut self, plan: &impl LogicalPlanNode) -> Option<String> {
@@ -29,12 +37,28 @@ impl StreamKeyChecker {
         Self::default_behavior().apply(results)
     }
 
-    fn err_msg(target: &str, field: &Field) -> String {
+    fn err_msg(&self, target: &str, field: &Field) -> String {
         format!(
-            "JSONB column \"{}\" should not be in the {}.",
-            target,
-            FieldDisplay(field)
+            "{} column \"{}\" should not be in the {}.",
+            self.type_name(),
+            FieldDisplay(field),
+            target
         )
+    }
+
+    fn is_restricted_key_type(&self, data_type: &DataType) -> bool {
+        match self {
+            Self::Jsonb => matches!(data_type, DataType::Jsonb),
+            // Unlike the pre-existing JSONB behavior, VARIANT is rejected even when nested.
+            Self::Variant => data_type.contains_variant(),
+        }
+    }
+
+    fn type_name(&self) -> &'static str {
+        match self {
+            Self::Jsonb => "JSONB",
+            Self::Variant => "VARIANT",
+        }
     }
 }
 
@@ -52,8 +76,8 @@ impl LogicalPlanVisitor for StreamKeyChecker {
         let schema = input.schema();
         let data_types = schema.data_types();
         for idx in plan.dedup_cols() {
-            if data_types[*idx] == DataType::Jsonb {
-                return Some(StreamKeyChecker::err_msg("distinct key", &schema[*idx]));
+            if self.is_restricted_key_type(&data_types[*idx]) {
+                return Some(self.err_msg("distinct key", &schema[*idx]));
             }
         }
         self.visit_inputs(plan)
@@ -64,8 +88,8 @@ impl LogicalPlanVisitor for StreamKeyChecker {
         let schema = input.schema();
         let data_types = schema.data_types();
         for idx in plan.group_key() {
-            if data_types[*idx] == DataType::Jsonb {
-                return Some(StreamKeyChecker::err_msg("TopN group key", &schema[*idx]));
+            if self.is_restricted_key_type(&data_types[*idx]) {
+                return Some(self.err_msg("TopN group key", &schema[*idx]));
             }
         }
         for idx in plan
@@ -74,8 +98,8 @@ impl LogicalPlanVisitor for StreamKeyChecker {
             .iter()
             .map(|c| c.column_index)
         {
-            if data_types[idx] == DataType::Jsonb {
-                return Some(StreamKeyChecker::err_msg("TopN order key", &schema[idx]));
+            if self.is_restricted_key_type(&data_types[idx]) {
+                return Some(self.err_msg("TopN order key", &schema[idx]));
             }
         }
         self.visit_inputs(plan)
@@ -84,8 +108,8 @@ impl LogicalPlanVisitor for StreamKeyChecker {
     fn visit_logical_union(&mut self, plan: &LogicalUnion) -> Self::Result {
         if !plan.all() {
             for field in &plan.inputs()[0].schema().fields {
-                if field.data_type() == DataType::Jsonb {
-                    return Some(StreamKeyChecker::err_msg("field", field));
+                if self.is_restricted_key_type(&field.data_type()) {
+                    return Some(self.err_msg("field", field));
                 }
             }
         }
@@ -97,11 +121,45 @@ impl LogicalPlanVisitor for StreamKeyChecker {
         let schema = input.schema();
         let data_types = schema.data_types();
         for idx in plan.group_key().indices() {
-            if data_types[idx] == DataType::Jsonb {
-                return Some(StreamKeyChecker::err_msg(
-                    "aggregation group key",
-                    &schema[idx],
-                ));
+            if self.is_restricted_key_type(&data_types[idx]) {
+                return Some(self.err_msg("aggregation group key", &schema[idx]));
+            }
+        }
+        // An aggregate call's own ORDER BY / DISTINCT lands in the state table key too.
+        if matches!(self, Self::Variant) {
+            for call in plan.agg_calls() {
+                for idx in call.order_by.iter().map(|c| c.column_index) {
+                    if self.is_restricted_key_type(&data_types[idx]) {
+                        return Some(self.err_msg("aggregation order key", &schema[idx]));
+                    }
+                }
+                for input in call.distinct.then_some(&call.inputs).into_iter().flatten() {
+                    let idx = input.index();
+                    if self.is_restricted_key_type(&data_types[idx]) {
+                        return Some(self.err_msg("distinct aggregation argument", &schema[idx]));
+                    }
+                }
+            }
+        }
+        self.visit_inputs(plan)
+    }
+
+    fn visit_logical_join(&mut self, plan: &LogicalJoin) -> Self::Result {
+        // Only the equi keys become a hash key; the rest of `on` stays a per-row predicate.
+        if matches!(self, Self::Variant) {
+            let left = plan.left();
+            let right = plan.right();
+            let predicate = EqJoinPredicate::create(
+                left.schema().len(),
+                right.schema().len(),
+                plan.on().clone(),
+            );
+            for (left_idx, right_idx) in predicate.eq_indexes() {
+                for (schema, idx) in [(left.schema(), left_idx), (right.schema(), right_idx)] {
+                    if self.is_restricted_key_type(&schema[idx].data_type()) {
+                        return Some(self.err_msg("join key", &schema[idx]));
+                    }
+                }
             }
         }
         self.visit_inputs(plan)
@@ -114,20 +172,14 @@ impl LogicalPlanVisitor for StreamKeyChecker {
 
         for func in plan.window_functions() {
             for idx in func.partition_by.iter().map(|e| e.index()) {
-                if data_types[idx] == DataType::Jsonb {
-                    return Some(StreamKeyChecker::err_msg(
-                        "over window partition key",
-                        &schema[idx],
-                    ));
+                if self.is_restricted_key_type(&data_types[idx]) {
+                    return Some(self.err_msg("over window partition key", &schema[idx]));
                 }
             }
 
             for idx in func.order_by.iter().map(|c| c.column_index) {
-                if data_types[idx] == DataType::Jsonb {
-                    return Some(StreamKeyChecker::err_msg(
-                        "over window order by key",
-                        &schema[idx],
-                    ));
+                if self.is_restricted_key_type(&data_types[idx]) {
+                    return Some(self.err_msg("over window order by key", &schema[idx]));
                 }
             }
         }

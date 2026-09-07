@@ -194,9 +194,8 @@ pub async fn gen_sink_plan(
     } else {
         OptimizerContext::from_handler_args(handler_args.clone())
     };
-
     let is_auto_schema_change = resolved_with_options
-        .remove(AUTO_SCHEMA_CHANGE_KEY)
+        .get(AUTO_SCHEMA_CHANGE_KEY)
         .map(|value| {
             value.parse::<bool>().map_err(|_| {
                 ErrorCode::InvalidInputSyntax(format!(
@@ -208,7 +207,7 @@ pub async fn gen_sink_plan(
         .transpose()?
         .unwrap_or(false);
 
-    if is_auto_schema_change {
+    if is_auto_schema_change && !is_iceberg_engine_internal {
         Feature::SinkAutoSchemaChange.check_available()?;
     }
 
@@ -347,20 +346,24 @@ pub async fn gen_sink_plan(
             if let Relation::BaseTable(table) = from_relation {
                 if table.table_catalog.table_type != TableType::Table {
                     return Err(ErrorCode::InvalidInputSyntax(format!(
-                        "auto schema change only support on TABLE, but got {:?}",
+                        "auto schema change is supported only on TABLE, but got {:?}",
                         table.table_catalog.table_type
                     ))
                     .into());
                 }
                 if table.table_catalog.database_id != sink_database_id {
                     return Err(ErrorCode::InvalidInputSyntax(
-                        "auto schema change sink does not support created from cross database table".to_owned()
+                        "auto schema change sinks do not support cross-database tables".to_owned(),
                     )
-                        .into());
+                    .into());
                 }
                 for col in &table.table_catalog.columns {
                     if !col.is_hidden() && (col.is_generated() || col.is_rw_sys_column()) {
-                        return Err(ErrorCode::InvalidInputSyntax(format!("auto schema change not supported for table with non-hidden generated column or sys column, but got {}", col.name())).into());
+                        return Err(ErrorCode::InvalidInputSyntax(format!(
+                            "auto schema change is not supported for tables with visible generated columns or visible system columns, but found column {}",
+                            col.name()
+                        ))
+                        .into());
                     }
                 }
                 Some(table.table_catalog)
@@ -473,7 +476,7 @@ pub async fn gen_sink_plan(
             .any(|col| !col.nullable())
         {
             notice_to_user(format!(
-                "The target table `{}` contains columns with NOT NULL constraints. Any sinked rows violating the constraints will be ignored silently.",
+                "The target table `{}` contains NOT NULL columns. Rows written by the sink that violate those constraints will be ignored silently.",
                 target_table_catalog.name(),
             ));
         }
@@ -534,7 +537,7 @@ pub async fn gen_sink_plan(
         for column in sink_catalog.full_columns() {
             if !column.can_dml() {
                 unreachable!(
-                    "can not derive generated columns and system column `_rw_timestamp` in a sink's catalog, but meet one"
+                    "cannot derive generated columns or the `_rw_timestamp` system column in a sink catalog, but found one"
                 );
             }
         }
@@ -629,12 +632,12 @@ async fn get_partition_compute_info_for_iceberg(
     ))
     .map_err(|_| {
         RwError::from(ErrorCode::SinkError(
-            "Fail to convert iceberg partition type to arrow type".into(),
+            "Failed to convert the Iceberg partition type to an Arrow type".into(),
         ))
     })?;
     let ArrowDataType::Struct(struct_fields) = arrow_type else {
         return Err(RwError::from(ErrorCode::SinkError(
-            "Partition type of iceberg should be a struct type".into(),
+            "The Iceberg partition type must be a struct type".into(),
         )));
     };
 
@@ -647,7 +650,7 @@ async fn get_partition_compute_info_for_iceberg(
                 schema
                     .field_by_id(f.source_id)
                     .ok_or(RwError::from(ErrorCode::SinkError(
-                        "Fail to look up iceberg partition field".into(),
+                        "Failed to look up the Iceberg partition field".into(),
                     )))?;
             Ok((source_f.name.clone(), f.transform))
         })

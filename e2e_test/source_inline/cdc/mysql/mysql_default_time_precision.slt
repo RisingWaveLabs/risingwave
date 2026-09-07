@@ -1,0 +1,101 @@
+control substitution on
+
+statement ok
+set timezone = 'UTC';
+
+system ok
+mysql -e "
+    CREATE DATABASE IF NOT EXISTS risedev;
+    USE risedev;
+    SET time_zone = '+00:00';
+    DROP TABLE IF EXISTS mysql_default_time_precision_test;
+    CREATE TABLE mysql_default_time_precision_test (
+        id INT NOT NULL PRIMARY KEY,
+        d DATE,
+        t0 TIME,
+        t6 TIME(6),
+        dt0 DATETIME,
+        dt3 DATETIME(3),
+        dt6 DATETIME(6),
+        ts0 TIMESTAMP NULL,
+        ts3 TIMESTAMP(3) NULL,
+        ts6 TIMESTAMP(6) NULL
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+    INSERT INTO mysql_default_time_precision_test VALUES
+        (1, '2024-02-29', '23:59:58', '12:34:56.123456', '2024-02-29 23:59:58', '2024-02-29 12:34:56.123', '2024-02-29 12:34:56.123456', '2024-02-29 08:09:10', '2024-02-29 08:09:10.123', '2024-02-29 08:09:10.123456');
+"
+
+statement ok
+create source s_mysql_default_time_precision with (
+  ${RISEDEV_MYSQL_WITH_OPTIONS_COMMON},
+  username = '${RISEDEV_MYSQL_USER}',
+  password = '${MYSQL_PWD}',
+  database.name = 'risedev'
+);
+
+sleep 2s
+
+statement ok
+create table rw_mysql_default_time_precision (
+  id INT,
+  d DATE,
+  t0 TIME,
+  t6 TIME,
+  dt0 TIMESTAMP,
+  dt3 TIMESTAMP,
+  dt6 TIMESTAMP,
+  ts0 TIMESTAMPTZ,
+  ts3 TIMESTAMPTZ,
+  ts6 TIMESTAMPTZ,
+  primary key (id)
+) with (
+  snapshot = 'true',
+  snapshot.batch_size = 1
+) from s_mysql_default_time_precision table 'risedev.mysql_default_time_precision_test';
+
+query TTTTTTTTTT retry 10 backoff 1s
+select id, d, t0, t6, dt0, dt3, dt6, ts0, ts3, ts6 from rw_mysql_default_time_precision order by id;
+----
+1 2024-02-29 23:59:58 12:34:56.123456 2024-02-29 23:59:58 2024-02-29 12:34:56.123 2024-02-29 12:34:56.123456 2024-02-29 08:09:10+00:00 2024-02-29 08:09:10.123+00:00 2024-02-29 08:09:10.123456+00:00
+
+system ok
+mysql -e "
+    USE risedev;
+    SET time_zone = '+00:00';
+    -- MySQL DATETIME can store a wider range than MySQL TIMESTAMP.
+    -- Keep one regular CDC row to verify TIMESTAMPTZ ingestion, and use NULL
+    -- for timestamp columns on rows that MySQL itself cannot represent.
+    INSERT INTO mysql_default_time_precision_test VALUES
+        (2, '2025-01-02', '00:00:01', '01:02:03.654321', '2025-01-02 03:04:05', '2025-01-02 03:04:05.654', '2025-01-02 03:04:05.654321', '2025-01-02 06:07:08', '2025-01-02 06:07:08.654', '2025-01-02 06:07:08.654321'),
+        (3, NULL, '00:00:00', '00:00:00.000000', NULL, NULL, NULL, NULL, NULL, NULL),
+        (4, '8000-06-01', '12:00:00', '12:00:00.000000', '8000-06-01 12:00:00', '8000-06-01 12:00:00.000', '8000-06-01 12:00:00.000000', NULL, NULL, NULL),
+        (5, '5138-11-16', '09:46:40', '09:46:40.000000', '5138-11-16 09:46:40', '5138-11-16 09:46:40.000', '5138-11-16 09:46:40.000000', NULL, NULL, NULL),
+        (6, '9999-12-31', '23:59:59', '23:59:59.999000', '9999-12-31 23:59:59', '9999-12-31 23:59:59.999', '9999-12-31 23:59:59.999000', NULL, NULL, NULL),
+        (7, '1967-06-30', '22:00:00', '22:00:00.000000', '1967-06-30 22:00:00', '1967-06-30 22:00:00.000', '1967-06-30 22:00:00.000000', NULL, NULL, NULL);
+"
+
+query TTTTTTTTTT retry 10 backoff 1s
+select id, d, t0, t6, dt0, dt3, dt6, ts0, ts3, ts6 from rw_mysql_default_time_precision order by id;
+----
+1 2024-02-29 23:59:58 12:34:56.123456 2024-02-29 23:59:58 2024-02-29 12:34:56.123 2024-02-29 12:34:56.123456 2024-02-29 08:09:10+00:00 2024-02-29 08:09:10.123+00:00 2024-02-29 08:09:10.123456+00:00
+2 2025-01-02 00:00:01 01:02:03.654321 2025-01-02 03:04:05 2025-01-02 03:04:05.654 2025-01-02 03:04:05.654321 2025-01-02 06:07:08+00:00 2025-01-02 06:07:08.654+00:00 2025-01-02 06:07:08.654321+00:00
+3 NULL 00:00:00 00:00:00 NULL NULL NULL NULL NULL NULL
+4 8000-06-01 12:00:00 12:00:00 8000-06-01 12:00:00 8000-06-01 12:00:00 8000-06-01 12:00:00 NULL NULL NULL
+5 5138-11-16 09:46:40 09:46:40 5138-11-16 09:46:40 5138-11-16 09:46:40 5138-11-16 09:46:40 NULL NULL NULL
+6 9999-12-31 23:59:59 23:59:59.999 9999-12-31 23:59:59 9999-12-31 23:59:59.999 9999-12-31 23:59:59.999 NULL NULL NULL
+7 1967-06-30 22:00:00 22:00:00 1967-06-30 22:00:00 1967-06-30 22:00:00 1967-06-30 22:00:00 NULL NULL NULL
+
+statement ok
+drop table rw_mysql_default_time_precision;
+
+statement ok
+drop source s_mysql_default_time_precision cascade;
+
+system ok
+mysql -e "
+    USE risedev;
+    DROP TABLE IF EXISTS mysql_default_time_precision_test;
+"
+
+statement ok
+set timezone = default;

@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use anyhow::{Result, anyhow, bail};
 use foyer::{CacheBuilder, HybridCacheBuilder};
-use risingwave_common::config::{MetricLevel, ObjectStoreConfig};
+use risingwave_common::config::{MetricLevel, ObjectStoreConfig, Role};
 use risingwave_object_store::object::build_remote_object_store;
 use risingwave_rpc_client::MetaClient;
 use risingwave_storage::hummock::hummock_meta_client::MonitoredHummockMetaClient;
@@ -137,6 +137,7 @@ impl HummockServiceOpts {
 
         let state_store_impl = StateStoreImpl::new(
             &self.hummock_url,
+            Role::None,
             Arc::new(opts),
             Arc::new(MonitoredHummockMetaClient::new(
                 meta_client.clone(),

@@ -88,6 +88,8 @@ impl Sink for KinesisSink {
 
     const SINK_NAME: &'static str = KINESIS_SINK;
 
+    crate::impl_validate_sink_unknown_fields!();
+
     async fn validate(&self) -> Result<()> {
         // Kinesis requires partition key. There is no builtin support for round-robin as in kafka/pulsar.
         // https://docs.aws.amazon.com/kinesis/latest/APIReference/API_PutRecord.html#Streams-PutRecord-request-PartitionKey
@@ -138,7 +140,12 @@ impl Sink for KinesisSink {
 pub struct KinesisSinkConfig {
     #[serde(flatten)]
     pub common: KinesisCommon,
+
+    #[serde(flatten)]
+    pub unknown_fields: std::collections::HashMap<String, String>,
 }
+
+crate::impl_sink_unknown_fields!(KinesisSinkConfig);
 
 impl EnforceSecret for KinesisSinkConfig {
     fn enforce_one(prop: &str) -> crate::error::ConnectorResult<()> {
@@ -211,9 +218,10 @@ mod opaque_type {
     use std::cmp::min;
     use std::time::Duration;
 
+    use risingwave_common::util::retry::exponential_backoff;
     use thiserror_ext::AsReport;
     use tokio::time::sleep;
-    use tokio_retry::strategy::{ExponentialBackoff, jitter};
+    use tokio_retry::strategy::jitter;
     use tracing::warn;
 
     use super::*;
@@ -314,7 +322,7 @@ mod opaque_type {
                                     // ProvisionedThroughputExceededException or InternalFailure. ErrorMessage provides more detailed
                                     // information about the ProvisionedThroughputExceededException exception including the account ID,
                                     // stream name, and shard ID of the record that was throttled.
-                                    let throttle_delay = throttle_delay.get_or_insert_with(|| ExponentialBackoff::from_millis(100).factor(2).max_delay(Duration::from_secs(2)).map(jitter)).next().expect("should not be none");
+                                    let throttle_delay = throttle_delay.get_or_insert_with(|| exponential_backoff(Duration::from_millis(100), 2, Duration::from_secs(2)).map(jitter)).next().expect("should not be none");
                                     warn!(err_string = ?result_entry.error_message, ?throttle_delay, "throttle");
                                     sleep(throttle_delay).await;
                                 } else  {

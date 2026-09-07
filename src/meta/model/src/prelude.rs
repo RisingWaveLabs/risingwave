@@ -23,7 +23,7 @@ pub use super::compaction_status::Entity as CompactionStatus;
 pub use super::compaction_task::Entity as CompactionTask;
 pub use super::connection::Entity as Connection;
 pub use super::database::Entity as Database;
-pub use super::fragment::Entity as Fragment;
+pub use super::fragment::{Column as FragmentColumn, Entity as Fragment};
 pub use super::fragment_relation::Entity as FragmentRelation;
 pub use super::fragment_splits::Entity as FragmentSplits;
 pub use super::function::Entity as Function;

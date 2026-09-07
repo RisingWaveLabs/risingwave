@@ -14,5 +14,6 @@
 
 #![feature(trait_alias)]
 #![feature(error_generic_member_access)]
+#![feature(coroutines)]
 
 pub mod object;

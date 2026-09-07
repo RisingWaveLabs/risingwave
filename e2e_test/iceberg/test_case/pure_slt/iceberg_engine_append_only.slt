@@ -20,6 +20,23 @@ with (
 statement ok
 set iceberg_engine_connection = 'public.my_conn';
 
+# Batch reads include rows that are durable in the sink log store but have not reached an Iceberg
+# snapshot yet.
+statement ok
+create table t_realtime(id int primary key, name varchar) APPEND ONLY
+with(commit_checkpoint_interval = 1000) engine = iceberg;
+
+statement ok
+insert into t_realtime values(1, 'pending');
+
+query ?? retry 6 backoff 1s
+select * from t_realtime;
+----
+1 pending
+
+statement ok
+DROP TABLE t_realtime;
+
 statement ok
 create table t(id int primary key, name varchar) APPEND ONLY
 with(commit_checkpoint_interval = 1) engine = iceberg;
@@ -34,6 +51,16 @@ query ?? retry 6 backoff 1s
 select * from t;
 ----
 1 xxx
+
+query T retry 6 backoff 1s
+select summary->>'risingwave.commit.epoch' is not null
+from rw_iceberg_snapshots
+where schema_name = 'public'
+and source_name = '__iceberg_source_t'
+order by sequence_number desc
+limit 1;
+----
+t
 
 query ??
 select * from t for system_time as of '2222-12-10 11:48:06';

@@ -245,9 +245,11 @@ impl<'a> AvroParseOptionsInner<'a> {
                     uncategorized!("timestamptz with milliseconds {ms} * 1000 is out of range")
                 })?
                 .into(),
-            (DataType::Timestamptz, Value::TimestampMicros(us)) => {
-                Timestamptz::from_micros(*us).into()
-            }
+            (DataType::Timestamptz, Value::TimestampMicros(us)) => Timestamptz::from_micros(*us)
+                .ok_or_else(|| {
+                    uncategorized!("timestamptz with microseconds {us} is out of range")
+                })?
+                .into(),
 
             // ---- Interval -----
             (DataType::Interval, Value::Duration(duration)) => {

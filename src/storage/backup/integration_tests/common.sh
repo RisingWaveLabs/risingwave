@@ -195,7 +195,7 @@ function execute_sql_and_expect() {
   echo "expected string in result: ${expected}"
   query_result=$(execute_sql "${sql}")
   printf "actual result:\n%s\n" "${query_result}"
-  result=$(echo "${query_result}" | grep "${expected}")
+  result=$(echo "${query_result}" | grep -F "${expected}")
   [ -n "${result}" ]
 }
 

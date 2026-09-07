@@ -25,6 +25,7 @@ pub mod common;
 pub mod diff;
 pub mod local_manager;
 pub mod reader;
+mod state_store_url;
 
 use std::fmt::Debug;
 use std::ops::RangeBounds;
@@ -33,6 +34,7 @@ use std::str::FromStr;
 use paste::paste;
 use risingwave_license::{LicenseKey, LicenseKeyRef};
 use risingwave_pb::meta::PbSystemParams;
+pub use state_store_url::{StateStoreUrl, StateStoreUrlRef};
 
 use self::diff::SystemParamsDiff;
 pub use crate::system_param::adaptive_parallelism_strategy::AdaptiveParallelismStrategy;
@@ -63,6 +65,7 @@ impl_param_value!(u64);
 impl_param_value!(f64);
 impl_param_value!(String => &'a str);
 impl_param_value!(LicenseKey => LicenseKeyRef<'a>);
+impl_param_value!(StateStoreUrl => StateStoreUrlRef<'a>);
 
 /// Define all system parameters here.
 ///
@@ -84,7 +87,7 @@ macro_rules! for_all_params {
             { parallel_compact_size_mb,                 u32,                            Some(512_u32),                  false,  "The size of parallel task for one compact/flush job.", },
             { block_size_kb,                            u32,                            Some(64_u32),                   false,  "Size of each block in bytes in SST.", },
             { bloom_false_positive,                     f64,                            Some(0.001_f64),                false,  "DEPRECATED: Bloom filter is no longer a supported SST filter implementation. This field is kept for backward compatibility and no longer controls whether SST filters are emitted.", },
-            { state_store,                              String,                         None,                           false,  "URL for the state store", },
+            { state_store,                              $crate::system_param::StateStoreUrl, None,                       false,  "URL for the state store", },
             { data_directory,                           String,                         None,                           false,  "Remote directory for storing data and metadata objects.", },
             { backup_storage_url,                       String,                         None,                           true,   "Remote storage url for storing snapshots.", },
             { backup_storage_directory,                 String,                         None,                           true,   "Remote directory for storing snapshots.", },
@@ -488,6 +491,7 @@ impl FromParams for OverrideFromParams {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::system_param::reader::{SystemParamsRead, SystemParamsReader};
 
     #[test]
     fn test_to_from_kv() {
@@ -579,5 +583,26 @@ mod tests {
         assert_eq!(new_value.to_string(), "<redacted>");
         // while `Into<String>` still shows the real value.
         assert_eq!(String::from(new_value.as_ref()), new_license_key_value);
+    }
+
+    #[test]
+    fn test_state_store_credentials_are_redacted_for_display() {
+        let mut p = system_params_for_test();
+        let state_store = "hummock+minio://minioadmin:minioadmin@localhost:9000/risingwave-hummock";
+        p.state_store = Some(state_store.to_owned());
+
+        let reader = SystemParamsReader::new(&p);
+        let state_store_param = reader
+            .get_all()
+            .into_iter()
+            .find(|param| param.name == STATE_STORE_KEY)
+            .unwrap();
+
+        assert_eq!(
+            state_store_param.value,
+            "hummock+minio://****:****@localhost:9000/risingwave-hummock"
+        );
+        assert_eq!(reader.state_store().expose(), state_store);
+        assert_eq!(String::from(reader.state_store()), state_store);
     }
 }

@@ -18,6 +18,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 use itertools::Itertools;
 use risingwave_common::catalog::TableId;
+use risingwave_common::config::Role;
 use risingwave_common::hash::VirtualNode;
 use risingwave_common::id::WorkerId;
 use risingwave_common_service::ObserverManager;
@@ -42,7 +43,7 @@ use risingwave_storage::compaction_catalog_manager::{
 use risingwave_storage::error::StorageResult;
 use risingwave_storage::hummock::HummockStorage;
 use risingwave_storage::hummock::backup_reader::BackupReader;
-use risingwave_storage::hummock::event_handler::HummockVersionUpdate;
+use risingwave_storage::hummock::event_handler::{HummockObserverEvent, HummockVersionUpdate};
 use risingwave_storage::hummock::iterator::test_utils::mock_sstable_store;
 use risingwave_storage::hummock::local_version::pinned_version::PinnedVersion;
 use risingwave_storage::hummock::observer_manager::HummockObserverNode;
@@ -61,10 +62,11 @@ pub async fn prepare_first_valid_version(
     worker_id: WorkerId,
 ) -> (
     PinnedVersion,
-    UnboundedSender<HummockVersionUpdate>,
-    UnboundedReceiver<HummockVersionUpdate>,
+    UnboundedSender<HummockObserverEvent>,
+    UnboundedReceiver<HummockObserverEvent>,
 ) {
-    let (tx, mut rx) = unbounded_channel();
+    let (observer_event_tx, mut observer_event_rx) = unbounded_channel();
+
     let notification_client = get_notification_client_for_test(
         env,
         hummock_manager_ref.clone(),
@@ -77,23 +79,26 @@ pub async fn prepare_first_valid_version(
     let observer_manager = ObserverManager::new(
         notification_client,
         HummockObserverNode::new(
+            Role::None,
             Arc::new(CompactionCatalogManager::default()),
             backup_manager,
-            tx.clone(),
+            observer_event_tx.clone(),
             write_limiter,
         ),
     )
     .await;
     observer_manager.start().await;
-    let hummock_version = match rx.recv().await {
-        Some(HummockVersionUpdate::PinnedVersion(version)) => version,
+    let hummock_version = match observer_event_rx.recv().await {
+        Some(HummockObserverEvent::VersionUpdate(HummockVersionUpdate::PinnedVersion(version))) => {
+            version
+        }
         _ => unreachable!("should be full version"),
     };
 
     (
         PinnedVersion::new(*hummock_version, unbounded_channel().0),
-        tx,
-        rx,
+        observer_event_tx,
+        observer_event_rx,
     )
 }
 

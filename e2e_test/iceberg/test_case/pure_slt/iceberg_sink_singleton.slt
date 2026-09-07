@@ -1,0 +1,85 @@
+# A streaming LIMIT makes the sink fragment singleton. Coordinated sinks must still
+# commit the sole writer's metadata instead of rejecting its omitted vnode bitmap.
+
+system ok
+sparksql --e "
+DROP TABLE IF EXISTS demo.demo_db.e2e_singleton_sink_table PURGE;
+"
+
+statement ok
+SET sink_decouple = true;
+
+statement ok
+CREATE TABLE iceberg_singleton_sink_input (id INT, name VARCHAR) APPEND ONLY;
+
+statement ok
+CREATE SINK iceberg_singleton_sink AS
+SELECT id, name
+FROM iceberg_singleton_sink_input
+LIMIT 3
+WITH (
+    connector = 'iceberg',
+    type = 'append-only',
+    force_append_only = 'true',
+    warehouse.path = 's3a://icebergdata',
+    s3.endpoint = 'http://127.0.0.1:9301',
+    s3.access.key = 'hummockadmin',
+    s3.secret.key = 'hummockadmin',
+    s3.region = 'us-east-1',
+    catalog.name = 'demo',
+    catalog.type = 'storage',
+    database.name = 'demo_db',
+    table.name = 'e2e_singleton_sink_table',
+    commit_checkpoint_interval = 1,
+    create_table_if_not_exists = 'true'
+);
+
+query I
+SELECT watermark_vnode_count
+FROM rw_catalog.rw_sink_decouple
+JOIN rw_catalog.rw_sinks ON rw_sinks.id = rw_sink_decouple.sink_id
+WHERE rw_sinks.name = 'iceberg_singleton_sink';
+----
+1
+
+statement ok
+CREATE SOURCE iceberg_singleton_sink_source WITH (
+    connector = 'iceberg',
+    warehouse.path = 's3a://icebergdata',
+    s3.endpoint = 'http://127.0.0.1:9301',
+    s3.access.key = 'hummockadmin',
+    s3.secret.key = 'hummockadmin',
+    s3.region = 'us-east-1',
+    catalog.name = 'demo',
+    catalog.type = 'storage',
+    database.name = 'demo_db',
+    table.name = 'e2e_singleton_sink_table'
+);
+
+statement ok
+INSERT INTO iceberg_singleton_sink_input VALUES
+    (1, 'alice'),
+    (2, 'bob'),
+    (3, 'carol');
+
+statement ok
+FLUSH;
+
+query IT retry 10 backoff 1s
+SELECT id, name FROM iceberg_singleton_sink_source ORDER BY id;
+----
+1 alice
+2 bob
+3 carol
+
+statement ok
+DROP SOURCE iceberg_singleton_sink_source;
+
+statement ok
+DROP SINK iceberg_singleton_sink;
+
+statement ok
+DROP TABLE iceberg_singleton_sink_input;
+
+system ok
+sparksql --e "DROP TABLE IF EXISTS demo.demo_db.e2e_singleton_sink_table PURGE;"

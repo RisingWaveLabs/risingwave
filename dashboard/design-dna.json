@@ -1,0 +1,284 @@
+{
+  "meta": {
+    "name": "RisingWave Cloud — New Portal Design DNA",
+    "description": "Agent-native SaaS dashboard: Linear/Vercel-grade restrained density, warm neutral canvas, dark-solid primary actions, inset-highlight material cards, cobe WebGL globe as signature effect",
+    "source_references": [
+      "app/globals.css (CSS custom properties, animation utilities)",
+      "tailwind.config.ts (font stacks, radius, shadows)",
+      "lib/design-language.ts (shared cva style primitives)",
+      "components/layout/top-bar.tsx, dashboard-sidebar.tsx",
+      "components/shared/page-header.tsx, stat-card.tsx",
+      "components/chat/chat-message.tsx, canvas/surfaces/onboarding.tsx",
+      "components/create-cluster/region-globe.tsx (cobe WebGL globe)"
+    ],
+    "created_at": "2026-07-20"
+  },
+  "design_system": {
+    "color": {
+      "palette_type": "analogous-neutral-with-single-brand-accent",
+      "primary": {
+        "hex": "#171C28",
+        "role": "Primary actions are INVERTED dark solid (HSL 222 27% 12%), not brand blue — buttons/avatars use near-black navy"
+      },
+      "secondary": {
+        "hex": "#F5F4F0",
+        "role": "Warm neutral fills — sidebar bg-secondary/50, muted surfaces, hover states (HSL 40 18% 96%)"
+      },
+      "accent": {
+        "hex": "#2A9DF4",
+        "role": "Brand azure (HSL 214 90% 56%) reserved for badges, focus rings, AI Agent nav icon, chart-1 — used sparingly, never on primary buttons"
+      },
+      "neutral": {
+        "scale": [
+          "#FAF8F4 (background, HSL 40 27% 98%)",
+          "#F5F4F0 (secondary)",
+          "#F2F0EB (muted, HSL 36 21% 95%)",
+          "#E3E0D8 (border, HSL 36 13% 87%)",
+          "#515A6B (muted-foreground, HSL 220 12% 36%)",
+          "#3D4452 (foreground-secondary, HSL 220 14% 28%)",
+          "#161B26 (foreground, HSL 222 24% 11%)"
+        ],
+        "usage": "Warm-tinted neutrals (hue 36–40) for surfaces; cool navy neutrals (hue 220–222) for text — a deliberate warm-canvas / cool-ink split. Three-tier semantic text: foreground > foreground-secondary (~8:1) > foreground-tertiary (~5.4:1)"
+      },
+      "semantic": {
+        "success": "#16A34A (HSL 142 76% 36%)",
+        "warning": "#F59E0B (HSL 38 92% 50%)",
+        "error": "#EF4444 (HSL 0 84.2% 60.2%)",
+        "info": "#0EA5E9 (HSL 199 89% 48%)"
+      },
+      "surface": {
+        "background": "#FAF8F4 warm off-white + two 8%-opacity radial gradient tints (blue top-left, amber bottom-right)",
+        "card": "#FFFFFF at 90–96% opacity over the tinted background",
+        "elevated": "Same white card + shadow-panel / shadow-float; app-shell uses bg-background/90 + backdrop-blur-xl"
+      },
+      "contrast_strategy": "High-contrast text on subtle layered surfaces; hierarchy via semantic foreground tiers and 4%/7% foreground-alpha hover/active fills rather than color"
+    },
+    "typography": {
+      "type_scale": {
+        "display": { "size": "24px (text-2xl, rare — onboarding heroes only)", "weight": "600 semibold", "line_height": "1.2", "tracking": "-0.01em (tracking-tight)" },
+        "heading_1": { "size": "20px (text-xl, page titles)", "weight": "600 semibold", "line_height": "1.3", "tracking": "-0.01em (tracking-tight)" },
+        "heading_2": { "size": "16px (text-base, card titles)", "weight": "600 semibold", "line_height": "1.4", "tracking": "0" },
+        "heading_3": { "size": "14px (text-sm, section labels)", "weight": "500 medium", "line_height": "1.4", "tracking": "0" },
+        "body": { "size": "14px (text-sm) — the dominant size for nav, chat, table rows, descriptions", "weight": "400 normal", "line_height": "1.5", "tracking": "0" },
+        "body_small": { "size": "12px (text-xs) — labels, captions, stat units, pills, kbd", "weight": "400–500", "line_height": "1.45 (leading-snug for notes)", "tracking": "0" },
+        "caption": { "size": "12px (text-xs)", "weight": "400", "line_height": "1.45", "tracking": "0", "note": "always foreground-tertiary or muted-foreground" },
+        "overline": { "size": "12px (text-xs)", "weight": "500 medium", "line_height": "1.4", "tracking": "0", "note": "sidebar section group labels; no uppercase/letter-spacing treatment" }
+      },
+      "font_families": {
+        "heading": "'Avenir Next', 'Segoe UI', 'Helvetica Neue', Arial, sans-serif (same stack as body)",
+        "body": "'Avenir Next', 'Segoe UI', 'Helvetica Neue', Arial, sans-serif",
+        "mono": "'JetBrains Mono', SFMono-Regular, ui-monospace, monospace — code, connection strings, kbd hints"
+      },
+      "font_style_notes": "Neutral grotesque (Avenir Next) with humanist proportions; numbers in stats use tabular-nums; hierarchy is weight+color-tier driven, not size-driven — page titles are only 20px"
+    },
+    "spacing": {
+      "base_unit": "4px (Tailwind default)",
+      "scale": "0.5 / 1 / 1.5 / 2 / 2.5 / 3 / 3.5 / 4 / 6 — small end used heavily; nav items px-2.5 py-[7px], stat cards px-3.5 py-3, chat bubbles px-3 py-2",
+      "content_density": "compact — Linear-grade density; 52px top bar, 216px sidebar, 12–14px body text",
+      "section_rhythm": "gap-4 to gap-6 within pages; cards separated by 16px grids; consistent 8px micro-gaps inside components"
+    },
+    "layout": {
+      "grid_system": "App shell: fixed 216px left sidebar + 52px top bar + fluid main scroll region; content grids are 2-col (onboarding) or auto-fit stat rows; chat+canvas split (35%/65%) on agent surfaces",
+      "max_content_width": "Fluid (no centered max-width container; dashboard fills viewport)",
+      "columns": "2 for quick-action cards; 3–4 for stat cards; single column for lists/tables",
+      "gutter": "16px (gap-4)",
+      "breakpoints": "Tailwind defaults; lg (1024px) is the key breakpoint — sidebar hidden below lg, mobile falls back to horizontal scroll tab bars",
+      "alignment_tendency": "strict grid, left-aligned content; asymmetric shell (sidebar + content)"
+    },
+    "shape": {
+      "border_radius": {
+        "small": "10px (rounded-sm = radius − 4px)",
+        "medium": "12px (rounded-md) — buttons, nav items, inputs, pills",
+        "large": "14px (rounded-lg, --radius: 0.875rem) — cards, dropdowns, dialogs",
+        "pill": "rounded-full — avatars, badges, status dots"
+      },
+      "border_usage": "Subtle 1px at reduced opacity: border-border/50 on shell chrome, border-border/60–70 on cards and inputs; also ring-1 ring-inset for badges/callouts",
+      "divider_style": "1px hairlines at border/40–50 opacity; DropdownMenuSeparator; section gaps preferred over dividers inside cards"
+    },
+    "elevation": {
+      "shadow_style": "soft diffused + inset highlight — the signature is a nearly-flat surface with a top inner white highlight (light) / faint inner edge (dark)",
+      "levels": {
+        "low": "surface-card: 0 1px 2px rgba(15,23,42,0.04) + inset 0 1px 0 rgba(255,255,255,0.9)",
+        "medium": "shadow-panel: 0 1px 2px rgba(15,23,42,0.05), 0 18px 40px rgba(15,23,42,0.04)",
+        "high": "shadow-float: 0 22px 48px rgba(15,23,42,0.08) — dropdowns/dialogs use shadow-lg"
+      },
+      "depth_cues": "inset highlights + low-alpha ambient shadows + backdrop blur on the app shell; never hard drop shadows"
+    },
+    "iconography": {
+      "style": "Lucide outline icons, minimal geometric",
+      "stroke_weight": "1.5–2px (stat watermark icons explicitly 1.5)",
+      "size_scale": "15px (nav, h-[15px] w-[15px]), 16px (h-4, inline), 20px (h-5, card headers); decorative watermark icons oversized at 5% opacity",
+      "preferred_set": "lucide-react exclusively; third-party brand SVGs (Slack etc.) for external links"
+    },
+    "motion": {
+      "easing": "ease-out for entrances, ease-in for exits; signature spring cubic-bezier(0.16, 1, 0.3, 1) for step transitions",
+      "duration_scale": {
+        "micro": "150ms (fade-out, zoom-out exits)",
+        "normal": "200ms (animate-in, fade/slide/zoom, sidebar panel crossfade, accordion)",
+        "macro": "220ms (step-forward/back), 1500ms ambient loops (shimmer, pulse-ring)"
+      },
+      "entrance_pattern": "opacity 0→1 with 4–8px translateY or 0.95→1 scale; sidebar panels crossfade with translate-x ±12px + blur(3px)",
+      "exit_pattern": "quick 150ms ease-in fade + 4px settle",
+      "philosophy": "minimal functional — every animation communicates state change; no scroll reveals, no decorative parallax"
+    },
+    "components": {
+      "button_style": "Dark solid primary (near-black bg, white text); ghost/secondary with hover bg-muted/60; danger as text-red-600 menu items; rounded-md; text-sm/xs",
+      "input_style": "rounded-md border-border/60 bg-muted/30, focus ring-2 ring-ring (brand blue) with ring-offset-2; fake-input search trigger with ⌘K kbd chip",
+      "card_style": "surface-card material: 14px radius, 1px border/65, 96% white bg, inset top highlight; hover:bg-accent for clickable cards",
+      "navigation_pattern": "Ghost nav items — active = bg-foreground/[0.07] + font-medium, idle = foreground-tertiary with hover bg-foreground/[0.04]; shared navItemVariants cva primitive; cluster context swaps sidebar panels with blur-crossfade",
+      "modal_style": "rounded-lg border-border/70 p-2 shadow-lg dropdowns; command palette (⌘K) as primary power-user surface; global dialogs mounted in layout",
+      "list_style": "Comfortable rows, 8px radius hover fills, 12px secondary metadata under 14px primary text",
+      "component_notes": "Shared cva primitives in lib/design-language.ts: navItemVariants, filterPillVariants, noticePanelVariants (sky/amber/rose tones), semanticIconChipVariants, semanticDotVariants, brandBadgeClass. Badges are pill-shaped with 10%-alpha brand tint. Notice panels use pastel tone pairs (50-bg / 200-border / 900-text light; 500/10-20% dark). Stat cards use oversized watermark icons at 5% opacity."
+    }
+  },
+  "design_style": {
+    "aesthetic": {
+      "mood": ["calm", "precise", "competent", "quietly premium", "developer-focused"],
+      "visual_metaphor": "A well-lit instrument panel — warm paper canvas, cool ink, machined inset surfaces",
+      "era_influence": "2020s modern SaaS (Linear / Vercel / Raycast lineage)",
+      "genre": "developer SaaS console, agent-native dashboard",
+      "personality_traits": ["meticulous", "restrained", "confident", "keyboard-first", "unhurried"],
+      "adjectives": ["quiet", "dense-but-breathable", "machined", "warm-neutral", "crafted"]
+    },
+    "visual_language": {
+      "complexity": "minimal-to-moderate",
+      "ornamentation": "subtle accents only — watermark icons, hairline grids, 8% gradient tints",
+      "whitespace_usage": "Tight but deliberate; density is earned through consistent 4px rhythm, not cramped",
+      "visual_weight_distribution": "Text-weight hierarchy carries the page; color is rationed to status and one brand accent",
+      "focal_strategy": "progressive reveal — shell is neutral, the active surface/command palette is the focus",
+      "contrast_level": "High text contrast, low chrome contrast (borders at 50% alpha)",
+      "texture_usage": "hairline-grid (24px slate lines at 8%), radial gradient tints, inset highlight material — all sub-perceptual"
+    },
+    "composition": {
+      "hierarchy_method": "typographic hierarchy + semantic foreground tiers (primary/secondary/tertiary text)",
+      "balance_type": "asymmetric shell (sidebar + content), symmetric within content blocks",
+      "flow_direction": "Top-down within surfaces; left-to-right task flow (nav → content → contextual dialogs)",
+      "grouping_strategy": "Spacing and section labels over boxes; cards reserved for discrete interactive entities",
+      "negative_space_role": "Separates functional groups; 52px/216px chrome frames a generous content canvas"
+    },
+    "imagery": {
+      "photo_treatment": "none — no photography in product UI",
+      "illustration_style": "none — empty states rely on icons and copy",
+      "graphic_elements": "Lucide icons, status dots, watermark icons at 5% opacity, brand logo PNG/SVG",
+      "pattern_usage": "hairline-grid background on select surfaces",
+      "image_shape": "rounded-full avatars with initial letters; rounded-lg media if any"
+    },
+    "interaction_feel": {
+      "feedback_style": "Immediate, quiet — 4%/7% alpha hover/active fills, opacity + blur transitions, no bouncy playfulness",
+      "hover_behavior": "bg-foreground/[0.04] fill + foreground-tertiary → foreground text; cards shift to bg-accent; avatar scales 1.02",
+      "transition_personality": "snappy with a crafted finish — 150–220ms ease-out, blur-crossfade between nav contexts",
+      "loading_style": "shimmer skeletons, Loader2 spinners, pulse-ring status beacons",
+      "microinteraction_density": "low-to-moderate — polished where state changes (sidebar context swap, command palette), absent elsewhere"
+    },
+    "brand_voice_in_ui": {
+      "tone": "Direct, technical, quietly helpful ('Set up Claude Code, Cursor, or VS Code to work with your cluster')",
+      "formality": "professional-casual; sentence case, no exclamation marks",
+      "cta_style": "direct imperative ('Create a Cluster', 'Run SQL')",
+      "empty_state_approach": "Onboarding quick-action cards with icon + title + one-line description",
+      "error_tone": "Plain-spoken, red-600/rose tones, no alarmism"
+    }
+  },
+  "visual_effects": {
+    "overview": {
+      "effect_intensity": "subtle-accent",
+      "performance_tier": "medium (one WebGL globe, CSS-driven everything else)",
+      "fallback_strategy": "Globe degrades to list selection; CSS animations are non-essential; anchor positioning gated behind @supports",
+      "primary_technology": "CSS animations + cobe (lightweight WebGL globe) + MapLibre GL for region maps"
+    },
+    "background_effects": {
+      "type": "gradient-tints + hairline-grid",
+      "description": "Two static radial gradient tints (azure top-left, amber bottom-right, 8% opacity) over the warm off-white body; 24px hairline grid at 8% slate on select surfaces",
+      "technology": "pure CSS (radial-gradient, linear-gradient)",
+      "params": {
+        "color_palette": ["rgba(59,130,246,0.08)", "rgba(245,158,11,0.08)", "rgba(148,163,184,0.08)"],
+        "speed": "static",
+        "density": "24px grid cell",
+        "opacity": "0.08",
+        "blend_mode": "normal"
+      }
+    },
+    "particle_systems": {
+      "enabled": false,
+      "type": "none",
+      "description": "No particle systems",
+      "technology": "n/a",
+      "params": { "count": "0", "shape": "n/a", "size_range": "n/a", "movement_pattern": "n/a", "color_behavior": "n/a", "interaction": "none", "spawn_area": "n/a" }
+    },
+    "3d_elements": {
+      "enabled": true,
+      "type": "abstract-geometry (dot-matrix globe)",
+      "description": "cobe WebGL globe in the cluster-creation region picker; auto-rotates, eases toward the selected region via shortest-angle interpolation; region markers projected to screen space with custom lat/lng→XY math matching cobe's internal projection, labels positioned via CSS Anchor Positioning (@supports-gated, Chrome 125+)",
+      "technology": "cobe (WebGL) on <canvas>, imperative animation state outside React render cycle",
+      "params": {
+        "renderer": "WebGL via cobe",
+        "lighting": "cobe default diffuse",
+        "camera": "phi/theta eased toward selected region (shortAngle interpolation)",
+        "materials": "dot-matrix sphere",
+        "geometry": "sphere with lat/lng markers at 0.81 elevation",
+        "post_processing": "none",
+        "interaction_model": "click region markers to select; passive auto-rotation"
+      }
+    },
+    "shader_effects": {
+      "enabled": false,
+      "type": "none",
+      "description": "No custom GLSL; cobe's built-in shaders only",
+      "technology": "n/a",
+      "params": { "uniforms": "n/a", "vertex_manipulation": "n/a", "fragment_output": "n/a", "noise_type": "n/a", "distortion": "n/a" }
+    },
+    "scroll_effects": {
+      "parallax": { "enabled": false, "layers": "0", "depth_range": "n/a", "speed_curve": "n/a" },
+      "scroll_triggered_animations": { "enabled": false, "trigger_points": "n/a", "animation_type": "none — content renders immediately", "scrub_behavior": "n/a" },
+      "scroll_morphing": { "enabled": false, "description": "none; html scroll-behavior: smooth only" }
+    },
+    "text_effects": {
+      "type": "none",
+      "description": "No split-letter or gradient text; streaming chat text renders as plain pre-wrap",
+      "technology": "n/a",
+      "params": { "split_strategy": "n/a", "animation_per_unit": "n/a", "stagger": "n/a", "effect_style": "n/a" }
+    },
+    "cursor_effects": {
+      "enabled": false,
+      "type": "none",
+      "description": "Native cursor throughout",
+      "params": { "shape": "n/a", "size": "n/a", "blend_mode": "n/a", "trail": "n/a", "interaction_zone": "n/a" }
+    },
+    "image_effects": {
+      "type": "none",
+      "description": "No image filters/distortions; only 1.02 scale on avatar hover",
+      "technology": "CSS transform",
+      "params": { "filter_pipeline": "none", "hover_transform": "scale(1.02) on avatar only", "reveal_animation": "none", "distortion_type": "none" }
+    },
+    "glassmorphism_neumorphism": {
+      "enabled": true,
+      "style": "frosted-layers (app shell only)",
+      "params": {
+        "blur_radius": "backdrop-blur-xl (24px)",
+        "transparency": "bg-background/90, cards at /90–96",
+        "border_treatment": "1px border/50–70 + inset highlight",
+        "shadow_type": "soft diffused ambient",
+        "light_source_angle": "top (inset 0 1px 0 white highlight)"
+      }
+    },
+    "canvas_drawings": {
+      "enabled": true,
+      "type": "data-visualization + globe",
+      "description": "cobe globe canvas; MapLibre GL map canvas for BYOC region selection; charts planned via chart-1..6 tokens",
+      "technology": "cobe WebGL, MapLibre GL",
+      "params": {
+        "draw_method": "library-driven",
+        "animation_loop": "globe auto-rotation + eased camera retargeting",
+        "color_scheme": "brand blue markers on neutral sphere",
+        "responsiveness": "canvas resizes with container",
+        "interaction": "marker click → region select; MapLibre logo/attribution hidden"
+      }
+    },
+    "svg_animations": {
+      "enabled": false,
+      "type": "none",
+      "description": "SVGs are static (icons, logos); loading uses CSS-driven Loader2 spin and shimmer",
+      "params": { "animation_method": "CSS on whole element", "path_morphing": "n/a", "stroke_animation": "n/a", "filter_effects": "n/a" }
+    },
+    "composite_notes": "The visual signature is restraint: a warm-tinted canvas (hue 40) against cool navy ink (hue 222), one rationed azure brand accent, and the inset-highlight 'machined surface' card material. The single moment of spectacle — the cobe globe during cluster creation — is deliberately quarantined to a high-intent flow, which makes it feel earned. Sidebar context switching (dashboard ↔ cluster) uses a translate+blur crossfade that reads as spatial navigation, not decoration. Everything else is 150–220ms ease-out micro-motion. Chart colors form a cool-first categorical ramp (blue → cyan → orange → green → violet → pink)."
+  }
+}

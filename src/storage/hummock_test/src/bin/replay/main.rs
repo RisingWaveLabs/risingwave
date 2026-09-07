@@ -30,7 +30,7 @@ use clap::Parser;
 use foyer::{CacheBuilder, HybridCacheBuilder};
 use replay_impl::{GlobalReplayImpl, get_replay_notification_client};
 use risingwave_common::config::{
-    NoOverride, ObjectStoreConfig, extract_storage_memory_config, load_config,
+    NoOverride, ObjectStoreConfig, Role, extract_storage_memory_config, load_config,
 };
 use risingwave_common::system_param::reader::SystemParamsReader;
 use risingwave_hummock_trace::{
@@ -170,6 +170,7 @@ async fn create_replay_hummock(r: Record, args: &Args) -> Result<impl GlobalRepl
     };
 
     let storage = HummockStorage::new(
+        Role::None,
         storage_opts,
         sstable_store,
         hummock_meta_client.clone(),
@@ -182,7 +183,7 @@ async fn create_replay_hummock(r: Record, args: &Args) -> Result<impl GlobalRepl
         None,
     )
     .await
-    .expect("fail to create a HummockStorage object");
+    .expect("failed to create a HummockStorage object");
     let replay_interface = GlobalReplayImpl::new(storage, notifier);
 
     Ok(replay_interface)

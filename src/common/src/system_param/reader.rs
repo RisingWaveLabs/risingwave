@@ -17,7 +17,7 @@ use std::borrow::Borrow;
 use risingwave_license::LicenseKeyRef;
 use risingwave_pb::meta::PbSystemParams;
 
-use super::{ParamValue, default};
+use super::{ParamValue, StateStoreUrlRef, default};
 use crate::for_all_params;
 
 /// Information about a system parameter.
@@ -166,8 +166,8 @@ where
         self.inner().bloom_false_positive.unwrap()
     }
 
-    fn state_store(&self) -> &str {
-        self.inner().state_store.as_ref().unwrap()
+    fn state_store(&self) -> StateStoreUrlRef<'_> {
+        self.inner().state_store.as_deref().unwrap().into()
     }
 
     fn data_directory(&self) -> &str {

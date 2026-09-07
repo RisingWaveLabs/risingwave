@@ -12,7 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::optimizer::plan_node::{Logical, PlanTreeNode};
+use std::ops::Deref;
+
+use risingwave_common::catalog::Schema;
+
+use crate::optimizer::plan_node::generic::GenericPlanRef;
+use crate::optimizer::plan_node::{Logical, PlanBase, PlanTreeNode};
 use crate::optimizer::plan_visitor::{DefaultBehavior, LogicalPlanVisitor};
 use crate::optimizer::{LogicalPlanRef, PlanVisitor};
 
@@ -29,8 +34,15 @@ pub struct CheckResult {
 impl DataFusionExecuteChecker {
     /// Recursively checks all input plans and aggregates their [`CheckResult`]s,
     /// combining `supported` with logical AND and `have_iceberg_scan` with logical OR.
-    fn check_inputs(&mut self, plan: &impl PlanTreeNode<Logical>) -> CheckResult {
-        plan.inputs()
+    ///
+    /// The current node's own output schema is also gated by
+    /// [`schema_supported_by_datafusion`].
+    fn check_inputs(
+        &mut self,
+        plan: &(impl PlanTreeNode<Logical> + Deref<Target = PlanBase<Logical>>),
+    ) -> CheckResult {
+        let mut res = plan
+            .inputs()
             .into_iter()
             .map(|input| self.visit(input))
             .fold(
@@ -43,8 +55,23 @@ impl DataFusionExecuteChecker {
                     acc.have_iceberg_scan |= item.have_iceberg_scan;
                     acc
                 },
-            )
+            );
+        res.supported &= schema_supported_by_datafusion(plan.schema());
+        res
     }
+}
+
+/// A schema is unsupported by DataFusion if any field is (or nests) a `VARIANT`.
+///
+/// Converting a variant array to Arrow is unsupported, so a variant anywhere in a node
+/// schema would fail at runtime with no fallback left. Keying on one is already rejected
+/// earlier by [`crate::optimizer::variant_key`], so this gate is what catches the rest —
+/// a variant that is merely carried through a plan, e.g. `select v from t`.
+fn schema_supported_by_datafusion(schema: &Schema) -> bool {
+    !schema
+        .fields()
+        .iter()
+        .any(|field| field.data_type.contains_variant())
 }
 
 impl LogicalPlanVisitor for DataFusionExecuteChecker {
@@ -154,10 +181,10 @@ impl LogicalPlanVisitor for DataFusionExecuteChecker {
 
     fn visit_logical_iceberg_scan(
         &mut self,
-        _: &crate::optimizer::plan_node::LogicalIcebergScan,
+        plan: &crate::optimizer::plan_node::LogicalIcebergScan,
     ) -> Self::Result {
         CheckResult {
-            supported: true,
+            supported: schema_supported_by_datafusion(plan.schema()),
             have_iceberg_scan: true,
         }
     }

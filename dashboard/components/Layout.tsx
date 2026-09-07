@@ -17,163 +17,263 @@
 
 import {
   Box,
-  Button,
   Flex,
   HStack,
   Image,
+  Link as ChakraLink,
   Text,
-  VStack,
 } from "@chakra-ui/react"
 import Link from "next/link"
 import { useRouter } from "next/router"
-import React, { useEffect, useState } from "react"
-import { UrlObject } from "url"
+import React, { ComponentType, useEffect, useState } from "react"
 import {
-  IconArrowRightCircle,
-  IconArrowRightCircleFill,
-  IconBoxArrowUpRight,
+  IconActivity,
+  IconArrowDownToLine,
+  IconArrowUpFromLine,
+  IconArrowUpRight,
+  IconDatabase,
+  IconEye,
+  IconGitBranch,
+  IconHourglass,
+  IconLayers,
+  IconListChecks,
+  IconListTree,
+  IconMemoryStick,
+  IconNetwork,
+  IconProps,
+  IconRoute,
+  IconRss,
   IconServer,
-} from "../components/utils/icons"
+  IconSettings,
+  IconSquareFunction,
+  IconTable,
+  IconWorkflow,
+} from "../components/utils/stroke-icons"
+import { colors, fills, fonts, motion, radii } from "../lib/design-tokens"
 
-export const NAVBAR_WIDTH = "300px"
+// App shell: fixed 216px left sidebar + fluid main scroll region.
+export const NAVBAR_WIDTH = "216px"
 
-function NavButton({
-  href,
-  children,
-  leftIcon,
-  leftIconActive,
-  external,
-}: {
-  href: string | UrlObject
-  children?: React.ReactNode
-  leftIcon?: React.ReactElement
-  leftIconActive?: React.ReactElement
+type NavItemData = {
+  href: string
+  title: string
+  icon: ComponentType<IconProps>
   external?: boolean
-}) {
+}
+
+type NavSectionData = {
+  label?: string
+  items: NavItemData[]
+}
+
+const navSections: NavSectionData[] = [
+  {
+    items: [{ href: "/cluster/", title: "Cluster overview", icon: IconServer }],
+  },
+  {
+    label: "Catalog",
+    items: [
+      { href: "/sources/", title: "Sources", icon: IconArrowDownToLine },
+      { href: "/tables/", title: "Tables", icon: IconTable },
+      {
+        href: "/materialized_views/",
+        title: "Materialized views",
+        icon: IconLayers,
+      },
+      { href: "/indexes/", title: "Indexes", icon: IconListTree },
+      {
+        href: "/internal_tables/",
+        title: "Internal tables",
+        icon: IconDatabase,
+      },
+      { href: "/sinks/", title: "Sinks", icon: IconArrowUpFromLine },
+      { href: "/views/", title: "Views", icon: IconEye },
+      { href: "/subscriptions/", title: "Subscriptions", icon: IconRss },
+      { href: "/functions/", title: "Functions", icon: IconSquareFunction },
+    ],
+  },
+  {
+    label: "Streaming",
+    items: [
+      { href: "/relation_graph/", title: "Relation graph", icon: IconWorkflow },
+      {
+        href: "/fragment_graph/",
+        title: "Fragment graph",
+        icon: IconGitBranch,
+      },
+    ],
+  },
+  {
+    label: "Batch",
+    items: [
+      { href: "/batch_tasks/", title: "Batch tasks", icon: IconListChecks },
+    ],
+  },
+  {
+    label: "Explain",
+    items: [
+      {
+        href: "/explain_distsql/",
+        title: "Distributed plan",
+        icon: IconNetwork,
+      },
+    ],
+  },
+  {
+    label: "Debug",
+    items: [
+      { href: "/await_tree/", title: "Await tree dump", icon: IconHourglass },
+      {
+        href: "/cpu_profiling/",
+        title: "CPU profiling",
+        icon: IconActivity,
+      },
+      {
+        href: "/heap_profiling/",
+        title: "Heap profiling",
+        icon: IconMemoryStick,
+      },
+      {
+        href: "/api/monitor/diagnose",
+        title: "Diagnose",
+        icon: IconActivity,
+        external: true,
+      },
+      {
+        href: "/trace/search",
+        title: "Traces",
+        icon: IconRoute,
+        external: true,
+      },
+    ],
+  },
+  {
+    label: "Settings",
+    items: [{ href: "/settings/", title: "Settings", icon: IconSettings }],
+  },
+]
+
+function NavItem({ href, title, icon: Icon, external }: NavItemData) {
   const router = useRouter()
   const [match, setMatch] = useState(false)
 
   useEffect(() => {
-    setMatch(router.asPath.startsWith(href.toString()))
-    return () => {}
-  }, [href, router.asPath])
-
-  const icon =
-    leftIcon || (external ? <IconBoxArrowUpRight /> : <IconArrowRightCircle />)
-  const activeIcon =
-    leftIconActive ||
-    leftIcon ||
-    (external ? undefined : <IconArrowRightCircleFill />)
+    if (external) {
+      return
+    }
+    // Normalize trailing slashes so both "/cluster" and "/cluster/" match.
+    const path = `${router.asPath.replace(/\/+$/, "")}/`
+    setMatch(path.startsWith(href.toString()))
+  }, [href, router.asPath, external])
 
   return (
-    <Link href={href} target={external ? "_blank" : undefined}>
-      <Button
-        colorScheme={match ? "blue" : "gray"}
-        color={match ? "blue.600" : "gray.500"}
-        variant={match ? "outline" : "ghost"}
-        width="full"
-        justifyContent="flex-start"
-        leftIcon={match ? activeIcon : icon}
-      >
-        {children}
-      </Button>
-    </Link>
+    <ChakraLink
+      as={Link}
+      href={href}
+      prefetch={false}
+      target={external ? "_blank" : undefined}
+      rel={external ? "noreferrer" : undefined}
+      display="flex"
+      alignItems="center"
+      gap={2}
+      px={2.5}
+      py="7px"
+      borderRadius={radii.md}
+      fontSize="14px"
+      lineHeight={1.5}
+      fontWeight={match ? 500 : 400}
+      color={match ? colors.foreground : colors.mutedForeground}
+      bg={match ? fills.active : "transparent"}
+      textDecoration="none"
+      transition={`background-color ${motion.durationMs.micro}ms ${motion.easeOut}, color ${motion.durationMs.micro}ms ${motion.easeOut}`}
+      _hover={{
+        bg: match ? fills.active : fills.hover,
+        color: colors.foreground,
+        textDecoration: "none",
+      }}
+    >
+      <Box flexShrink={0}>
+        <Icon size={15} />
+      </Box>
+      <Box as="span" flex={1} noOfLines={1}>
+        {title}
+      </Box>
+      {external && (
+        <Box flexShrink={0} opacity={0.5}>
+          <IconArrowUpRight size={12} />
+        </Box>
+      )}
+    </ChakraLink>
   )
 }
 
-function NavTitle({ children }: { children: React.ReactNode }) {
+function NavSection({ label, items }: NavSectionData) {
   return (
-    <Text mt={3} textColor="blue.500" fontWeight="semibold" lineHeight="6">
-      {children}
-    </Text>
-  )
-}
-
-function Section({ children }: { children: React.ReactNode }) {
-  return (
-    <VStack width="full" alignItems="flex-start" px={3}>
-      {children}
-    </VStack>
+    <Box width="full" mt={label ? 4 : 0}>
+      {label && (
+        <Text
+          px={2.5}
+          mb={1}
+          fontSize="12px"
+          fontWeight={500}
+          lineHeight={1.4}
+          color={colors.mutedForeground}
+        >
+          {label}
+        </Text>
+      )}
+      <Flex direction="column" gap="2px">
+        {items.map((item) => (
+          <NavItem key={item.href.toString()} {...item} />
+        ))}
+      </Flex>
+    </Box>
   )
 }
 
 function Layout({ children }: { children: React.ReactNode }) {
   return (
-    <Flex>
+    <Flex bg={colors.background}>
       <Box
         height="100vh"
-        overflowY="scroll"
+        overflowY="auto"
         width={NAVBAR_WIDTH}
         minWidth={NAVBAR_WIDTH}
-        bg="gray.50"
-        py={3}
-        px={3}
+        bg="rgba(245,244,240,0.5)"
+        borderRight="1px solid"
+        borderColor="rgba(227,224,216,0.5)"
+        py={2}
+        px={2}
+        fontFamily={fonts.body}
+        color={colors.foreground}
       >
-        <VStack>
-          <Box height="50px" width="full">
-            <HStack spacing={0}>
-              <Link href="/" passHref>
-                <Image
-                  boxSize="50px"
-                  src="/risingwave.svg"
-                  alt="RisingWave Logo"
-                />
-              </Link>
-              <Text fontSize="xl">
-                <b>RisingWave</b> Dashboard
-              </Text>
-            </HStack>
+        <HStack height="52px" spacing={2} px={2.5} mb={1}>
+          <Link href="/">
+            <Image boxSize="20px" src="/risingwave.svg" alt="RisingWave Logo" />
+          </Link>
+          <Text fontSize="14px" fontWeight={600} letterSpacing="-0.01em">
+            RisingWave
+          </Text>
+          {/* Quiet neutral badge; the azure accent is rationed elsewhere */}
+          <Box
+            as="span"
+            px={2}
+            py="1px"
+            borderRadius="full"
+            fontSize="12px"
+            fontWeight={500}
+            lineHeight={1.45}
+            color={colors.mutedForeground}
+            bg={fills.active}
+          >
+            Dashboard
           </Box>
-          <Section>
-            <NavButton href="/cluster/" leftIcon={<IconServer />}>
-              Cluster Overview
-            </NavButton>
-          </Section>
-          <Section>
-            <NavTitle>Catalog</NavTitle>
-            <NavButton href="/sources/">Sources</NavButton>
-            <NavButton href="/tables/">Tables</NavButton>
-            <NavButton href="/materialized_views/">
-              Materialized Views
-            </NavButton>
-            <NavButton href="/indexes/">Indexes</NavButton>
-            <NavButton href="/internal_tables/">Internal Tables</NavButton>
-            <NavButton href="/sinks/">Sinks</NavButton>
-            <NavButton href="/views/">Views</NavButton>
-            <NavButton href="/subscriptions/">Subscriptions</NavButton>
-            <NavButton href="/functions/">Functions</NavButton>
-          </Section>
-          <Section>
-            <NavTitle>Streaming</NavTitle>
-            <NavButton href="/relation_graph/">Relation Graph</NavButton>
-            <NavButton href="/fragment_graph/">Fragment Graph</NavButton>
-          </Section>
-          <Section>
-            <NavTitle>Batch</NavTitle>
-            <NavButton href="/batch_tasks/">Batch Tasks</NavButton>
-          </Section>
-          <Section>
-            <NavTitle>Explain</NavTitle>
-            <NavButton href="/explain_distsql/">Distributed Plan</NavButton>
-          </Section>
-          <Section>
-            <NavTitle>Debug</NavTitle>
-            <NavButton href="/await_tree/">Await Tree Dump</NavButton>
-            <NavButton href="/heap_profiling/">Heap Profiling</NavButton>
-            <NavButton href="/api/monitor/diagnose" external>
-              Diagnose
-            </NavButton>
-            <NavButton href="/trace/search" external>
-              Traces
-            </NavButton>
-          </Section>
-          <Section>
-            <NavTitle>Settings</NavTitle>
-            <NavButton href="/settings/">Settings</NavButton>
-          </Section>
-        </VStack>
+        </HStack>
+        {navSections.map((section, index) => (
+          <NavSection key={section.label ?? index} {...section} />
+        ))}
       </Box>
-      <Box flex={1} overflowY="scroll">
+      <Box flex={1} minWidth={0} overflowY="auto" maxHeight="100vh">
         {children}
       </Box>
     </Flex>

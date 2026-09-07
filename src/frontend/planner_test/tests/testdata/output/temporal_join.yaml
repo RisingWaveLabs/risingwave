@@ -325,3 +325,16 @@
         │ └─StreamTableScan { table: stream, columns: [stream.id1, stream.a1, stream.v1, stream._row_id], stream_scan_type: ArrangementBackfill, stream_key: [stream._row_id], pk: [_row_id], dist: UpstreamHashShard(stream._row_id) }
         └─StreamExchange [no_shuffle] { dist: UpstreamHashShard(version.id2) }
           └─StreamTableScan { table: version, columns: [version.id2], stream_scan_type: UpstreamOnly, stream_key: [version.id2], pk: [id2], dist: UpstreamHashShard(version.id2) }
+- name: temporal join on an MV with a duplicated order key
+  sql: |
+    create table stream (a int, b int) APPEND ONLY;
+    create table version (a int, b int);
+    create materialized view v_mv as select a, b from version order by a, a limit 1;
+    select stream.a, stream.b from stream join v_mv FOR SYSTEM_TIME AS OF PROCTIME() on stream.a = v_mv.a;
+  stream_plan: |-
+    StreamMaterialize { columns: [a, b, stream._row_id(hidden)], stream_key: [stream._row_id, a], pk_columns: [stream._row_id, a], pk_conflict: NoCheck }
+    └─StreamTemporalJoin { type: Inner, append_only: true, predicate: stream.a = v_mv.a, nested_loop: false, output: [stream.a, stream.b, stream._row_id] }
+      ├─StreamExchange { dist: Single }
+      │ └─StreamTableScan { table: stream, columns: [stream.a, stream.b, stream._row_id], stream_scan_type: ArrangementBackfill, stream_key: [stream._row_id], pk: [_row_id], dist: UpstreamHashShard(stream._row_id) }
+      └─StreamExchange [no_shuffle] { dist: Single }
+        └─StreamTableScan { table: v_mv, columns: [v_mv.a], stream_scan_type: UpstreamOnly, stream_key: [], pk: [a, a], dist: Single }

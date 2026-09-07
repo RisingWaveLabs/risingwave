@@ -625,7 +625,7 @@ mod tests {
         assert_eq!(
             &f(
                 &T::Timestamptz,
-                S::Timestamptz(Timestamptz::from_micros(-1)),
+                S::Timestamptz(Timestamptz::from_micros(-1).unwrap()),
                 Format::Text
             ),
             "1969-12-31 23:59:59.999999+00:00"

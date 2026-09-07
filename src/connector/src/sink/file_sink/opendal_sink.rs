@@ -45,7 +45,9 @@ use crate::sink::encoder::{
     TimestamptzHandlingMode,
 };
 use crate::sink::file_sink::batching_log_sink::BatchingLogSinker;
-use crate::sink::{Result, Sink, SinkError, SinkFormatDesc, SinkParam};
+use crate::sink::{
+    Result, Sink, SinkDecouple, SinkError, SinkFormatDesc, SinkParam, UnknownFields,
+};
 use crate::source::TryFromBTreeMap;
 use crate::with_options::WithOptions;
 
@@ -77,6 +79,7 @@ pub struct FileSink<S: OpendalSinkBackend> {
     /// The description of the sink's format.
     pub(crate) format_desc: SinkFormatDesc,
     pub(crate) engine_type: EngineType,
+    pub(crate) unknown_fields: HashMap<String, String>,
     pub(crate) _marker: PhantomData<S>,
 }
 
@@ -99,7 +102,7 @@ impl<S: OpendalSinkBackend> EnforceSecret for FileSink<S> {}
 /// - `new_operator`: Creates a new operator using the provided backend properties.
 /// - `get_path`: Returns the path of the sink file specified by the user's create sink statement.
 pub trait OpendalSinkBackend: Send + Sync + 'static + Clone + PartialEq {
-    type Properties: TryFromBTreeMap + Send + Sync + Clone + WithOptions;
+    type Properties: TryFromBTreeMap + UnknownFields + Send + Sync + Clone + WithOptions;
     const SINK_NAME: &'static str;
 
     fn from_btreemap(btree_map: BTreeMap<String, String>) -> Result<Self::Properties>;
@@ -123,6 +126,21 @@ impl<S: OpendalSinkBackend> Sink for FileSink<S> {
     type LogSinker = BatchingLogSinker;
 
     const SINK_NAME: &'static str = S::SINK_NAME;
+
+    fn validate_unknown_fields(&self) -> Result<()> {
+        crate::sink::validate_sink_unknown_fields(&self.unknown_fields)
+    }
+
+    /// A file is committed only once the batching strategy is met, so an untruncated barrier
+    /// would block the checkpoint forever on the non-decoupled in-memory log store.
+    fn is_sink_decouple(user_specified: &SinkDecouple) -> Result<bool> {
+        match user_specified {
+            SinkDecouple::Default | SinkDecouple::Enable => Ok(true),
+            SinkDecouple::Disable => Err(SinkError::Config(anyhow!(
+                "File sink can only be created with sink_decouple enabled. Please run `set sink_decouple = true` first."
+            ))),
+        }
+    }
 
     async fn validate(&self) -> Result<()> {
         if matches!(self.engine_type, EngineType::Snowflake) {
@@ -176,6 +194,7 @@ impl<S: OpendalSinkBackend> TryFrom<SinkParam> for FileSink<S> {
     fn try_from(param: SinkParam) -> std::result::Result<Self, Self::Error> {
         let schema = param.schema();
         let config = S::from_btreemap(param.properties)?;
+        let unknown_fields = crate::sink::UnknownFields::unknown_fields(&config);
         let path = S::get_path(config.clone());
         let op = S::new_operator(config.clone())?;
         let batching_strategy = S::get_batching_strategy(config);
@@ -198,6 +217,7 @@ impl<S: OpendalSinkBackend> TryFrom<SinkParam> for FileSink<S> {
             batching_strategy,
             format_desc,
             engine_type,
+            unknown_fields,
             _marker: PhantomData,
         })
     }
@@ -538,4 +558,30 @@ pub enum PathPartitionPrefix {
     Month = 2,
     #[serde(alias = "hour")]
     Hour = 3,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sink::file_sink::fs::FsSink;
+    use crate::sink::file_sink::gcs::GcsSink;
+    use crate::sink::file_sink::s3::{S3Sink, SnowflakeSink};
+
+    #[test]
+    fn test_requires_sink_decouple() {
+        fn assert_requires_decouple<S: OpendalSinkBackend>() {
+            assert!(FileSink::<S>::is_sink_decouple(&SinkDecouple::Default).unwrap());
+            assert!(FileSink::<S>::is_sink_decouple(&SinkDecouple::Enable).unwrap());
+            let err = FileSink::<S>::is_sink_decouple(&SinkDecouple::Disable).unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains("File sink can only be created with sink_decouple enabled")
+            );
+        }
+
+        assert_requires_decouple::<FsSink>();
+        assert_requires_decouple::<GcsSink>();
+        assert_requires_decouple::<S3Sink>();
+        assert_requires_decouple::<SnowflakeSink>();
+    }
 }

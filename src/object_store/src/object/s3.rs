@@ -15,7 +15,6 @@
 use std::borrow::BorrowMut;
 use std::cmp;
 use std::collections::VecDeque;
-use std::ops::Range;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll, ready};
@@ -539,7 +538,7 @@ impl ObjectStore for S3ObjectStore {
     async fn streaming_read(
         &self,
         path: &str,
-        range: Range<usize>,
+        range: impl ObjectRangeBounds,
     ) -> ObjectResult<ObjectDataStream> {
         fail_point!("s3_streaming_read_init_err", |_| Err(
             ObjectError::internal("s3 streaming read init error")

@@ -100,6 +100,22 @@ pub fn generate_risedev_env(services: &Vec<ServiceConfig>) -> String {
                 )
                 .unwrap();
             }
+            ServiceConfig::Redis(c) => {
+                let host = &c.address;
+                let port = &c.port;
+                let url = format!("redis://{host}:{port}/");
+                writeln!(env, r#"REDIS_HOST="{host}""#).unwrap();
+                writeln!(env, r#"REDIS_PORT="{port}""#).unwrap();
+                writeln!(env, r#"RISEDEV_REDIS_URL="{url}""#).unwrap();
+                if !c.user_managed {
+                    writeln!(env, r#"REDIS_CONTAINER="risedev-{}""#, c.id).unwrap();
+                }
+                writeln!(
+                    env,
+                    r#"RISEDEV_REDIS_WITH_OPTIONS_COMMON="connector='redis',redis.url='{url}'""#,
+                )
+                .unwrap();
+            }
             ServiceConfig::MySql(c) if c.application != Application::Metastore => {
                 let host = &c.address;
                 let port = &c.port;

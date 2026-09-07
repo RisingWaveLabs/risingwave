@@ -1165,7 +1165,7 @@ impl DiagnoseCommand {
 
         let mut row = Row::new();
         row.add_cell("state_store".into());
-        row.add_cell(params.state_store().to_owned().into());
+        row.add_cell(params.state_store().to_string().into());
         table.add_row(row);
 
         let mut row = Row::new();

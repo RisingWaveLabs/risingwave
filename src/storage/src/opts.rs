@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use risingwave_common::config::storage::FileCacheRuntimeConfig;
+use risingwave_common::config::streaming::CacheRefillPolicy;
 use risingwave_common::config::{
     EvictionConfig, ObjectStoreConfig, RwConfig, StorageMemoryConfig, extract_storage_memory_config,
 };
@@ -96,9 +98,10 @@ pub struct StorageOpts {
     pub data_file_cache_indexer_shards: usize,
     pub data_file_cache_compression: foyer::Compression,
     pub data_file_cache_flush_buffer_threshold_mb: usize,
+    pub data_file_cache_submit_queue_size_threshold_mb: usize,
     pub data_file_cache_fifo_probation_ratio: f64,
     pub data_file_cache_blob_index_size_kb: usize,
-    pub data_file_cache_runtime_config: foyer::RuntimeOptions,
+    pub data_file_cache_runtime_config: FileCacheRuntimeConfig,
     pub data_file_cache_throttle: foyer::Throttle,
 
     pub cache_refill_data_refill_levels: Vec<u32>,
@@ -111,6 +114,8 @@ pub struct StorageOpts {
     pub cache_refill_unit: usize,
     pub cache_refill_threshold: f64,
     pub cache_refill_skip_recent_filter: bool,
+    pub cache_refill_skip_inheritance_filter: bool,
+    pub cache_refill_table_cache_refill_default_policy: CacheRefillPolicy,
 
     pub meta_file_cache_dir: String,
     pub meta_file_cache_capacity_mb: usize,
@@ -122,9 +127,10 @@ pub struct StorageOpts {
     pub meta_file_cache_indexer_shards: usize,
     pub meta_file_cache_compression: foyer::Compression,
     pub meta_file_cache_flush_buffer_threshold_mb: usize,
+    pub meta_file_cache_submit_queue_size_threshold_mb: usize,
     pub meta_file_cache_fifo_probation_ratio: f64,
     pub meta_file_cache_blob_index_size_kb: usize,
-    pub meta_file_cache_runtime_config: foyer::RuntimeOptions,
+    pub meta_file_cache_runtime_config: FileCacheRuntimeConfig,
     pub meta_file_cache_throttle: foyer::Throttle,
     pub sst_skip_bloom_filter_in_serde: bool,
 
@@ -258,6 +264,10 @@ impl From<(&RwConfig, &SystemParamsReader, &StorageMemoryConfig)> for StorageOpt
             data_file_cache_indexer_shards: c.storage.data_file_cache.indexer_shards,
             data_file_cache_compression: c.storage.data_file_cache.compression,
             data_file_cache_flush_buffer_threshold_mb: s.block_file_cache_flush_buffer_threshold_mb,
+            data_file_cache_submit_queue_size_threshold_mb: c
+                .storage
+                .data_file_cache
+                .submit_queue_size_threshold_mb,
             data_file_cache_fifo_probation_ratio: c.storage.data_file_cache.fifo_probation_ratio,
             data_file_cache_blob_index_size_kb: c.storage.data_file_cache.blob_index_size_kb,
             data_file_cache_runtime_config: c.storage.data_file_cache.runtime_config.clone(),
@@ -272,6 +282,10 @@ impl From<(&RwConfig, &SystemParamsReader, &StorageMemoryConfig)> for StorageOpt
             meta_file_cache_indexer_shards: c.storage.meta_file_cache.indexer_shards,
             meta_file_cache_compression: c.storage.meta_file_cache.compression,
             meta_file_cache_flush_buffer_threshold_mb: s.meta_file_cache_flush_buffer_threshold_mb,
+            meta_file_cache_submit_queue_size_threshold_mb: c
+                .storage
+                .meta_file_cache
+                .submit_queue_size_threshold_mb,
             meta_file_cache_fifo_probation_ratio: c.storage.meta_file_cache.fifo_probation_ratio,
             meta_file_cache_blob_index_size_kb: c.storage.meta_file_cache.blob_index_size_kb,
             meta_file_cache_runtime_config: c.storage.meta_file_cache.runtime_config.clone(),
@@ -290,6 +304,11 @@ impl From<(&RwConfig, &SystemParamsReader, &StorageMemoryConfig)> for StorageOpt
             cache_refill_unit: c.storage.cache_refill.unit,
             cache_refill_threshold: c.storage.cache_refill.threshold,
             cache_refill_skip_recent_filter: c.storage.cache_refill.skip_recent_filter,
+            cache_refill_skip_inheritance_filter: c.storage.cache_refill.skip_inheritance_filter,
+            cache_refill_table_cache_refill_default_policy: c
+                .streaming
+                .developer
+                .cache_refill_policy,
             max_preload_wait_time_mill: c.storage.max_preload_wait_time_mill,
             compact_iter_recreate_timeout_ms: c.storage.compact_iter_recreate_timeout_ms,
 
@@ -366,5 +385,30 @@ impl From<(&RwConfig, &SystemParamsReader, &StorageMemoryConfig)> for StorageOpt
             vector_meta_cache_shard_num: s.vector_meta_cache_shard_num,
             vector_meta_cache_eviction_config: s.vector_meta_cache_eviction_config.clone(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_file_cache_submit_queue_size_threshold() {
+        let mut config = RwConfig::default();
+        config
+            .storage
+            .data_file_cache
+            .submit_queue_size_threshold_mb = 256;
+        config
+            .storage
+            .meta_file_cache
+            .submit_queue_size_threshold_mb = 32;
+        let system_params = system_params_for_test();
+        let storage_memory_config = extract_storage_memory_config(&config);
+
+        let opts = StorageOpts::from((&config, &system_params.into(), &storage_memory_config));
+
+        assert_eq!(opts.data_file_cache_submit_queue_size_threshold_mb, 256);
+        assert_eq!(opts.meta_file_cache_submit_queue_size_threshold_mb, 32);
     }
 }

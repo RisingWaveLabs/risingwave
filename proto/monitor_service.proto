@@ -25,6 +25,8 @@ message StackTraceResponse {
   // Per-worker error messages when collecting stack traces from the cluster.
   // Key: worker id.
   map<uint32, string> node_errors = 8;
+  // Key: batch task id in the format of "{query_id}-{stage_id}-{task_id}".
+  map<string, string> batch_traces = 9;
 }
 
 // CPU profiling
@@ -136,6 +138,13 @@ message GetProfileStatsResponse {
   map<uint32, uint64> dispatch_fragment_output_blocking_duration_ns = 4;
 }
 
+message GetTableCacheRefillStatsRequest {}
+
+message GetTableCacheRefillStatsResponse {
+  // json statistics
+  string stats = 1;
+}
+
 service MonitorService {
   rpc StackTrace(StackTraceRequest) returns (StackTraceResponse);
   rpc Profiling(ProfilingRequest) returns (ProfilingResponse);
@@ -145,4 +154,5 @@ service MonitorService {
   rpc GetStreamingStats(GetStreamingStatsRequest) returns (GetStreamingStatsResponse);
   rpc TieredCacheTracing(TieredCacheTracingRequest) returns (TieredCacheTracingResponse);
   rpc GetProfileStats(GetProfileStatsRequest) returns (GetProfileStatsResponse);
+  rpc GetTableCacheRefillStats(GetTableCacheRefillStatsRequest) returns (GetTableCacheRefillStatsResponse);
 }

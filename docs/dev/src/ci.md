@@ -2,6 +2,38 @@
 
 <!-- TODO: How to debug CI -->
 
+## Buildkite approval for fork pull requests
+
+Buildkite runs automatically for eligible pull requests whose branches are in
+the RisingWave repository. Pull requests opened from forks require approval
+before Buildkite executes their code.
+
+After reviewing the changes, a RisingWave maintainer can approve the current
+commit by posting this exact comment on the GitHub pull request:
+
+```text
+/approve-run-bk
+```
+
+Buildkite accepts this command only from a trusted GitHub owner, member, or
+collaborator, or from a GitHub account linked to a Buildkite user with permission
+to run the pipeline. The command from an outside contributor does not start a
+build.
+
+The comment creates a new build for the pull request's current head commit. A
+new commit does not inherit an earlier approval, so a maintainer must post the
+command again after the contributor pushes.
+
+The `pull-request` pipeline runs after approval when the pull request is ready
+for review. To run `main-cron` for a fork pull request, first add either:
+
+- `ci/main-cron/run-all`; or
+- `ci/main-cron/run-selected` together with one or more applicable
+  `ci/run-*` labels.
+
+Then post `/approve-run-bk`. A single approved comment can trigger both
+pipelines when their respective conditions are satisfied.
+
 ## CI Labels Guide
 
 - `[ci/run-xxx ...]`: Run additional steps in the PR workflow indicated by `ci/run-xxx` in your PR.

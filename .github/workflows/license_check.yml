@@ -1,5 +1,8 @@
 name: License checker
 
+permissions:
+  contents: read
+
 on:
   push:
     branches:
@@ -23,7 +26,7 @@ jobs:
         ref: ${{ github.event.pull_request.head.sha || github.sha }}
     - uses: taiki-e/install-action@v2
       with:
-        tool: hawkeye@6.3
+        tool: hawkeye
     - name: Check License Header
       run: |
         hawkeye check || {

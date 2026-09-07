@@ -18,6 +18,7 @@ use educe::Educe;
 use iceberg::expr::Predicate;
 use itertools::Itertools;
 use pretty_xmlish::{Pretty, XmlNode};
+use risingwave_common::catalog::{ColumnCatalog, Field};
 use risingwave_common::types::DataType;
 use risingwave_connector::source::iceberg::IcebergTimeTravelInfo;
 
@@ -160,6 +161,29 @@ impl LogicalIcebergIntermediateScan {
         self.core.catalog.as_deref()
     }
 
+    /// Fields carrying the iceberg-side column types (before the engine-table Hummock
+    /// type remapping), for predicate pushdown. Derived from the source catalog, which
+    /// the remapping never touches.
+    fn iceberg_side_fields(&self) -> Vec<Field> {
+        let catalog = self
+            .core
+            .catalog
+            .as_ref()
+            .expect("iceberg intermediate scan must have a source catalog");
+        let by_name: HashMap<&str, &ColumnCatalog> =
+            catalog.columns.iter().map(|c| (c.name(), c)).collect();
+        self.core
+            .column_catalog
+            .iter()
+            .map(|col| {
+                let source_col = by_name
+                    .get(col.name())
+                    .expect("output column must exist in the source catalog");
+                Field::from(&source_col.column_desc)
+            })
+            .collect()
+    }
+
     pub fn output_columns(&self) -> impl ExactSizeIterator<Item = &str> {
         self.core.column_catalog.iter().map(|c| c.name.as_str())
     }
@@ -258,7 +282,7 @@ impl PredicatePushdown for LogicalIcebergIntermediateScan {
             iceberg_predicate,
             extracted_condition,
             remaining_condition,
-        } = extract_iceberg_predicate(predicate, self.schema().fields());
+        } = extract_iceberg_predicate(predicate, &self.iceberg_side_fields());
         let plan = self
             .add_predicate(iceberg_predicate, extracted_condition)
             .into();

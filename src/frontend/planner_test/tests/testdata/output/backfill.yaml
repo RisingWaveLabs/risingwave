@@ -417,6 +417,22 @@
     StreamMaterialize { columns: [a, b, c], stream_key: [b, a], pk_columns: [b, a], pk_conflict: NoCheck }
     └─StreamFilter { predicate: (idx_b.b = 1:Int32) }
       └─StreamTableScan { table: idx_b, columns: [idx_b.a, idx_b.b, idx_b.c], pk_scan_range: b = Some(Int32(1)), stream_scan_type: SnapshotBackfill, stream_key: [idx_b.b, idx_b.a], pk: [b, a], dist: UpstreamHashShard(idx_b.b) }
+- name: fixed backfill order with selected index
+  sql: |
+    set enable_index_selection = true;
+    create table fact(v1 int);
+    create table dim(v1 int, v2 int);
+    create index idx_dim_v1 on dim(v1);
+    explain (backfill, format dot) create materialized view mv
+    with (backfill_order = FIXED(fact -> dim))
+    as
+      select count(*)
+      from fact join dim on fact.v1 = dim.v1
+      group by fact.v1;
+  explain_output: |
+    digraph G {
+      "public.fact" -> "public.idx_dim_v1";
+    }
 - name: |
     Test backfill order, auto, stream share cycle.
     For auto derived backfill order with cycle, it should not return any order plan, and return a NOTICE

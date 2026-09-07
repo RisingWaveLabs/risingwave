@@ -43,7 +43,7 @@ pub struct TableFunctionToInternalBackfillProgressRule {}
 impl FallibleRule<Logical> for TableFunctionToInternalBackfillProgressRule {
     fn apply(&self, plan: PlanRef) -> ApplyResult<PlanRef> {
         let logical_table_function: &LogicalTableFunction = plan.as_logical_table_function()?;
-        if logical_table_function.table_function.function_type
+        if logical_table_function.table_function().function_type
             != TableFunctionType::InternalBackfillProgress
         {
             return ApplyResult::NotApplicable;

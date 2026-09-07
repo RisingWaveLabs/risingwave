@@ -14,7 +14,6 @@
 
 use adbc_core::Statement as _;
 use anyhow::Context;
-use risingwave_common::array::arrow::arrow_array_58::RecordBatchReader;
 use risingwave_common::array::arrow::arrow_schema_58 as arrow_schema;
 
 use super::AdbcSnowflakeProperties;

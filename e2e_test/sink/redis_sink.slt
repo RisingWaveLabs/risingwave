@@ -1,3 +1,11 @@
+control substitution on
+
+system ok retry 30 backoff 1s
+test "$(redis --raw PING)" = 'PONG'
+
+system ok
+redis DEL '{"v1":1}' 'V1:1' 'key_is:1_1' 'test_stream' >/dev/null
+
 statement ok
 set sink_decouple = false;
 
@@ -12,8 +20,7 @@ CREATE SINK s61
 FROM
     mv6 WITH (
     primary_key = 'v1',
-    connector = 'redis',
-    redis.url= 'redis://redis-server:6379/',
+    ${RISEDEV_REDIS_WITH_OPTIONS_COMMON},
 )FORMAT PLAIN ENCODE JSON(force_append_only='true');
 
 statement ok
@@ -21,8 +28,7 @@ CREATE SINK s62
 FROM
     mv6 WITH (
     primary_key = 'v1',
-    connector = 'redis',
-    redis.url= 'redis://redis-server:6379/',
+    ${RISEDEV_REDIS_WITH_OPTIONS_COMMON},
 )FORMAT PLAIN ENCODE TEMPLATE(force_append_only='true', key_format = 'V1:{v1}', value_format = 'V2:{v2},V3:{v3}');
 
 statement ok
@@ -30,8 +36,7 @@ CREATE SINK s63
 FROM
     mv6 WITH (
     primary_key = 'v1,v2,v6',
-    connector = 'redis',
-    redis.url= 'redis://redis-server:6379/',
+    ${RISEDEV_REDIS_WITH_OPTIONS_COMMON},
 )FORMAT PLAIN ENCODE TEMPLATE(force_append_only='true', key_format = 'key_is:{v1}_{v2}', redis_value_type ='geospatial', longitude = 'v4', latitude = 'v5', member = 'v6');
 
 statement ok
@@ -39,8 +44,7 @@ CREATE SINK s64
 FROM
     mv6 WITH (
     primary_key = 'v1,v2,v6',
-    connector = 'redis',
-    redis.url= 'redis://redis-server:6379/',
+    ${RISEDEV_REDIS_WITH_OPTIONS_COMMON},
 )FORMAT PLAIN ENCODE TEMPLATE(
     force_append_only='true',
     redis_value_type ='stream',
@@ -54,6 +58,18 @@ INSERT INTO t6 VALUES (1, 1, 1, 1.1, 1.2, 'test', '2013-01-01', '2013-01-01 01:0
 
 statement ok
 FLUSH;
+
+system ok retry 30 backoff 1s
+test "$(redis --raw GET '{"v1":1}')" = '{"v1":1,"v2":1,"v3":1,"v4":1.100000023841858,"v5":1.2,"v6":"test","v7":734869,"v8":"2013-01-01T01:01:01.000000Z","v9":false}'
+
+system ok retry 10 backoff 1s
+test "$(redis --raw GET 'V1:1')" = 'V2:1,V3:1'
+
+system ok retry 10 backoff 1s
+redis --raw GEOPOS 'key_is:1_1' 'test' | awk 'NR == 1 { lon = $1 } NR == 2 { lat = $1 } END { exit !(lon > 1.09999 && lon < 1.10001 && lat > 1.19999 && lat < 1.20001) }'
+
+system ok retry 10 backoff 1s
+test "$(redis --raw XRANGE 'test_stream' - + COUNT 1 | sed -n '2p')" = 'key:1' && test "$(redis --raw XRANGE 'test_stream' - + COUNT 1 | sed -n '3p')" = 'value:1'
 
 statement ok
 DROP SINK s61;
@@ -72,3 +88,6 @@ DROP MATERIALIZED VIEW mv6;
 
 statement ok
 DROP TABLE t6;
+
+system ok
+redis DEL '{"v1":1}' 'V1:1' 'key_is:1_1' 'test_stream' >/dev/null

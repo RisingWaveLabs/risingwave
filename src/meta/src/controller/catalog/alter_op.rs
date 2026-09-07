@@ -638,297 +638,91 @@ impl CatalogController {
             .one(&txn)
             .await?
             .ok_or_else(|| MetaError::catalog_id_not_found(object_type.as_str(), object_id))?;
+        if obj.obj_type != object_type {
+            return Err(MetaError::catalog_id_not_found(
+                object_type.as_str(),
+                object_id,
+            ));
+        }
+        if object_type == ObjectType::Table {
+            let table_type = Table::find_by_id(object_id.as_table_id())
+                .select_only()
+                .column(table::Column::TableType)
+                .into_tuple::<TableType>()
+                .one(&txn)
+                .await?
+                .ok_or_else(|| MetaError::catalog_id_not_found("table", object_id))?;
+            if table_type == TableType::Internal {
+                return Err(MetaError::catalog_id_not_found("table", object_id));
+            }
+        }
         if obj.schema_id == Some(new_schema) {
             return Ok(IGNORED_NOTIFICATION_VERSION);
         }
-        let streaming_job = StreamingJob::find_by_id(object_id.as_job_id())
-            .one(&txn)
-            .await?;
-        let database_id = obj.database_id.unwrap();
+        let database_id = obj
+            .database_id
+            .ok_or_else(|| anyhow!("catalog object {} has no database", object_id))?;
 
-        let mut objects = vec![];
-        match object_type {
-            ObjectType::Table => {
-                let table = Table::find_by_id(object_id.as_table_id())
-                    .one(&txn)
-                    .await?
-                    .ok_or_else(|| MetaError::catalog_id_not_found("table", object_id))?;
-                check_relation_name_duplicate(&table.name, database_id, new_schema, &txn).await?;
-                let associated_src_id = table.optional_associated_source_id;
-
-                let mut obj = obj.into_active_model();
-                obj.schema_id = Set(Some(new_schema));
-                let obj = obj.update(&txn).await?;
-
-                objects.push(PbObjectInfo::Table(
-                    ObjectModel(table, obj, streaming_job).into(),
-                ));
-
-                // associated source.
-                if let Some(associated_source_id) = associated_src_id {
-                    let src_obj = object::ActiveModel {
-                        oid: Set(associated_source_id.as_object_id()),
-                        schema_id: Set(Some(new_schema)),
-                        ..Default::default()
-                    }
-                    .update(&txn)
-                    .await?;
-                    let source = Source::find_by_id(associated_source_id)
-                        .one(&txn)
-                        .await?
-                        .ok_or_else(|| {
-                            MetaError::catalog_id_not_found("source", associated_source_id)
-                        })?;
-                    objects.push(PbObjectInfo::Source(
-                        ObjectModel(source, src_obj, None).into(),
-                    ));
-                }
-
-                // indexes.
-                let (index_ids, (index_names, mut table_ids)): (
-                    Vec<IndexId>,
-                    (Vec<String>, Vec<TableId>),
-                ) = Index::find()
-                    .select_only()
-                    .columns([
-                        index::Column::IndexId,
-                        index::Column::Name,
-                        index::Column::IndexTableId,
-                    ])
-                    .filter(index::Column::PrimaryTableId.eq(object_id))
-                    .into_tuple::<(IndexId, String, TableId)>()
-                    .all(&txn)
-                    .await?
-                    .into_iter()
-                    .map(|(id, name, t_id)| (id, (name, t_id)))
-                    .unzip();
-
-                // internal tables.
-                let internal_tables: Vec<TableId> = Table::find()
-                    .select_only()
-                    .column(table::Column::TableId)
+        // Indexes are named schema objects rather than objects belonging to their primary table.
+        // Move them with a table explicitly, while subscriptions remain in their own schemas.
+        let mut objects = vec![obj];
+        if object_type == ObjectType::Table {
+            let index_ids = Index::find()
+                .select_only()
+                .column(index::Column::IndexId)
+                .filter(index::Column::PrimaryTableId.eq(object_id.as_table_id()))
+                .into_tuple::<IndexId>()
+                .all(&txn)
+                .await?;
+            objects.extend(
+                Object::find()
                     .filter(
-                        table::Column::BelongsToJobId.is_in(
-                            table_ids
-                                .iter()
-                                .map(|table_id| table_id.as_job_id())
-                                .chain(std::iter::once(object_id.as_job_id())),
-                        ),
+                        object::Column::Oid
+                            .is_in(index_ids.into_iter().map(|id| id.as_object_id())),
                     )
-                    .into_tuple()
                     .all(&txn)
-                    .await?;
-                table_ids.extend(internal_tables);
-
-                if !index_ids.is_empty() || !table_ids.is_empty() {
-                    for index_name in index_names {
-                        check_relation_name_duplicate(&index_name, database_id, new_schema, &txn)
-                            .await?;
-                    }
-
-                    Object::update_many()
-                        .col_expr(object::Column::SchemaId, new_schema.into())
-                        .filter(
-                            object::Column::Oid.is_in::<ObjectId, _>(
-                                index_ids
-                                    .iter()
-                                    .copied()
-                                    .map_into()
-                                    .chain(table_ids.iter().copied().map_into()),
-                            ),
-                        )
-                        .exec(&txn)
-                        .await?;
-                }
-
-                if !table_ids.is_empty() {
-                    let table_objs = Table::find()
-                        .find_also_related(Object)
-                        .filter(table::Column::TableId.is_in(table_ids))
-                        .all(&txn)
-                        .await?;
-                    let streaming_jobs = load_streaming_jobs_by_ids(
-                        &txn,
-                        table_objs.iter().map(|(table, _)| table.job_id()),
-                    )
-                    .await?;
-                    for (table, table_obj) in table_objs {
-                        let job_id = table.job_id();
-                        let streaming_job = streaming_jobs.get(&job_id).cloned();
-                        objects.push(PbObjectInfo::Table(
-                            ObjectModel(table, table_obj.unwrap(), streaming_job).into(),
-                        ));
-                    }
-                }
-                if !index_ids.is_empty() {
-                    let index_objs = Index::find()
-                        .find_also_related(Object)
-                        .filter(index::Column::IndexId.is_in(index_ids))
-                        .all(&txn)
-                        .await?;
-                    let streaming_jobs = load_streaming_jobs_by_ids(
-                        &txn,
-                        index_objs
-                            .iter()
-                            .map(|(index, _)| index.index_id.as_job_id()),
-                    )
-                    .await?;
-                    for (index, index_obj) in index_objs {
-                        let streaming_job =
-                            streaming_jobs.get(&index.index_id.as_job_id()).cloned();
-                        objects.push(PbObjectInfo::Index(
-                            ObjectModel(index, index_obj.unwrap(), streaming_job).into(),
-                        ));
-                    }
-                }
-            }
-            ObjectType::Source => {
-                let source = Source::find_by_id(object_id.as_source_id())
-                    .one(&txn)
-                    .await?
-                    .ok_or_else(|| MetaError::catalog_id_not_found("source", object_id))?;
-                check_relation_name_duplicate(&source.name, database_id, new_schema, &txn).await?;
-                let is_shared = source.is_shared();
-
-                let mut obj = obj.into_active_model();
-                obj.schema_id = Set(Some(new_schema));
-                let obj = obj.update(&txn).await?;
-                objects.push(PbObjectInfo::Source(ObjectModel(source, obj, None).into()));
-
-                // Note: For non-shared source, we don't update their state tables, which
-                // belongs to the MV.
-                if is_shared {
-                    update_internal_tables(
-                        &txn,
-                        object_id,
-                        object::Column::SchemaId,
-                        new_schema,
-                        &mut objects,
-                    )
-                    .await?;
-                }
-            }
-            ObjectType::Sink => {
-                let sink = Sink::find_by_id(object_id.as_sink_id())
-                    .one(&txn)
-                    .await?
-                    .ok_or_else(|| MetaError::catalog_id_not_found("sink", object_id))?;
-                check_relation_name_duplicate(&sink.name, database_id, new_schema, &txn).await?;
-
-                let mut obj = obj.into_active_model();
-                obj.schema_id = Set(Some(new_schema));
-                let obj = obj.update(&txn).await?;
-                objects.push(PbObjectInfo::Sink(
-                    ObjectModel(sink, obj, streaming_job).into(),
-                ));
-
-                update_internal_tables(
-                    &txn,
-                    object_id,
-                    object::Column::SchemaId,
-                    new_schema,
-                    &mut objects,
-                )
-                .await?;
-            }
-            ObjectType::Subscription => {
-                let subscription = Subscription::find_by_id(object_id.as_subscription_id())
-                    .one(&txn)
-                    .await?
-                    .ok_or_else(|| MetaError::catalog_id_not_found("subscription", object_id))?;
-                check_relation_name_duplicate(&subscription.name, database_id, new_schema, &txn)
-                    .await?;
-
-                let mut obj = obj.into_active_model();
-                obj.schema_id = Set(Some(new_schema));
-                let obj = obj.update(&txn).await?;
-                objects.push(PbObjectInfo::Subscription(
-                    ObjectModel(subscription, obj, None).into(),
-                ));
-            }
-            ObjectType::View => {
-                let view = View::find_by_id(object_id.as_view_id())
-                    .one(&txn)
-                    .await?
-                    .ok_or_else(|| MetaError::catalog_id_not_found("view", object_id))?;
-                check_relation_name_duplicate(&view.name, database_id, new_schema, &txn).await?;
-
-                let mut obj = obj.into_active_model();
-                obj.schema_id = Set(Some(new_schema));
-                let obj = obj.update(&txn).await?;
-                objects.push(PbObjectInfo::View(ObjectModel(view, obj, None).into()));
-            }
-            ObjectType::Function => {
-                let function = Function::find_by_id(object_id.as_function_id())
-                    .one(&txn)
-                    .await?
-                    .ok_or_else(|| MetaError::catalog_id_not_found("function", object_id))?;
-
-                let mut pb_function: PbFunction = ObjectModel(function, obj, None).into();
-                pb_function.schema_id = new_schema;
-                check_function_signature_duplicate(&pb_function, &txn).await?;
-
-                Object::update(object::ActiveModel {
-                    oid: Set(object_id),
-                    schema_id: Set(Some(new_schema)),
-                    ..Default::default()
-                })
-                .exec(&txn)
-                .await?;
-
-                txn.commit().await?;
-                let version = self
-                    .notify_frontend(
-                        NotificationOperation::Update,
-                        NotificationInfo::Function(pb_function),
-                    )
-                    .await;
-                return Ok(version);
-            }
-            ObjectType::Connection => {
-                let connection = Connection::find_by_id(object_id.as_connection_id())
-                    .one(&txn)
-                    .await?
-                    .ok_or_else(|| MetaError::catalog_id_not_found("connection", object_id))?;
-
-                let mut pb_connection: PbConnection = ObjectModel(connection, obj, None).into();
-                pb_connection.schema_id = new_schema;
-                check_connection_name_duplicate(&pb_connection, &txn).await?;
-
-                Object::update(object::ActiveModel {
-                    oid: Set(object_id),
-                    schema_id: Set(Some(new_schema)),
-                    ..Default::default()
-                })
-                .exec(&txn)
-                .await?;
-
-                txn.commit().await?;
-                let version = self
-                    .notify_frontend(
-                        NotificationOperation::Update,
-                        NotificationInfo::Connection(pb_connection),
-                    )
-                    .await;
-                return Ok(version);
-            }
-            _ => unreachable!("not supported object type: {:?}", object_type),
+                    .await?,
+            );
         }
+
+        let object_ids = objects.iter().map(|object| object.oid).collect_vec();
+        let belonging_objects = get_belong_objects_by_ids(&txn, object_ids.iter().copied()).await?;
+        objects.extend(belonging_objects.iter().cloned());
+        let mut object_models = load_object_models(&txn, &objects).await?;
+
+        prepare_object_models_for_schema_change(&txn, &mut object_models, database_id, new_schema)
+            .await?;
+        Object::update_many()
+            .col_expr(object::Column::SchemaId, new_schema.into())
+            .col_expr(
+                object::Column::BelongToOid,
+                new_schema.as_object_id().into(),
+            )
+            .filter(object::Column::Oid.is_in(object_ids))
+            .exec(&txn)
+            .await?;
+        if !belonging_objects.is_empty() {
+            Object::update_many()
+                .col_expr(object::Column::SchemaId, new_schema.into())
+                .filter(
+                    object::Column::Oid.is_in(belonging_objects.iter().map(|object| object.oid)),
+                )
+                .exec(&txn)
+                .await?;
+        }
+        let notification = NotificationInfo::ObjectGroup(PbObjectGroup {
+            objects: object_models
+                .into_iter()
+                .map(|object_info| PbObject {
+                    object_info: Some(object_info),
+                })
+                .collect(),
+            dependencies: vec![],
+        });
 
         txn.commit().await?;
         let version = self
-            .notify_frontend(
-                Operation::Update,
-                Info::ObjectGroup(PbObjectGroup {
-                    objects: objects
-                        .into_iter()
-                        .map(|relation_info| PbObject {
-                            object_info: Some(relation_info),
-                        })
-                        .collect_vec(),
-                    dependencies: vec![],
-                }),
-            )
+            .notify_frontend(NotificationOperation::Update, notification)
             .await;
         Ok(version)
     }
@@ -1152,6 +946,12 @@ impl CatalogController {
         entries_to_add: HashMap<String, String>,
         keys_to_remove: Vec<String>,
     ) -> MetaResult<NotificationVersion> {
+        let updates_cache_refill_policy = entries_to_add
+            .contains_key(STREAMING_CACHE_REFILL_POLICY_CONFIG_PATH)
+            || keys_to_remove
+                .iter()
+                .any(|key| key == STREAMING_CACHE_REFILL_POLICY_CONFIG_PATH);
+
         let inner = self.inner.write().await;
         let txn = inner.db.begin().await?;
 
@@ -1185,21 +985,17 @@ impl CatalogController {
         let updated_config_override = table.to_string();
 
         // Validate the config override by trying to merge it to the default config.
-        {
-            let merged = merge_streaming_config_section(
-                &StreamingConfig::default(),
-                &updated_config_override,
-            )
-            .context("invalid streaming job config override")?;
+        let merged =
+            merge_streaming_config_section(&StreamingConfig::default(), &updated_config_override)
+                .context("invalid streaming job config override")?;
 
-            // Reject unrecognized entries.
-            // Note: If these unrecognized entries are pre-existing, we also reject them here.
-            // Users are able to fix them by issuing a `RESET` first.
-            if let Some(merged) = merged {
-                let unrecognized_keys = merged.unrecognized_keys().collect_vec();
-                if !unrecognized_keys.is_empty() {
-                    bail_invalid_parameter!("unrecognized configs: {:?}", unrecognized_keys);
-                }
+        // Reject unrecognized entries.
+        // Note: If these unrecognized entries are pre-existing, we also reject them here.
+        // Users are able to fix them by issuing a `RESET` first.
+        if let Some(merged) = &merged {
+            let unrecognized_keys = merged.unrecognized_keys().collect_vec();
+            if !unrecognized_keys.is_empty() {
+                bail_invalid_parameter!("unrecognized configs: {:?}", unrecognized_keys);
             }
         }
 
@@ -1212,6 +1008,21 @@ impl CatalogController {
         .await?;
 
         txn.commit().await?;
+        drop(inner);
+
+        if updates_cache_refill_policy {
+            let policies = self.table_cache_refill_policies_snapshot().await?;
+            self.env
+                .notification_manager()
+                .notify_hummock(
+                    NotificationOperation::Update,
+                    NotificationInfo::TableRefillRuntimeConfig(PbTableRefillRuntimeConfig {
+                        table_cache_refill_policies: Some(policies),
+                        ..Default::default()
+                    }),
+                )
+                .await;
+        }
 
         Ok(IGNORED_NOTIFICATION_VERSION)
     }

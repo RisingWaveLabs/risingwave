@@ -23,7 +23,7 @@ use risingwave_common::hash::VirtualNode;
 use risingwave_common::util::epoch::test_epoch;
 use risingwave_hummock_sdk::key::{FullKey, TableKey, UserKey, prefix_slice_with_vnode};
 use risingwave_hummock_sdk::sstable_info::SstableInfo;
-use risingwave_hummock_sdk::{EpochWithGap, HummockEpoch};
+use risingwave_hummock_sdk::{EpochWithGap, HummockEpoch, HummockSstableObjectId};
 use risingwave_object_store::object::{
     InMemObjectStore, ObjectStore, ObjectStoreImpl, ObjectStoreRef,
 };
@@ -37,8 +37,8 @@ use crate::hummock::test_utils::{
     gen_test_sstable, gen_test_sstable_info, gen_test_sstable_with_range_tombstone,
 };
 use crate::hummock::{
-    HummockValue, SstableBuilderOptions, SstableIterator, SstableIteratorType, SstableStoreConfig,
-    SstableStoreRef, TableHolder,
+    HummockValue, RecentFilter, SstableBuilderOptions, SstableIterator, SstableIteratorType,
+    SstableStoreConfig, SstableStoreRef, TableHolder,
 };
 use crate::monitor::{ObjectStoreMetrics, global_hummock_state_store_metrics};
 
@@ -57,16 +57,36 @@ macro_rules! assert_bytes_eq {
 pub const TEST_KEYS_COUNT: usize = 10;
 
 pub async fn mock_sstable_store() -> SstableStoreRef {
-    mock_sstable_store_with_object_store(Arc::new(ObjectStoreImpl::InMem(
-        InMemObjectStore::for_test().monitored(
-            Arc::new(ObjectStoreMetrics::unused()),
-            Arc::new(ObjectStoreConfig::default()),
-        ),
-    )))
+    mock_sstable_store_with_recent_filter(Arc::new(NoneRecentFilter::default().into())).await
+}
+
+pub async fn mock_sstable_store_with_recent_filter(
+    recent_filter: Arc<RecentFilter<(HummockSstableObjectId, usize)>>,
+) -> SstableStoreRef {
+    mock_sstable_store_with_object_store_and_recent_filter(
+        Arc::new(ObjectStoreImpl::InMem(
+            InMemObjectStore::for_test().monitored(
+                Arc::new(ObjectStoreMetrics::unused()),
+                Arc::new(ObjectStoreConfig::default()),
+            ),
+        )),
+        recent_filter,
+    )
     .await
 }
 
 pub async fn mock_sstable_store_with_object_store(store: ObjectStoreRef) -> SstableStoreRef {
+    mock_sstable_store_with_object_store_and_recent_filter(
+        store,
+        Arc::new(NoneRecentFilter::default().into()),
+    )
+    .await
+}
+
+pub async fn mock_sstable_store_with_object_store_and_recent_filter(
+    store: ObjectStoreRef,
+    recent_filter: Arc<RecentFilter<(HummockSstableObjectId, usize)>>,
+) -> SstableStoreRef {
     let path = "test".to_owned();
     let meta_cache = HybridCacheBuilder::new()
         .memory(64 << 20)
@@ -89,7 +109,7 @@ pub async fn mock_sstable_store_with_object_store(store: ObjectStoreRef) -> Ssta
         prefetch_buffer_capacity: 64 << 20,
         max_prefetch_block_number: 16,
 
-        recent_filter: Arc::new(NoneRecentFilter::default().into()),
+        recent_filter,
         state_store_metrics: Arc::new(global_hummock_state_store_metrics(MetricLevel::Disabled)),
         use_new_object_prefix_strategy: true,
         skip_bloom_filter_in_serde: false,

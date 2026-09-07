@@ -313,6 +313,12 @@ message ExprNode {
     JSONB_POPULATE_MAP = 632;
     JSONB_TO_ARRAY = 633;
 
+    // Variant functions
+    TO_VARIANT = 641;
+    VARIANT_GET = 642;
+    TRY_VARIANT_GET = 643;
+    VARIANT_TYPEOF = 644;
+
     // Map functions
     MAP_FROM_ENTRIES = 700;
     MAP_ACCESS = 701;
@@ -353,6 +359,8 @@ message ExprNode {
     PG_SLEEP_FOR = 2025;
     PG_SLEEP_UNTIL = 2026;
     RANDOM = 2027;
+    CLOCK_TIMESTAMP = 2028;
+    GEN_RANDOM_UUID = 2029;
 
     // System administration functions
     CAST_REGCLASS = 2100;

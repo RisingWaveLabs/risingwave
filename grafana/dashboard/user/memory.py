@@ -6,6 +6,7 @@ from . import section
 def _(outer_panels: Panels):
     panels = outer_panels.sub_panel()
     meta_miss_filter = "type='meta_miss'"
+    file_cache_miss_filter = 'op="miss"'
     return [
         outer_panels.row_collapsed(
             "Memory",
@@ -148,12 +149,12 @@ def _(outer_panels: Panels):
                     "Storage file cache statistics",
                     [
                         panels.target(
-                            f"sum(rate({metric('file_cache_latency_count')}[$__rate_interval])) by (op, {NODE_LABEL})",
-                            "file cache {{op}} @ {{%s}}" % NODE_LABEL,
+                            f"sum(rate({metric('foyer_storage_op_total')}[$__rate_interval])) by (name, op, {NODE_LABEL})",
+                            "file cache {{name}} {{op}} @ {{%s}}" % NODE_LABEL,
                         ),
                         panels.target(
-                            f"sum(rate({metric('file_cache_miss')}[$__rate_interval])) by ({NODE_LABEL})",
-                            "file cache miss @ {{%s}}" % NODE_LABEL,
+                            f"sum(rate({metric('foyer_storage_op_total', file_cache_miss_filter)}[$__rate_interval])) by (name, {NODE_LABEL})",
+                            "file cache {{name}} miss @ {{%s}}" % NODE_LABEL,
                         ),
                     ],
                 ),

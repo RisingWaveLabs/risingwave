@@ -44,7 +44,7 @@
         <dependency>
             <groupId>com.amazon.redshift</groupId>
             <artifactId>redshift-jdbc42</artifactId>
-            <version>2.1.0.33</version>
+            <version>2.2.2</version>
         </dependency>
         <!-- https://mvnrepository.com/artifact/net.snowflake/snowflake-jdbc -->
         <dependency>
@@ -56,12 +56,12 @@
         <dependency>
             <groupId>org.bouncycastle</groupId>
             <artifactId>bcprov-jdk18on</artifactId>
-            <version>1.84</version>
+            <version>${bouncycastle.version}</version>
         </dependency>
         <dependency>
             <groupId>org.bouncycastle</groupId>
             <artifactId>bcpkix-jdk18on</artifactId>
-            <version>1.84</version>
+            <version>${bouncycastle.version}</version>
         </dependency>
 
         <!-- test dependencies -->

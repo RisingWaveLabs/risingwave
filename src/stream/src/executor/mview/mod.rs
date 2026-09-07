@@ -16,8 +16,5 @@ pub mod cache;
 pub mod materialize;
 pub mod refresh_progress_table;
 
-#[cfg(test)]
-pub(crate) mod test_utils;
-
 pub use materialize::*;
 pub use refresh_progress_table::RefreshProgressTable;

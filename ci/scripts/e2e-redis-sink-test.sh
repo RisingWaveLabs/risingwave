@@ -24,39 +24,14 @@ shift $((OPTIND -1))
 sink_test_env_setup "$profile"
 apt-get update -y && apt-get install -y redis-server
 
+export PATH="$(pwd)/e2e_test/commands:${PATH}"
+export REDIS_HOST="redis-server"
+export REDIS_PORT="6379"
+export RISEDEV_REDIS_URL="redis://redis-server:6379/"
+export RISEDEV_REDIS_WITH_OPTIONS_COMMON="connector='redis',redis.url='${RISEDEV_REDIS_URL}'"
+
 echo "--- testing sinks"
 sqllogictest -p 4566 -d dev './e2e_test/sink/redis_sink.slt'
-sleep 1
-
-redis-cli -h redis-server -p 6379 get {\"v1\":1} >> ./query_result.txt
-redis-cli -h redis-server -p 6379 get V1:1 >> ./query_result.txt
-redis-cli -h redis-server -p 6379 GEOPOS key_is:1_1 test >> ./query_result2.txt
-redis-cli -h redis-server -p 6379 xlen test_stream >> ./query_result3.txt
-
-# check sink destination using shell
-if cat ./query_result.txt | tr '\n' '\0' | xargs -0 -n1 bash -c '[[ "$0" == "{\"v1\":1,\"v2\":1,\"v3\":1,\"v4\":1.100000023841858,\"v5\":1.2,\"v6\":\"test\",\"v7\":734869,\"v8\":\"2013-01-01T01:01:01.000000Z\",\"v9\":false}" || "$0" == "V2:1,V3:1" ]]'; then
-    echo "Redis sink1 check passed"
-else
-    cat ./query_result.txt
-  echo "The output1 is not as expected."
-  exit 1
-fi
-
-LINE_COUNT=$(cat ./query_result2.txt | wc -l);
-if [ "$LINE_COUNT" -eq 2 ]; then
-    echo "Redis sink2 check passed"
-else
-    cat ./query_result2.txt
-    echo "The output2 is not as expected."
-    exit 1
-fi
-
-if cat ./query_result3.txt | tr '\n' '\0' | xargs -0 -n1 bash -c '[[ "$0" == 1 ]]'; then
-    echo "Redis sink3 check passed"
-else
-    cat ./query_result3.txt
-  echo "The output3 is not as expected."
-fi
 
 echo "--- testing cluster sinks"
 REDIS_CLUSTER_LOG_DIR=".risingwave/log"

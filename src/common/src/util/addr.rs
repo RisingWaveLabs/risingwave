@@ -20,8 +20,9 @@ use anyhow::Context;
 use risingwave_pb::common::PbHostAddress;
 use thiserror_ext::AsReport;
 use tokio::time::sleep;
-use tokio_retry::strategy::ExponentialBackoff;
 use tracing::error;
+
+use crate::util::retry::exponential_backoff;
 
 /// General host address and port.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -97,9 +98,7 @@ pub fn is_local_address(server_addr: &HostAddr, peer_addr: &HostAddr) -> bool {
 
 pub async fn try_resolve_dns(host: &str, port: i32) -> Result<SocketAddr, String> {
     let addr = format!("{}:{}", host, port);
-    let mut backoff = ExponentialBackoff::from_millis(100)
-        .max_delay(Duration::from_secs(3))
-        .factor(5);
+    let mut backoff = exponential_backoff(Duration::from_millis(100), 5, Duration::from_secs(3));
     const MAX_RETRY: usize = 20;
     for i in 1..=MAX_RETRY {
         let err = match addr.to_socket_addrs() {
@@ -115,7 +114,13 @@ pub async fn try_resolve_dns(host: &str, port: i32) -> Result<SocketAddr, String
         // It may happen that the dns information of newly registered worker node
         // has not been propagated to the meta node and cause error. Wait for a while and retry
         let delay = backoff.next().unwrap();
-        error!(attempt = i, backoff_delay = ?delay, err, addr, "fail to resolve worker node address");
+        error!(
+            attempt = i,
+            backoff_delay = ?delay,
+            err,
+            addr,
+            "failed to resolve the worker node address",
+        );
         sleep(delay).await;
     }
     Err(format!("failed to resolve dns: {}", addr))

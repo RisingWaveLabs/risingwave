@@ -13,9 +13,11 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::time::Duration;
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use risingwave_common::util::worker_util::DEFAULT_RESOURCE_GROUP;
 use risingwave_simulation::cluster::{Cluster, Configuration, Session};
 use tokio::time::sleep;
@@ -23,6 +25,7 @@ use tokio::time::sleep;
 use crate::utils::wait_all_database_recovered;
 
 const WAIT_RETRY_INTERVAL: Duration = Duration::from_millis(200);
+const TABLE_CHANGE_LOG_TRUNCATE_INTERVAL_SEC: u64 = 10;
 
 async fn wait_for_query_result(
     session: &mut Session,
@@ -50,6 +53,26 @@ async fn recovery_event_count(session: &mut Session) -> Result<u64> {
     Ok(result.trim().parse()?)
 }
 
+async fn max_table_change_log_epoch(session: &mut Session) -> Result<u64> {
+    let result = session
+        .run(
+            r#"
+WITH epochs AS (
+    SELECT
+        (jsonb_array_elements_text((jsonb_array_elements(change_log->'changeLogs'))->'epochs'))::bigint AS epoch
+    FROM rw_catalog.rw_hummock_table_change_log
+    WHERE table_id = (SELECT id FROM rw_catalog.rw_tables WHERE name = 't')
+)
+SELECT max(epoch) FROM epochs;
+"#,
+        )
+        .await?;
+    result
+        .trim()
+        .parse()
+        .context("failed to get the latest change-log epoch for table t")
+}
+
 fn init_logger() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
@@ -62,6 +85,13 @@ async fn test_cross_db_retention_miss_after_restart_does_not_recover() -> Result
     init_logger();
 
     let mut config = Configuration::for_background_ddl();
+    let mut config_file = OpenOptions::new()
+        .append(true)
+        .open(config.config_path.as_str())?;
+    writeln!(
+        config_file,
+        "\n[meta.developer]\ntable_change_log_truncate_interval_sec = {TABLE_CHANGE_LOG_TRUNCATE_INTERVAL_SEC}"
+    )?;
     config.compute_resource_groups = HashMap::from([
         (1, "src_group".to_owned()),
         (2, "dst_group".to_owned()),
@@ -121,13 +151,31 @@ async fn test_cross_db_retention_miss_after_restart_does_not_recover() -> Result
         .run("insert into t select i, i from generate_series(50001, 50100) as g(i);")
         .await?;
     session.run("flush;").await?;
+    let first_offline_batch_max_epoch = max_table_change_log_epoch(&mut session).await?;
     sleep(Duration::from_secs(3)).await;
     session.run("insert into t values (50101, 50101);").await?;
     session.run("flush;").await?;
 
-    // The upstream subscription retention is one second. Keep the downstream actor offline
-    // long enough that it restarts after its next changelog epoch is out of retention.
-    sleep(Duration::from_secs(3)).await;
+    // Wait through one async truncation interval, then confirm that the changelog prefix needed by
+    // the offline actor is gone before restarting it.
+    sleep(Duration::from_secs(TABLE_CHANGE_LOG_TRUNCATE_INTERVAL_SEC)).await;
+    wait_for_query_result(
+        &mut session,
+        &format!(
+            r#"
+WITH epochs AS (
+    SELECT
+        (jsonb_array_elements_text((jsonb_array_elements(change_log->'changeLogs'))->'epochs'))::bigint AS epoch
+    FROM rw_catalog.rw_hummock_table_change_log
+    WHERE table_id = (SELECT id FROM rw_catalog.rw_tables WHERE name = 't')
+)
+SELECT count(*) FROM epochs WHERE epoch <= {first_offline_batch_max_epoch};
+"#
+        ),
+        "0",
+        100,
+    )
+    .await?;
 
     cluster.simple_restart_nodes([downstream_node]).await;
     wait_all_database_recovered(&mut cluster).await;

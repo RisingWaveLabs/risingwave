@@ -16,7 +16,8 @@ use std::sync::{Arc, LazyLock};
 
 use prometheus::{Registry, exponential_buckets, histogram_opts};
 use risingwave_common::metrics::{
-    LabelGuardedHistogramVec, LabelGuardedIntCounterVec, LabelGuardedIntGaugeVec,
+    LabelGuardedHistogram, LabelGuardedHistogramVec, LabelGuardedIntCounter,
+    LabelGuardedIntCounterVec, LabelGuardedIntGaugeVec,
 };
 use risingwave_common::monitor::GLOBAL_METRICS_REGISTRY;
 use risingwave_common::{
@@ -66,6 +67,57 @@ pub struct IcebergScanMetrics {
 
     /// Categorized scan error counter.
     pub iceberg_source_scan_errors_total: LabelGuardedIntCounterVec,
+}
+
+#[derive(Clone)]
+pub struct IcebergFileScanMetrics {
+    read_bytes: LabelGuardedIntCounter,
+    file_read_duration_seconds: LabelGuardedHistogram,
+    rows_read_total: LabelGuardedIntCounter,
+    files_read_total: LabelGuardedIntCounter,
+    delete_rows_applied_total: LabelGuardedIntCounter,
+}
+
+impl IcebergFileScanMetrics {
+    pub fn new(metrics: &IcebergScanMetrics, table_name: &str) -> Self {
+        Self {
+            read_bytes: metrics
+                .iceberg_read_bytes
+                .with_guarded_label_values(&[table_name]),
+            file_read_duration_seconds: metrics
+                .iceberg_source_file_read_duration_seconds
+                .with_guarded_label_values(&[table_name]),
+            rows_read_total: metrics
+                .iceberg_source_rows_read_total
+                .with_guarded_label_values(&[table_name]),
+            files_read_total: metrics
+                .iceberg_source_files_read_total
+                .with_guarded_label_values(&[table_name, "data"]),
+            delete_rows_applied_total: metrics
+                .iceberg_source_delete_rows_applied_total
+                .with_guarded_label_values(&[table_name, "sdk_applied_approx"]),
+        }
+    }
+
+    pub fn record_read_bytes(&self, bytes: u64) {
+        self.read_bytes.inc_by(bytes);
+    }
+
+    pub fn record_file_read_duration(&self, seconds: f64) {
+        self.file_read_duration_seconds.observe(seconds);
+    }
+
+    pub fn record_rows_read(&self, rows: u64) {
+        self.rows_read_total.inc_by(rows);
+    }
+
+    pub fn record_file_read(&self) {
+        self.files_read_total.inc();
+    }
+
+    pub fn record_delete_rows_applied(&self, rows: u64) {
+        self.delete_rows_applied_total.inc_by(rows);
+    }
 }
 
 impl IcebergScanMetrics {

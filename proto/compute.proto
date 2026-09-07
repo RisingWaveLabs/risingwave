@@ -13,8 +13,11 @@ message ShowConfigResponse {
 }
 
 message ResizeCacheRequest {
+  // Zero means "do not resize". Cache clearing is controlled independently by the clear_* fields.
   uint64 meta_cache_capacity = 1;
   uint64 data_cache_capacity = 2;
+  bool clear_meta_cache = 3;
+  bool clear_data_cache = 4;
 }
 
 message ResizeCacheResponse {}

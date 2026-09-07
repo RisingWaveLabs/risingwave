@@ -12,12 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
+
 use anyhow::{Context, anyhow};
 use risingwave_common::secret::{LocalSecretManager, SecretEncryption};
 use risingwave_hummock_sdk::FrontendHummockVersion;
 use risingwave_meta::MetaResult;
 use risingwave_meta::controller::catalog::Catalog;
+use risingwave_meta::controller::fragment::FragmentServingInfo;
 use risingwave_meta::manager::MetadataManager;
+use risingwave_meta_model::{FragmentId, WorkerId};
 use risingwave_pb::backup_service::MetaBackupManifestId;
 use risingwave_pb::catalog::{Secret, Table};
 use risingwave_pb::common::worker_node::State::Running;
@@ -26,8 +30,8 @@ use risingwave_pb::hummock::WriteLimits;
 use risingwave_pb::meta::meta_snapshot::SnapshotVersion;
 use risingwave_pb::meta::notification_service_server::NotificationService;
 use risingwave_pb::meta::{
-    FragmentWorkerSlotMapping, GetSessionParamsResponse, MetaSnapshot, SubscribeRequest,
-    SubscribeType,
+    FragmentWorkerSlotMapping, GetSessionParamsResponse, MetaSnapshot, PbTableCacheRefillPolicies,
+    SubscribeRequest, SubscribeType,
 };
 use risingwave_pb::user::UserInfo;
 use tokio::sync::mpsc;
@@ -38,6 +42,7 @@ use crate::backup_restore::BackupManagerRef;
 use crate::hummock::HummockManagerRef;
 use crate::manager::{MetaSrvEnv, Notification, NotificationVersion, WorkerKey};
 use crate::serving::ServingVnodeMappingRef;
+use crate::table_refill::build_hummock_table_refill_runtime_config;
 
 pub struct NotificationServiceImpl {
     env: MetaSrvEnv,
@@ -205,8 +210,35 @@ impl NotificationServiceImpl {
         Ok((tables, notification_version))
     }
 
+    async fn get_hummock_catalog_snapshot(
+        &self,
+    ) -> MetaResult<(
+        Vec<Table>,
+        PbTableCacheRefillPolicies,
+        HashMap<FragmentId, FragmentServingInfo>,
+        NotificationVersion,
+    )> {
+        let catalog_guard = self
+            .metadata_manager
+            .catalog_controller
+            .get_inner_read_guard()
+            .await;
+        let mut tables = catalog_guard.list_all_state_tables().await?;
+        tables.extend(catalog_guard.dropped_tables.values().cloned());
+        let table_cache_refill_policies =
+            catalog_guard.table_cache_refill_policies_snapshot().await?;
+        let fragment_serving_infos = catalog_guard.fragment_serving_infos().await?;
+        let notification_version = self.env.notification_manager().current_version().await;
+        Ok((
+            tables,
+            table_cache_refill_policies,
+            fragment_serving_infos,
+            notification_version,
+        ))
+    }
+
     /// Get the total resource of the cluster.
-    async fn get_cluster_resource(&self) -> ClusterResource {
+    async fn get_cluster_resource(&self) -> MetaResult<ClusterResource> {
         self.metadata_manager
             .cluster_controller
             .cluster_resource()
@@ -215,7 +247,7 @@ impl NotificationServiceImpl {
 
     async fn compactor_subscribe(&self) -> MetaResult<MetaSnapshot> {
         let (tables, catalog_version) = self.get_tables_snapshot().await?;
-        let cluster_resource = self.get_cluster_resource().await;
+        let cluster_resource = self.get_cluster_resource().await?;
 
         Ok(MetaSnapshot {
             tables,
@@ -288,7 +320,7 @@ impl NotificationServiceImpl {
                 .context("failed to encode session params")?,
         });
 
-        let cluster_resource = self.get_cluster_resource().await;
+        let cluster_resource = self.get_cluster_resource().await?;
 
         Ok(MetaSnapshot {
             databases,
@@ -319,15 +351,23 @@ impl NotificationServiceImpl {
         })
     }
 
-    async fn hummock_subscribe(&self) -> MetaResult<MetaSnapshot> {
-        let (tables, catalog_version) = self.get_tables_snapshot().await?;
+    async fn hummock_subscribe(&self, worker_id: WorkerId) -> MetaResult<MetaSnapshot> {
+        let (tables, table_cache_refill_policies, fragment_serving_infos, catalog_version) =
+            self.get_hummock_catalog_snapshot().await?;
         let hummock_version = self
             .hummock_manager
             .on_current_version(|version| version.into())
             .await;
         let hummock_write_limits = self.hummock_manager.write_limits().await;
         let meta_backup_manifest_id = self.backup_manager.manifest().await.manifest_id;
-        let cluster_resource = self.get_cluster_resource().await;
+        let cluster_resource = self.get_cluster_resource().await?;
+        let table_refill_runtime_config = build_hummock_table_refill_runtime_config(
+            &self.serving_vnode_mapping,
+            worker_id,
+            table_cache_refill_policies,
+            &fragment_serving_infos,
+            catalog_version,
+        );
 
         Ok(MetaSnapshot {
             tables,
@@ -343,13 +383,14 @@ impl NotificationServiceImpl {
                 write_limits: hummock_write_limits,
             }),
             cluster_resource: Some(cluster_resource),
+            table_refill_runtime_config: Some(table_refill_runtime_config),
             ..Default::default()
         })
     }
 
     async fn compute_subscribe(&self) -> MetaResult<MetaSnapshot> {
         let (secrets, catalog_version) = self.get_decrypted_secret_snapshot().await?;
-        let cluster_resource = self.get_cluster_resource().await;
+        let cluster_resource = self.get_cluster_resource().await?;
 
         Ok(MetaSnapshot {
             secrets,
@@ -389,7 +430,7 @@ impl NotificationService for NotificationServiceImpl {
                 self.hummock_manager
                     .pin_version(req.get_worker_id())
                     .await?;
-                self.hummock_subscribe().await?
+                self.hummock_subscribe(req.get_worker_id()).await?
             }
             SubscribeType::Compute => self.compute_subscribe().await?,
             SubscribeType::Unspecified => unreachable!(),

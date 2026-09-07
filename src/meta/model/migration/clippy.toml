@@ -1,4 +1,5 @@
 disallowed-methods = [
+    { path = "tokio_retry::strategy::ExponentialBackoff::from_millis", reason = "Please use `risingwave_common::util::retry::exponential_backoff` instead; `from_millis` sets the exponent base, not the initial delay." },
     { path = "sea_query::table::column::ColumnDef::binary", reason = "Please use `.rw_binary(..)` instead." },
     { path = "sea_query::table::column::ColumnDef::blob", reason = "Please use `.rw_binary(..)` instead." },
 ]

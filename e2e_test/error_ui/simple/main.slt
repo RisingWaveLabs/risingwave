@@ -15,7 +15,7 @@ create function int_42() returns int as int_42 using link '555.0.0.1:8815';
 db error: ERROR: Failed to run the query
 
 Caused by these errors (recent errors listed first):
-  1: failed to parse address: http://555.0.0.1:8815
+  1: failed to parse UDF link: 555.0.0.1:8815
   2: invalid IPv4 address
 
 
@@ -30,7 +30,7 @@ db error: ERROR: Failed to run the query
 
 Caused by these errors (recent errors listed first):
   1: gRPC request to meta service (call `/meta.SystemParamsService/SetSystemParam`) failed: Internal error
-  2: SystemParams error: unrecognized system parameter "not_exist_key"
+  2: System parameters error: unrecognized system parameter "not_exist_key"
 
 
 query error
@@ -71,6 +71,6 @@ set rw_implicit_flush to maybe;
 db error: ERROR: Failed to run the query
 
 Caused by these errors (recent errors listed first):
-  1: Failed to get/set session config
+  1: Failed to get or set session config
   2: Invalid value `maybe` for `implicit_flush`
   3: Invalid bool

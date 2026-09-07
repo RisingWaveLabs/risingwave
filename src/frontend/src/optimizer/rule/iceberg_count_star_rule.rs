@@ -38,6 +38,14 @@ impl Rule<Logical> for IcebergCountStarRule {
             if iceberg_scan.task.predicate().is_some() {
                 return None;
             }
+            if iceberg_scan
+                .task
+                .tasks()
+                .iter()
+                .any(|task| !task.deletes.is_empty())
+            {
+                return None;
+            }
             let count: i64 = iceberg_scan
                 .task
                 .tasks()

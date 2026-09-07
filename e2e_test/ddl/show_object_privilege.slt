@@ -66,6 +66,10 @@ bash -c 'set -euo pipefail; out=$(PGPASSWORD=password psql -h "$SLT_HOST" -p "$S
 
 skipif madsim
 system ok
+bash -c 'set -euo pipefail; out=$(PGPASSWORD=password psql -h "$SLT_HOST" -p "$SLT_PORT" -U show_acl_user -d "$SLT_DB" -Atc "SELECT name, connector_props FROM rw_catalog.rw_sources WHERE schema_id = (SELECT id FROM rw_catalog.rw_schemas WHERE name = '\''show_acl'\'');"); ! grep -q "hidden_source" <<<"$out"; ! grep -q "datagen.rows.per.second" <<<"$out"'
+
+skipif madsim
+system ok
 bash -c 'set -euo pipefail; out=$(PGPASSWORD=password psql -h "$SLT_HOST" -p "$SLT_PORT" -U show_acl_user -d "$SLT_DB" -Atc "SHOW INTERNAL TABLES FROM show_acl;"); test -z "$out"'
 
 # Known-name probes should not return metadata for hidden tables.
@@ -113,6 +117,10 @@ GRANT SELECT ON SOURCE show_acl.hidden_source TO show_acl_user;
 skipif madsim
 system ok
 bash -c 'set -euo pipefail; for i in {1..20}; do out=$(PGPASSWORD=password psql -h "$SLT_HOST" -p "$SLT_PORT" -U show_acl_user -d "$SLT_DB" -Atc "SHOW SOURCES FROM show_acl;"); grep -q "show_acl.hidden_source" <<<"$out" && exit 0; sleep 1; done; echo "$out"; exit 1'
+
+skipif madsim
+system ok
+bash -c 'set -euo pipefail; for i in {1..20}; do out=$(PGPASSWORD=password psql -h "$SLT_HOST" -p "$SLT_PORT" -U show_acl_user -d "$SLT_DB" -Atc "SELECT name, connector_props FROM rw_catalog.rw_sources WHERE schema_id = (SELECT id FROM rw_catalog.rw_schemas WHERE name = '\''show_acl'\'');"); grep -q "hidden_source" <<<"$out" && grep -q "datagen.rows.per.second" <<<"$out" && exit 0; sleep 1; done; echo "$out"; exit 1'
 
 statement ok
 DROP SECRET show_acl.hidden_secret;

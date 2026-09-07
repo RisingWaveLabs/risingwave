@@ -68,7 +68,7 @@ impl<Src: OpendalSource> SplitEnumerator for OpendalEnumerator<Src> {
         lister
             .try_next()
             .await
-            .context("fail to create source, please check your config")?;
+            .context("failed to create the source; please check your configuration")?;
         Ok(vec![empty_split])
     }
 }
@@ -131,7 +131,7 @@ impl<Src: OpendalSource> OpendalEnumerator<Src> {
                     }
                     Some(Err(err)) => Some((Err(err.into()), object_lister)),
                     None => {
-                        tracing::info!("list object completed.");
+                        tracing::info!("finished listing objects");
                         None
                     }
                 }

@@ -17,6 +17,8 @@
 package com.risingwave.connector.source.common;
 
 import com.risingwave.connector.api.TableSchema;
+import com.risingwave.java.binding.Binding;
+import com.risingwave.proto.Catalog;
 import com.risingwave.proto.Data;
 import java.sql.Connection;
 import java.sql.DriverManager;
@@ -24,6 +26,11 @@ import java.sql.SQLException;
 import java.util.*;
 
 public class MySqlValidator extends DatabaseValidator implements AutoCloseable {
+    private static final String REPLICATION_CLIENT = "REPLICATION CLIENT";
+    private static final String BINLOG_MONITOR = "BINLOG MONITOR";
+    private static final int CDC_TABLE_TYPE =
+            Catalog.Table.CdcTableType.CDC_TABLE_TYPE_MYSQL.getNumber();
+
     private final Map<String, String> userProps;
 
     private final TableSchema tableSchema;
@@ -149,7 +156,7 @@ public class MySqlValidator extends DatabaseValidator implements AutoCloseable {
                     }
 
                     // remove granted privilege from the set
-                    hashSet.removeIf(granted::contains);
+                    hashSet.removeIf(required -> isPrivilegeGranted(required, granted));
                     if (hashSet.isEmpty()) {
                         break;
                     }
@@ -164,16 +171,26 @@ public class MySqlValidator extends DatabaseValidator implements AutoCloseable {
         }
     }
 
+    static boolean isPrivilegeGranted(String required, String granted) {
+        if (granted.contains(required)) {
+            return true;
+        }
+
+        // MariaDB 10.5 renamed REPLICATION CLIENT to BINLOG MONITOR. The old GRANT syntax is
+        // accepted for compatibility, but SHOW GRANTS reports the new privilege name.
+        return required.equals(REPLICATION_CLIENT) && granted.contains(BINLOG_MONITOR);
+    }
+
     private String[] getRequiredPrivileges() {
         if (isCdcSourceJob) {
-            return new String[] {"SELECT", "REPLICATION SLAVE", "REPLICATION CLIENT"};
+            return new String[] {"SELECT", "REPLICATION SLAVE", REPLICATION_CLIENT};
         } else if (isBackfillTable) {
             // check privilege again to ensure the user has the privilege to backfill
-            return new String[] {"SELECT", "REPLICATION SLAVE", "REPLICATION CLIENT"};
+            return new String[] {"SELECT", "REPLICATION SLAVE", REPLICATION_CLIENT};
         } else {
             // dedicated source needs more privileges to acquire global lock
             return new String[] {
-                "SELECT", "RELOAD", "SHOW DATABASES", "REPLICATION SLAVE", "REPLICATION CLIENT"
+                "SELECT", "RELOAD", "SHOW DATABASES", "REPLICATION SLAVE", REPLICATION_CLIENT
             };
         }
     }
@@ -316,116 +333,12 @@ public class MySqlValidator extends DatabaseValidator implements AutoCloseable {
             Data.DataType.TypeName typeName,
             long charMaxLength,
             boolean isUnsigned) {
-        int val = typeName.getNumber();
-
-        // Special handling for unsigned types
-        // For all MySQL unsigned integer types, the recommended approach is to upcast to a larger
-        // signed type in RisingWave to avoid overflow:
-        //   - unsigned tinyint (u8) -> smallint (i16) or larger
-        //   - unsigned smallint (u16) -> int (i32) or larger
-        //   - unsigned int (u32) -> bigint (i64)
-        //   - unsigned bigint (u64) -> decimal (precise, no overflow)
-        //
-        // Special case for unsigned bigint:
-        // Although the best practice is to use DECIMAL to preserve the full range (0 to 2^64-1),
-        // we also allow unsigned bigint -> bigint mapping. This is because Debezium's default
-        // behavior (without 'debezium.bigint.unsigned.handling.mode=precise') converts MySQL
-        // unsigned bigint to signed i64 in the CDC stream. When values exceed i64::MAX, they
-        // overflow to negative numbers (e.g., 18446251075179777772u64 -> -492998529773844i64).
-        // We intentionally support this conversion for backward compatibility and to handle
-        // existing CDC sources.
-        if (isUnsigned) {
-            switch (mysqlDataType) {
-                case "tinyint": // unsigned tinyint (0-255)
-                    // Allow upcast: tinyint unsigned -> smallint/int/bigint
-                    return Data.DataType.TypeName.INT16_VALUE <= val
-                            && val <= Data.DataType.TypeName.INT64_VALUE;
-                case "smallint": // unsigned smallint (0-65535)
-                    // Allow upcast: smallint unsigned -> int/bigint
-                    return Data.DataType.TypeName.INT32_VALUE <= val
-                            && val <= Data.DataType.TypeName.INT64_VALUE;
-                case "mediumint": // unsigned mediumint (0-16777215)
-                case "int": // unsigned int (0-4294967295)
-                    // Allow upcast: int unsigned -> bigint
-                    return val == Data.DataType.TypeName.INT64_VALUE;
-                case "bigint": // unsigned bigint (0-18446744073709551615)
-                    // Allow: bigint unsigned -> bigint (with overflow) or decimal (precise)
-                    return val == Data.DataType.TypeName.INT64_VALUE
-                            || val == Data.DataType.TypeName.DECIMAL_VALUE;
-                default:
-                    // For other types, fall through to standard validation
-                    break;
-            }
-        }
-
-        // Standard validation for signed types
-        switch (mysqlDataType) {
-            case "tinyint": // boolean
-                return (val == Data.DataType.TypeName.BOOLEAN_VALUE)
-                        || (Data.DataType.TypeName.INT16_VALUE <= val
-                                && val <= Data.DataType.TypeName.INT64_VALUE);
-            case "smallint":
-                return Data.DataType.TypeName.INT16_VALUE <= val
-                        && val <= Data.DataType.TypeName.INT64_VALUE;
-            case "mediumint":
-            case "int":
-                return Data.DataType.TypeName.INT32_VALUE <= val
-                        && val <= Data.DataType.TypeName.INT64_VALUE;
-            case "bigint":
-                return val == Data.DataType.TypeName.INT64_VALUE
-                        || val == Data.DataType.TypeName.DECIMAL_VALUE;
-            case "boolean":
-            case "bool":
-                return val == Data.DataType.TypeName.BOOLEAN_VALUE;
-            case "enum":
-                return val == Data.DataType.TypeName.VARCHAR_VALUE;
-            case "char":
-            case "varchar":
-            case "text":
-            case "tinytext":
-            case "mediumtext":
-                return val == Data.DataType.TypeName.VARCHAR_VALUE;
-            case "longtext":
-                return val == Data.DataType.TypeName.BYTEA_VALUE
-                        || val == Data.DataType.TypeName.VARCHAR_VALUE;
-            case "float":
-            case "real":
-                return val == Data.DataType.TypeName.FLOAT_VALUE
-                        || val == Data.DataType.TypeName.DOUBLE_VALUE;
-            case "double":
-                return val == Data.DataType.TypeName.DOUBLE_VALUE;
-            case "numeric":
-            case "decimal":
-                return val == Data.DataType.TypeName.DECIMAL_VALUE;
-            case "date":
-                return val == Data.DataType.TypeName.DATE_VALUE;
-            case "time":
-                return val == Data.DataType.TypeName.TIME_VALUE;
-            case "datetime":
-                return val == Data.DataType.TypeName.TIMESTAMP_VALUE;
-            case "timestamp":
-                return val == Data.DataType.TypeName.TIMESTAMPTZ_VALUE;
-            case "json":
-                return val == Data.DataType.TypeName.JSONB_VALUE;
-                // For 'bit' type, compatibility depends on charMaxLength
-            case "bit":
-                // bit(1) matches bool, bit(n>1) matches bytea
-                if (charMaxLength == 1) {
-                    return val == Data.DataType.TypeName.BOOLEAN_VALUE;
-                } else {
-                    return val == Data.DataType.TypeName.BYTEA_VALUE;
-                }
-            case "tinyblob":
-            case "blob":
-            case "mediumblob":
-            case "longblob":
-            case "binary":
-            case "varbinary":
-                return val == Data.DataType.TypeName.BYTEA_VALUE;
-            case "year":
-                return val == Data.DataType.TypeName.INT32_VALUE;
-            default:
-                return false; // false for other uncovered types
-        }
+        return Binding.validateCdcSourceColumnType(
+                CDC_TABLE_TYPE,
+                mysqlDataType,
+                typeName.getNumber(),
+                charMaxLength,
+                isUnsigned,
+                null);
     }
 }

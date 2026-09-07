@@ -138,6 +138,124 @@ on ours.id = upstream.id;
 ----
 1 25 25 0101000020e610000000000000000000000000000000000000 0101000020e610000000000000000000000000000000000000 t
 
+# Test geometry[] -> bytea[] backfill and incremental events. The composite
+# custom converter must not intercept PostGIS arrays; Debezium should keep
+# emitting native geometry objects so RisingWave can decode EWKB bytes.
+system ok
+psql -c "
+    DROP TABLE IF EXISTS test_geo_array CASCADE;
+    CREATE TABLE test_geo_array (
+        id int PRIMARY KEY,
+        name varchar,
+        locations geometry(Point, 4326)[]
+    );
+    INSERT INTO test_geo_array VALUES
+        (
+            1,
+            'InitialRoute',
+            ARRAY[
+                ST_SetSRID(ST_MakePoint(-87.6298, 41.8781), 4326),
+                ST_SetSRID(ST_MakePoint(-74.0060, 40.7128), 4326)
+            ]::geometry(Point, 4326)[]
+        );
+"
+
+statement ok
+create table test_geo_array (
+    id int primary key,
+    name varchar,
+    locations bytea[]
+) from geo_source table 'public.test_geo_array';
+
+query IIITT retry 10 backoff 1s
+select
+  ours.id,
+  cardinality(ours.locations),
+  upstream.upstream_count,
+  encode(ours.locations[1], 'hex') = upstream.upstream_hex_1 as same_first,
+  encode(ours.locations[2], 'hex') = upstream.upstream_hex_2 as same_second
+from test_geo_array as ours
+join (
+  select * from postgres_query(
+    '${PGHOST:localhost}',
+    '${PGPORT:5432}',
+    '${PGUSER:$USER}',
+    '${PGPASSWORD:}',
+    '${PGDATABASE:postgres}',
+    'select id, array_length(locations, 1)::int as upstream_count, encode(locations[1], ''hex'') as upstream_hex_1, encode(locations[2], ''hex'') as upstream_hex_2 from test_geo_array where id = 1'
+  )
+) as upstream(id, upstream_count, upstream_hex_1, upstream_hex_2)
+on ours.id = upstream.id;
+----
+1 2 2 t t
+
+system ok
+psql -c "
+    INSERT INTO test_geo_array VALUES
+        (
+            2,
+            'InsertedRoute',
+            ARRAY[
+                ST_SetSRID(ST_MakePoint(-0.1278, 51.5074), 4326),
+                ST_SetSRID(ST_MakePoint(2.3522, 48.8566), 4326)
+            ]::geometry(Point, 4326)[]
+        );
+"
+
+query IIITT retry 10 backoff 1s
+select
+  ours.id,
+  cardinality(ours.locations),
+  upstream.upstream_count,
+  encode(ours.locations[1], 'hex') = upstream.upstream_hex_1 as same_first,
+  encode(ours.locations[2], 'hex') = upstream.upstream_hex_2 as same_second
+from test_geo_array as ours
+join (
+  select * from postgres_query(
+    '${PGHOST:localhost}',
+    '${PGPORT:5432}',
+    '${PGUSER:$USER}',
+    '${PGPASSWORD:}',
+    '${PGDATABASE:postgres}',
+    'select id, array_length(locations, 1)::int as upstream_count, encode(locations[1], ''hex'') as upstream_hex_1, encode(locations[2], ''hex'') as upstream_hex_2 from test_geo_array where id = 2'
+  )
+) as upstream(id, upstream_count, upstream_hex_1, upstream_hex_2)
+on ours.id = upstream.id;
+----
+2 2 2 t t
+
+system ok
+psql -c "
+    UPDATE test_geo_array
+    SET locations = ARRAY[
+            ST_SetSRID(ST_MakePoint(0, 0), 4326),
+            ST_SetSRID(ST_MakePoint(1, 1), 4326)
+        ]::geometry(Point, 4326)[]
+    WHERE id = 1;
+"
+
+query IIITT retry 10 backoff 1s
+select
+  ours.id,
+  cardinality(ours.locations),
+  upstream.upstream_count,
+  encode(ours.locations[1], 'hex') = upstream.upstream_hex_1 as same_first,
+  encode(ours.locations[2], 'hex') = upstream.upstream_hex_2 as same_second
+from test_geo_array as ours
+join (
+  select * from postgres_query(
+    '${PGHOST:localhost}',
+    '${PGPORT:5432}',
+    '${PGUSER:$USER}',
+    '${PGPASSWORD:}',
+    '${PGDATABASE:postgres}',
+    'select id, array_length(locations, 1)::int as upstream_count, encode(locations[1], ''hex'') as upstream_hex_1, encode(locations[2], ''hex'') as upstream_hex_2 from test_geo_array where id = 1'
+  )
+) as upstream(id, upstream_count, upstream_hex_1, upstream_hex_2)
+on ours.id = upstream.id;
+----
+1 2 2 t t
+
 # Test incremental DELETE
 system ok
 psql -c "DELETE FROM test_geo WHERE id = 2;"
@@ -177,6 +295,28 @@ query ITI retry 10 backoff 1s
 select id, name, location from test_geo where id = 4;
 ----
 4 NullLocation NULL
+
+# Test automatic schema discovery maps geometry to bytea.
+system ok
+psql -c "
+    DROP TABLE IF EXISTS test_geo_auto_discovery CASCADE;
+    CREATE TABLE test_geo_auto_discovery (
+        id int PRIMARY KEY,
+        location geometry(Point, 4326)
+    );
+"
+
+statement ok
+create table test_geo_auto_discovery_rw (*)
+from geo_source table 'public.test_geo_auto_discovery';
+
+query T
+select c.data_type
+from rw_catalog.rw_columns c
+join rw_catalog.rw_tables t on c.relation_id = t.id
+where t.name = 'test_geo_auto_discovery_rw' and c.name = 'location';
+----
+bytea
 
 # Test with different geometry types (LineString)
 system ok
@@ -218,6 +358,12 @@ statement ok
 drop table test_geo_line;
 
 statement ok
+drop table test_geo_auto_discovery_rw;
+
+statement ok
+drop table test_geo_array;
+
+statement ok
 drop table test_geo;
 
 statement ok
@@ -226,5 +372,7 @@ drop source geo_source;
 system ok
 psql -c "
     DROP TABLE IF EXISTS test_geo CASCADE;
+    DROP TABLE IF EXISTS test_geo_array CASCADE;
+    DROP TABLE IF EXISTS test_geo_auto_discovery CASCADE;
     DROP TABLE IF EXISTS test_geo_line CASCADE;
 "

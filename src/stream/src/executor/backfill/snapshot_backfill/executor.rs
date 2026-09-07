@@ -1045,14 +1045,16 @@ async fn make_consume_snapshot_stream<'a, S: StateStore>(
         throttle_snapshot_stream: bool,
         backfill_paused: bool,
     ) -> StreamExecutorResult<Either<Barrier, Option<StreamChunk>>> {
-        select!(
+        select! {
+            biased;
+
             result = receive_next_barrier(barrier_rx) => {
                 Ok(Either::Left(result?))
             },
             result = snapshot_stream.try_next(), if !throttle_snapshot_stream && !backfill_paused => {
                 Ok(Either::Right(result?))
             }
-        )
+        }
     }
 
     let mut backfill_paused = initial_backfill_paused;

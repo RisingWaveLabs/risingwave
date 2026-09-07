@@ -20,6 +20,33 @@
     );
   expected_outputs:
     - explain_output
+- name: reject upsert sink primary-key mismatch by default
+  sql: |
+    create table t_reject_unsafe_upsert_sink (id int primary key, value int);
+    explain (verbose) create sink s_reject_unsafe_upsert_sink as
+    select id, value from t_reject_unsafe_upsert_sink
+    with (
+      connector = 'blackhole',
+      type = 'upsert',
+      primary_key = 'value',
+      snapshot = 'false'
+    );
+  expected_outputs:
+    - planner_error
+- name: unsafe allow upsert sink primary-key mismatch
+  sql: |
+    set streaming_unsafe_allow_upsert_sink_pk_mismatch = true;
+    create table t_unsafe_upsert_sink (id int primary key, value int);
+    explain (verbose) create sink s_unsafe_upsert_sink as
+    select id, value from t_unsafe_upsert_sink
+    with (
+      connector = 'blackhole',
+      type = 'upsert',
+      primary_key = 'value',
+      snapshot = 'false'
+    );
+  expected_outputs:
+    - explain_output
 - id: create_upsert_jdbc_sink_with_downstream_pk1
   sql: |
     create table t1 (v1 int, v2 double precision, v3 varchar, v4 bigint, v5 decimal, primary key (v3,v4));
@@ -322,5 +349,26 @@
     create table t (id int primary key, v1 int, v2 int);
     explain (verbose) create sink s as select id, v1 + 1 as v1 from t where v2 > 10
     with (connector = 'blackhole', snapshot = 'false');
+  expected_outputs:
+    - explain_output
+- name: materialize impure sink select-list expressions by default
+  sql: |
+    create table t_impure_sink (id int, value int);
+    create materialized view mv_impure_sink as select * from t_impure_sink;
+    explain create sink s_impure_sink as
+    select gen_random_uuid() as event_id, clock_timestamp() as event_ts, id, value
+    from mv_impure_sink
+    with (connector = 'blackhole');
+  expected_outputs:
+    - explain_output
+- name: skip impure sink select-list materialization with unsafe session option
+  sql: |
+    set streaming_unsafe_allow_unmaterialized_impure_expr = true;
+    create table t_impure_sink (id int, value int);
+    create materialized view mv_impure_sink as select * from t_impure_sink;
+    explain create sink s_impure_sink as
+    select gen_random_uuid() as event_id, clock_timestamp() as event_ts, id, value
+    from mv_impure_sink
+    with (connector = 'blackhole');
   expected_outputs:
     - explain_output

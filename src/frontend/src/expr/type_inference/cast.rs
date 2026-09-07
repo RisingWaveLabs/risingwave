@@ -189,6 +189,10 @@ pub fn cast_ok_base(source: &DataType, target: &DataType, allows: CastContext) -
     // * `DataTypeName::Vector.to_oid()` is better but `to_oid` does not work for `DataTypeName::List`
     || matches!((source, target), (DataType::Varchar, DataType::Vector(_)) if CastContext::Explicit <= allows)
     || matches!((source, target), (DataType::Vector(_), DataType::Varchar) if CastContext::Assign <= allows)
+    || matches!((source, target), (DataType::Varchar, DataType::Variant) if CastContext::Explicit <= allows)
+    || matches!((source, target), (DataType::Variant, DataType::Varchar) if CastContext::Assign <= allows)
+    || matches!((source, target), (DataType::Jsonb, DataType::Variant) if CastContext::Explicit <= allows)
+    || matches!((source, target), (DataType::Variant, DataType::Jsonb) if CastContext::Explicit <= allows)
 }
 
 fn cast_struct(source: &DataType, target: &DataType, allows: CastContext) -> CastResult {

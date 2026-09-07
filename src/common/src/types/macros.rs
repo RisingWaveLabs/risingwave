@@ -55,6 +55,7 @@ macro_rules! for_all_variants {
             { Timestamp,    Timestamp,    timestamp,    $crate::types::Timestamp,   $crate::types::Timestamp,           $crate::array::TimestampArray,      $crate::array::TimestampArrayBuilder    },
             { Timestamptz,  Timestamptz,  timestamptz,  $crate::types::Timestamptz, $crate::types::Timestamptz,         $crate::array::TimestamptzArray,    $crate::array::TimestamptzArrayBuilder  },
             { Jsonb,        Jsonb,        jsonb,        $crate::types::JsonbVal,    $crate::types::JsonbRef<'scalar>,   $crate::array::JsonbArray,          $crate::array::JsonbArrayBuilder        },
+            { Variant,      Variant,      variant,      $crate::types::VariantVal,  $crate::types::VariantRef<'scalar>, $crate::array::VariantArray,        $crate::array::VariantArrayBuilder      },
             { Serial,       Serial,       serial,       $crate::types::Serial,      $crate::types::Serial,              $crate::array::SerialArray,         $crate::array::SerialArrayBuilder       },
             { Struct,       Struct,       struct,       $crate::types::StructValue, $crate::types::StructRef<'scalar>,  $crate::array::StructArray,         $crate::array::StructArrayBuilder       },
             { List,         List,         list,         $crate::types::ListValue,   $crate::types::ListRef<'scalar>,    $crate::array::ListArray,           $crate::array::ListArrayBuilder         },

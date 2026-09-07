@@ -567,6 +567,12 @@ fn fallback_rw_expr_builder(
     func_call: &FunctionCall,
     input_columns: &impl ColumnTrait,
 ) -> Option<DFExpr> {
+    // A variant result would cross the RW -> Arrow boundary at runtime, which is unsupported;
+    // refuse so the query falls back to the RisingWave engine at plan time.
+    if func_call.return_type().contains_variant() {
+        return None;
+    }
+
     tracing::warn!(
         "Falling back to RwScalarFunction for function call, it may have performance impact: {:?}",
         func_call

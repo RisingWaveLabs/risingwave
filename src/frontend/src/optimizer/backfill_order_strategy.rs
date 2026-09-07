@@ -240,32 +240,65 @@ mod fixed {
     use crate::optimizer::plan_node::{StreamPlanNodeType, StreamPlanRef};
     use crate::session::SessionImpl;
 
-    /// Collect all relation IDs (tables and sources) that are scanned in the plan.
-    fn collect_scanned_relation_ids(plan: StreamPlanRef) -> HashSet<RelationId> {
-        let mut relation_ids = HashSet::new();
+    /// Collect a mapping from bindable relation IDs to relation IDs actually scanned in the plan.
+    ///
+    /// Index selection may replace a scan on a base table with a scan on one of its index tables.
+    /// In that case, both the base table ID and the index table ID map to the actual index table
+    /// ID, so a user can still specify the base table in a fixed backfill order.
+    fn collect_scanned_relation_ids(
+        session: &SessionImpl,
+        plan: StreamPlanRef,
+    ) -> HashMap<RelationId, HashSet<RelationId>> {
+        let mut relation_ids: HashMap<RelationId, HashSet<RelationId>> = HashMap::new();
 
-        fn visit(plan: StreamPlanRef, relation_ids: &mut HashSet<RelationId>) {
+        fn visit(
+            session: &SessionImpl,
+            plan: StreamPlanRef,
+            relation_ids: &mut HashMap<RelationId, HashSet<RelationId>>,
+        ) {
             match plan.node_type() {
                 StreamPlanNodeType::StreamTableScan => {
                     let table_scan = plan.as_stream_table_scan().expect("table scan");
-                    let relation_id = table_scan.core().table_catalog.id().as_relation_id();
-                    relation_ids.insert(relation_id);
+                    let table_catalog = &table_scan.core().table_catalog;
+                    let scanned_relation_id = table_catalog.id().as_relation_id();
+                    relation_ids
+                        .entry(scanned_relation_id)
+                        .or_default()
+                        .insert(scanned_relation_id);
+
+                    if table_catalog.is_index() {
+                        let reader = session.env().catalog_reader().read_guard();
+                        let schema_catalog = reader
+                            .get_schema_by_id(table_catalog.database_id, table_catalog.schema_id)
+                            .expect("schema of an index table should exist");
+                        let index_catalog = schema_catalog
+                            .iter_index()
+                            .find(|index| index.index_table().id == table_catalog.id)
+                            .expect("index catalog of an index table should exist");
+                        relation_ids
+                            .entry(index_catalog.primary_table.id().as_relation_id())
+                            .or_default()
+                            .insert(scanned_relation_id);
+                    }
                 }
                 StreamPlanNodeType::StreamSourceScan => {
                     let source_scan = plan.as_stream_source_scan().expect("source scan");
                     let relation_id = source_scan.source_catalog().id.as_relation_id();
-                    relation_ids.insert(relation_id);
+                    relation_ids
+                        .entry(relation_id)
+                        .or_default()
+                        .insert(relation_id);
                 }
                 _ => {}
             }
 
             // Recursively visit all inputs
             for child in plan.inputs() {
-                visit(child, relation_ids);
+                visit(session, child, relation_ids);
             }
         }
 
-        visit(plan, &mut relation_ids);
+        visit(session, plan, &mut relation_ids);
         relation_ids
     }
 
@@ -274,8 +307,8 @@ mod fixed {
         orders: Vec<(ObjectName, ObjectName)>,
         plan: StreamPlanRef,
     ) -> Result<HashMap<RelationId, HashSet<RelationId>>> {
-        // Collect all scanned relation IDs from the plan
-        let scanned_relation_ids = collect_scanned_relation_ids(plan);
+        // Collect all scanned relation IDs from the plan.
+        let scanned_relation_ids = collect_scanned_relation_ids(session, plan);
 
         let mut order: HashMap<RelationId, HashSet<RelationId>> = HashMap::new();
         for (start_name, end_name) in orders {
@@ -283,23 +316,26 @@ mod fixed {
             let end_relation_id = bind_backfill_relation_id_by_name(session, end_name.clone())?;
 
             // Validate that both relations are present in the query plan
-            if !scanned_relation_ids.contains(&start_relation_id) {
+            let Some(start_scanned_relation_ids) = scanned_relation_ids.get(&start_relation_id)
+            else {
                 bail!(
                     "Table or source '{}' specified in backfill_order is not used in the query",
                     start_name
                 );
-            }
-            if !scanned_relation_ids.contains(&end_relation_id) {
+            };
+            let Some(end_scanned_relation_ids) = scanned_relation_ids.get(&end_relation_id) else {
                 bail!(
                     "Table or source '{}' specified in backfill_order is not used in the query",
                     end_name
                 );
-            }
+            };
 
-            order
-                .entry(start_relation_id)
-                .or_default()
-                .insert(end_relation_id);
+            for start_scanned_relation_id in start_scanned_relation_ids {
+                order
+                    .entry(*start_scanned_relation_id)
+                    .or_default()
+                    .extend(end_scanned_relation_ids.iter().copied());
+            }
         }
         if has_cycle(&order) {
             bail!("Backfill order strategy has a cycle");

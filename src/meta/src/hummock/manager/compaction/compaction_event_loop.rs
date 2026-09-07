@@ -696,7 +696,9 @@ impl IcebergCompactionEventHandler {
                     handle
                         .send_compact_task(
                             compactor,
-                            next_compaction_task_id(&self.compaction_manager.env).await?,
+                            next_compaction_task_id(&self.compaction_manager.env)
+                                .await?
+                                .into(),
                         )
                         .await
                 }

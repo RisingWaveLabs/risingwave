@@ -24,3 +24,13 @@ drop table t
 
 query error unexpected arguments number
 select now(1);
+
+query T
+select clock_timestamp() is not null;
+----
+t
+
+query T
+select gen_random_uuid() ~ '^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$';
+----
+t

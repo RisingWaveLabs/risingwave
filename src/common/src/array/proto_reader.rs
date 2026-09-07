@@ -31,7 +31,7 @@ impl ArrayImpl {
             PbArrayType::Float32 => read_primitive_array::<F32>(array, cardinality)?,
             PbArrayType::Float64 => read_primitive_array::<F64>(array, cardinality)?,
             PbArrayType::Bool => read_bool_array(array, cardinality)?,
-            PbArrayType::Utf8 => read_string_array::<Utf8ValueReader>(array, cardinality)?,
+            PbArrayType::Utf8 => read_var_sized_array::<Utf8ValueReader>(array, cardinality)?,
             PbArrayType::Decimal => read_primitive_array::<Decimal>(array, cardinality)?,
             PbArrayType::Date => read_primitive_array::<Date>(array, cardinality)?,
             PbArrayType::Time => read_primitive_array::<Time>(array, cardinality)?,
@@ -39,9 +39,10 @@ impl ArrayImpl {
             PbArrayType::Timestamptz => read_primitive_array::<Timestamptz>(array, cardinality)?,
             PbArrayType::Interval => read_primitive_array::<Interval>(array, cardinality)?,
             PbArrayType::Jsonb => JsonbArray::from_protobuf(array)?,
+            PbArrayType::Variant => read_var_sized_array::<VariantValueReader>(array, cardinality)?,
             PbArrayType::Struct => StructArray::from_protobuf(array)?,
             PbArrayType::List => ListArray::from_protobuf(array)?,
-            PbArrayType::Bytea => read_string_array::<BytesValueReader>(array, cardinality)?,
+            PbArrayType::Bytea => read_var_sized_array::<BytesValueReader>(array, cardinality)?,
             PbArrayType::Int256 => Int256Array::from_protobuf(array, cardinality)?,
             PbArrayType::Map => MapArray::from_protobuf(array)?,
             PbArrayType::Vector => VectorArray::from_protobuf(array)?,
@@ -100,6 +101,12 @@ fn read_offset(offset_cursor: &mut Cursor<&[u8]>) -> ArrayResult<i64> {
     let offset = offset_cursor
         .read_i64::<BigEndian>()
         .context("failed to read i64 from offset buffer")?;
+    // `read_var_sized_array` uses a negative `prev_offset` as its "not yet read" sentinel, so a
+    // negative offset here would silently lengthen the first value instead of being rejected.
+    ensure!(
+        offset >= 0,
+        "invalid offset buffer: offsets must not be negative"
+    );
 
     Ok(offset)
 }
@@ -141,13 +148,30 @@ impl VarSizedValueReader for BytesValueReader {
     }
 }
 
-fn read_string_array<R: VarSizedValueReader>(
+struct VariantValueReader;
+
+impl VarSizedValueReader for VariantValueReader {
+    type AB = VariantArrayBuilder;
+
+    fn new_builder(capacity: usize) -> Self::AB {
+        VariantArrayBuilder::new(capacity)
+    }
+
+    fn read(buf: &[u8], builder: &mut VariantArrayBuilder) -> ArrayResult<()> {
+        let variant =
+            VariantRef::from_serialized(buf).context("failed to read variant from bytes")?;
+        builder.append(Some(variant));
+        Ok(())
+    }
+}
+
+fn read_var_sized_array<R: VarSizedValueReader>(
     array: &PbArray,
     cardinality: usize,
 ) -> ArrayResult<ArrayImpl> {
     ensure!(
         array.get_values().len() == 2,
-        "Must have exactly 2 buffers in a string array"
+        "Must have exactly 2 buffers in a variable-sized array"
     );
     let offset_buff = array.get_values()[0].get_body().as_slice();
     let data_buf = array.get_values()[1].get_body().as_slice();
@@ -165,14 +189,18 @@ fn read_string_array<R: VarSizedValueReader>(
                 prev_offset = read_offset(&mut offset_cursor)?;
             }
             let offset = read_offset(&mut offset_cursor)?;
-            let length = (offset - prev_offset) as usize;
+            // A decreasing offset would wrap to a huge length and drive the `resize` below.
+            let length = offset
+                .checked_sub(prev_offset)
+                .and_then(|length| usize::try_from(length).ok())
+                .context("invalid offset buffer: offsets must be non-decreasing")?;
             prev_offset = offset;
             buf.resize(length, Default::default());
             data_cursor
                 .read_exact(buf.as_mut_slice())
                 .with_context(|| {
                     format!(
-                        "failed to read str from data buffer [length={}, offset={}]",
+                        "failed to read value from data buffer [length={}, offset={}]",
                         length, offset
                     )
                 })?;

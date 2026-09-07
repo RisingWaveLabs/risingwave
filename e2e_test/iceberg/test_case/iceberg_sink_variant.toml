@@ -1,0 +1,54 @@
+init_sqls = [
+    'CREATE SCHEMA IF NOT EXISTS demo_db',
+    'DROP TABLE IF EXISTS demo_db.test_variant_sink PURGE',
+    'DROP TABLE IF EXISTS demo_db.test_variant_sink_auto PURGE',
+    'DROP TABLE IF EXISTS demo_db.test_variant_sink_v2_rejected PURGE',
+    """CREATE TABLE demo_db.test_variant_sink (
+        id INT,
+        payload VARIANT,
+        nested STRUCT<
+            top_variant: VARIANT,
+            variant_list: ARRAY<VARIANT>,
+            variant_map: MAP<STRING, VARIANT>
+        >
+    ) USING iceberg
+    TBLPROPERTIES ('format-version'='3')""",
+]
+
+slt = 'test_case/iceberg_sink_variant.slt'
+
+# Iceberg 1.10.1's Spark reader cannot yet materialize VARIANT values inside
+# ARRAY/MAP containers (`ReusableArrayData.getVariant` is unimplemented). The
+# SLT above verifies those values through RisingWave; Spark independently
+# verifies the top-level and nested-struct encodings here.
+verify_schema = ['string', 'int', 'string', 'string']
+
+verify_sql = """
+SELECT
+    origin,
+    id,
+    COALESCE(to_json(payload), '<sql-null>'),
+    COALESCE(to_json(nested.top_variant), '<sql-null>')
+FROM (
+    SELECT 'existing' AS origin, * FROM demo_db.test_variant_sink
+    UNION ALL
+    SELECT 'auto' AS origin, * FROM demo_db.test_variant_sink_auto
+)
+ORDER BY origin, id
+"""
+
+verify_data = """
+auto,1,{"a":[1,true,null],"s":"x"},"inner"
+auto,2,null,"plain"
+auto,3,<sql-null>,<sql-null>
+existing,1,{"a":[1,true,null],"s":"x"},"inner"
+existing,2,null,"plain"
+existing,3,<sql-null>,<sql-null>
+"""
+
+drop_sqls = [
+    'DROP TABLE IF EXISTS demo_db.test_variant_sink PURGE',
+    'DROP TABLE IF EXISTS demo_db.test_variant_sink_auto PURGE',
+    'DROP TABLE IF EXISTS demo_db.test_variant_sink_v2_rejected PURGE',
+    'DROP SCHEMA IF EXISTS demo_db',
+]

@@ -3,7 +3,8 @@
 # Exits as soon as any line fails.
 set -euo pipefail
 
-export LOGDIR=.risingwave/log
+# Outside `.risingwave/log`, which `risedev ci-start` wipes before and during reducing.
+export LOGDIR=fuzz-logs
 export RUST_LOG=info
 mkdir -p $LOGDIR
 
@@ -52,6 +53,7 @@ failed_logs=$(ls $LOGDIR/fuzzing-*.log 2>/dev/null || true)
 
 if [[ -n "$failed_logs" ]]; then
     echo "Simulation fuzzing failed, see logs in $LOGDIR"
+    buildkite-agent artifact upload "$LOGDIR/fuzzing-*.log"
     echo "--- e2e, ci-3cn-1fe, build for reducer to start"
     risedev ci-start ci-3cn-1fe
     for log_file in $failed_logs; do
@@ -61,13 +63,16 @@ if [[ -n "$failed_logs" ]]; then
 
         echo "Processing seed $seed (log: $log_file)"
         extract_error_sql "$log_file" > "$error_sql"
+        buildkite-agent artifact upload "$error_sql"
 
         echo "--- Running reducer on failing queries for seed $seed"
         ./target/debug/sqlsmith-reducer \
             --input-file "$error_sql" \
             --output-file "$shrunk_sql" \
             --run-rw-cmd './risedev k && ./risedev ci-start ci-3cn-1fe' \
-            > "$LOGDIR/reducer-$seed.log" 2>&1
+            > "$LOGDIR/reducer-$seed.log" 2>&1 || echo "Reducer failed for seed $seed"
+        # Per seed, so that hitting the job timeout mid-reduction loses at most the seed in flight.
+        buildkite-agent artifact upload "$LOGDIR/reducer-$seed.log;$shrunk_sql"
         echo "--- Reducer finished for seed $seed (log: $LOGDIR/reducer-$seed.log)"
         echo "Reduced queries saved at $shrunk_sql"
     done

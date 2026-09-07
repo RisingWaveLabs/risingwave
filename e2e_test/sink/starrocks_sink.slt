@@ -4,6 +4,23 @@ set sink_decouple = false;
 statement ok
 CREATE TABLE no_permission_table (v1 int primary key);
 
+statement error Unknown fields in the WITH clause
+CREATE SINK sink_invalid_starrocks_option
+FROM no_permission_table
+WITH (
+    connector = 'starrocks',
+    type = 'upsert',
+    starrocks.host = 'starrocks-fe-server',
+    starrocks.mysqlport = '9030',
+    starrocks.httpport = '8030',
+    starrocks.user = 'users',
+    starrocks.password = '123456',
+    starrocks.database = 'demo',
+    starrocks.table = 'demo_bhv_table',
+    primary_key = 'v1',
+    starrocks.unknown_option = '1'
+);
+
 statement error write permission on the target table
 CREATE SINK sink_no_permission_table
 FROM no_permission_table

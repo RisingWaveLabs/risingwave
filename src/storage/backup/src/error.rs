@@ -60,3 +60,13 @@ pub enum BackupError {
         anyhow::Error,
     ),
 }
+
+impl From<std::io::Error> for BackupError {
+    fn from(err: std::io::Error) -> Self {
+        if err.kind() == std::io::ErrorKind::UnexpectedEof {
+            Self::Decoding(anyhow::anyhow!("unexpected EOF while decoding meta snapshot").into())
+        } else {
+            Self::BackupStorage(err.into())
+        }
+    }
+}

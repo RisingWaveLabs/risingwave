@@ -96,7 +96,7 @@ impl ArrayBuilder for MapArrayBuilder {
 ///
 /// - `Eq` / `Hash` / `Ord` for map:
 ///
-///   It's controversial due to the physicial representation is just an unordered list.
+///   It's controversial due to the physical representation is just an unordered list.
 ///   In many systems (e.g., `DuckDB` and `ClickHouse`), `{"k1":"v1","k2":"v2"} != {"k2":"v2","k1":"v1"}`.
 ///   But the reverse definition might be more intuitive, especially when ingesting Avro/Protobuf data.
 ///

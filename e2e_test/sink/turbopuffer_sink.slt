@@ -33,6 +33,7 @@ CREATE SINK tpuf_e2e_sink FROM tpuf_e2e_items WITH (
     disable_backpressure = 'true',
     full_text_search_columns = 'body,note_contents',
     filterable_columns = '*',
+    num_shards = 8,
     write_batch_size = 2,
     max_linger_second = 1
 );

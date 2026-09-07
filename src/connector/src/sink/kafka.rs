@@ -14,7 +14,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt::Debug;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 use anyhow::anyhow;
@@ -26,6 +26,7 @@ use rdkafka::producer::{DeliveryFuture, FutureProducer, FutureRecord};
 use rdkafka::types::RDKafkaErrorCode;
 use risingwave_common::array::StreamChunk;
 use risingwave_common::catalog::Schema;
+use risingwave_common::log::LogSuppressor;
 use serde::Deserialize;
 use serde_with::{DisplayFromStr, serde_as};
 use strum_macros::{Display, EnumString};
@@ -252,7 +253,12 @@ pub struct KafkaConfig {
 
     #[serde(flatten)]
     pub aws_auth_props: AwsAuthProps,
+
+    #[serde(flatten)]
+    pub unknown_fields: std::collections::HashMap<String, String>,
 }
+
+crate::impl_sink_unknown_fields!(KafkaConfig);
 
 impl EnforceSecret for KafkaConfig {
     fn enforce_one(prop: &str) -> crate::error::ConnectorResult<()> {
@@ -341,6 +347,8 @@ impl Sink for KafkaSink {
     type LogSinker = AsyncTruncateLogSinkerOf<KafkaSinkWriter>;
 
     const SINK_NAME: &'static str = KAFKA_SINK;
+
+    crate::impl_validate_sink_unknown_fields!();
 
     async fn new_log_sinker(&self, _writer_param: SinkWriterParam) -> Result<Self::LogSinker> {
         let formatter = SinkFormatterImpl::new(
@@ -517,44 +525,54 @@ impl KafkaPayloadWriter<'_> {
         for i in 0..self.config.max_retry_num {
             match self.inner.send_result(record) {
                 Ok(delivery_future) => {
-                    if self
+                    // The buffer holds delivery futures that we have not polled yet, including
+                    // those of records already acked by the broker, so reaching the cap is
+                    // ordinary backpressure rather than an anomaly.
+                    let awaited = self
                         .add_future
                         .add_future_may_await(map_delivery_future(delivery_future))
-                        .await?
-                    {
-                        tracing::warn!(
-                            "Number of records being delivered ({}) >= expected kafka producer queue size ({}).
-                            This indicates the default value of queue.buffering.max.messages has changed.",
-                            self.add_future.future_count(),
-                            self.add_future.max_future_count()
-                        );
+                        .await?;
+                    if awaited {
+                        static LOG_SUPPRESSOR: LazyLock<LogSuppressor> =
+                            LazyLock::new(LogSuppressor::default);
+                        if let Ok(suppressed_count) = LOG_SUPPRESSOR.check() {
+                            tracing::warn!(
+                                suppressed_count,
+                                future_count = self.add_future.future_count(),
+                                max_future_count = self.add_future.max_future_count(),
+                                "delivery future buffer is full, awaited an outstanding delivery before enqueuing"
+                            );
+                        }
                     }
                     success_flag = true;
                     break;
                 }
-                // The enqueue buffer is full, `send_result` will immediately return
-                // We can retry for another round after sleeping for sometime
-                Err((e, rec)) => {
-                    tracing::warn!(
-                        error = %e.as_report(),
-                        "producing message (key {:?}) to topic {} failed",
-                        rec.key.map(|k| k.to_bytes()),
-                        rec.topic,
-                    );
-                    record = rec;
-                    match e {
-                        KafkaError::MessageProduction(RDKafkaErrorCode::QueueFull) => {
+                Err((e, rec)) => match e {
+                    KafkaError::MessageProduction(RDKafkaErrorCode::QueueFull) => {
+                        record = rec;
+                        static LOG_SUPPRESSOR: LazyLock<LogSuppressor> =
+                            LazyLock::new(LogSuppressor::default);
+                        if let Ok(suppressed_count) = LOG_SUPPRESSOR.check() {
                             tracing::warn!(
-                                "Producer queue full. Delivery future buffer size={}. Await and retry #{}",
-                                self.add_future.future_count(),
-                                i
+                                suppressed_count,
+                                future_count = self.add_future.future_count(),
+                                retry = i,
+                                "producer queue is full, awaiting an outstanding delivery before retry"
                             );
-                            self.add_future.await_one_delivery().await?;
-                            continue;
                         }
-                        _ => return Err(e.into()),
+                        self.add_future.await_one_delivery().await?;
+                        continue;
                     }
-                }
+                    _ => {
+                        tracing::warn!(
+                            error = %e.as_report(),
+                            "producing message (key {:?}) to topic {} failed",
+                            rec.key.map(|k| k.to_bytes()),
+                            rec.topic,
+                        );
+                        return Err(e.into());
+                    }
+                },
             }
         }
 

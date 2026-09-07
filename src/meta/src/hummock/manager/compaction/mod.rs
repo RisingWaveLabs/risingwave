@@ -206,14 +206,21 @@ pub struct Compaction {
 
 impl HummockManager {
     pub async fn get_assigned_compact_task_num(&self) -> u64 {
-        self.compaction.read().await.compact_task_assignment.len() as u64
+        self.compaction
+            .read_with_process_name("get_assigned_compact_task_num")
+            .await
+            .compact_task_assignment
+            .len() as u64
     }
 
     pub async fn list_compaction_status(
         &self,
     ) -> (Vec<PbCompactStatus>, Vec<PbCompactTaskAssignment>) {
         let (compaction_statuses, compact_task_assignments) = {
-            let compaction = self.compaction.read().await;
+            let compaction = self
+                .compaction
+                .read_with_process_name("list_compaction_status")
+                .await;
             (
                 compaction
                     .compaction_statuses
@@ -242,9 +249,18 @@ impl HummockManager {
         compaction_group_id: CompactionGroupId,
     ) -> Vec<PickerInfo> {
         let (status, levels, group) = {
-            let compaction = self.compaction.read().await;
-            let versioning = self.versioning.read().await;
-            let config_manager = self.compaction_group_manager.read().await;
+            let compaction = self
+                .compaction
+                .read_with_process_name("get_compaction_scores")
+                .await;
+            let versioning = self
+                .versioning
+                .read_with_process_name("get_compaction_scores")
+                .await;
+            let config_manager = self
+                .compaction_group_manager
+                .read_with_process_name("get_compaction_scores")
+                .await;
             match (
                 compaction.compaction_statuses.get(&compaction_group_id),
                 versioning.current_version.levels.get(&compaction_group_id),
@@ -409,7 +425,10 @@ impl HummockManager {
             // config) is destroyed as well. Then a compaction task for this group may come later and
             // cannot find its config.
             let group_config = {
-                let config_manager = self.compaction_group_manager.read().await;
+                let config_manager = self
+                    .compaction_group_manager
+                    .read_with_process_name("get_compact_tasks_impl")
+                    .await;
 
                 match config_manager.try_get_compaction_group_config(compaction_group_id) {
                     Some(config) => config,
@@ -1364,7 +1383,10 @@ impl HummockManager {
         &self,
         task_id: u64,
     ) -> Option<CompactTaskAssignment> {
-        let compaction_guard = self.compaction.read().await;
+        let compaction_guard = self
+            .compaction
+            .read_with_process_name("compaction_task_from_assignment_for_test")
+            .await;
         let assignment_ref = &compaction_guard.compact_task_assignment;
         assignment_ref.get(&task_id).cloned()
     }
@@ -1378,7 +1400,10 @@ impl HummockManager {
         table_stats_change: Option<PbTableStatsMap>,
     ) -> Result<()> {
         if let Some(task) = compact_task {
-            let mut guard = self.compaction.write().await;
+            let mut guard = self
+                .compaction
+                .write_with_process_name("report_compact_task_for_test")
+                .await;
             guard.compact_task_assignment.insert(
                 task_id,
                 CompactTaskAssignment {
@@ -1813,16 +1838,6 @@ impl GroupStateValidator {
         }
 
         Self::check_single_group_emergency(levels, compaction_config)
-    }
-}
-
-#[cfg(test)]
-mod prefetched_task_id_tests {
-    use crate::manager::MetaOpts;
-
-    #[test]
-    fn test_compaction_task_id_refill_capacity_default() {
-        assert_eq!(MetaOpts::test(false).compaction_task_id_refill_capacity, 64);
     }
 }
 

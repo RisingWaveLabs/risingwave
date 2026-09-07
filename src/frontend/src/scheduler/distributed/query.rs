@@ -467,13 +467,14 @@ pub(crate) mod tests {
     use risingwave_batch::worker_manager::worker_node_manager::{
         WorkerNodeManager, WorkerNodeSelector,
     };
+    use risingwave_common::RW_VERSION;
     use risingwave_common::catalog::{
         ColumnCatalog, ColumnDesc, ConflictBehavior, CreateType, DEFAULT_SUPER_USER_ID, Engine,
         StreamJobStatus,
     };
     use risingwave_common::hash::{VirtualNode, VnodeCount, WorkerSlotId, WorkerSlotMapping};
     use risingwave_common::types::DataType;
-    use risingwave_pb::common::worker_node::Property;
+    use risingwave_pb::common::worker_node::{Property, Resource};
     use risingwave_pb::common::{HostAddress, WorkerNode, WorkerType};
     use risingwave_pb::plan_common::JoinType;
     use risingwave_rpc_client::ComputeClientPool;
@@ -677,6 +678,10 @@ pub(crate) mod tests {
                 ..Default::default()
             }),
             transactional_id: Some(0),
+            resource: Some(Resource {
+                rw_version: RW_VERSION.to_owned(),
+                ..Default::default()
+            }),
             ..Default::default()
         };
         let worker2 = WorkerNode {
@@ -694,6 +699,10 @@ pub(crate) mod tests {
                 ..Default::default()
             }),
             transactional_id: Some(1),
+            resource: Some(Resource {
+                rw_version: RW_VERSION.to_owned(),
+                ..Default::default()
+            }),
             ..Default::default()
         };
         let worker3 = WorkerNode {
@@ -711,6 +720,10 @@ pub(crate) mod tests {
                 ..Default::default()
             }),
             transactional_id: Some(2),
+            resource: Some(Resource {
+                rw_version: RW_VERSION.to_owned(),
+                ..Default::default()
+            }),
             ..Default::default()
         };
         let workers = vec![worker1, worker2, worker3];

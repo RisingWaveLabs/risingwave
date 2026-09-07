@@ -56,6 +56,12 @@ use syn::{DeriveInput, parse_macro_input};
 ///     pub endpoint: String,  // not allow_alter_on_fly
 /// }
 /// ```
+///
+/// ### Iceberg Engine fields
+///
+/// Use `#[with_option(iceberg_engine)]` to mark Iceberg sink fields that can be specified
+/// in `CREATE TABLE ... ENGINE = ICEBERG`. The frontend uses the generated field list to route
+/// these options from the table or source properties to the internal Iceberg sink.
 #[proc_macro_derive(WithOptions, attributes(with_option))]
 pub fn derive_helper_attr(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);

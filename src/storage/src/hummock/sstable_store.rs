@@ -971,4 +971,109 @@ mod tests {
             HummockObjectId::Sstable(object_id.into())
         );
     }
+
+    #[tokio::test]
+    async fn test_clear_file_cache_and_refetch() {
+        let sstable_store = mock_sstable_store().await;
+        let x_range = 0..10;
+        let (data, meta) = gen_test_sstable_data(
+            default_builder_opt_for_test(),
+            x_range.map(|x| (iterator_test_key_of(x), get_hummock_value(x))),
+        )
+        .await;
+        let info = put_sst(
+            SST_ID,
+            data,
+            meta,
+            sstable_store.clone(),
+            SstableWriterOptions {
+                capacity_hint: None,
+                tracker: None,
+                policy: CachePolicy::Fill(foyer::Hint::Normal),
+            },
+            vec![0],
+        )
+        .await
+        .unwrap();
+
+        let mut stats = StoreLocalStatistic::default();
+        assert!(
+            sstable_store
+                .sstable_cached(info.object_id)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        let sstable = sstable_store.sstable(&info, &mut stats).await.unwrap();
+        sstable_store
+            .get(
+                &sstable,
+                0,
+                CachePolicy::Fill(foyer::Hint::Normal),
+                &mut stats,
+            )
+            .await
+            .unwrap();
+        assert!(
+            sstable_store
+                .block_cache()
+                .get(&super::SstableBlockIndex {
+                    sst_id: info.object_id,
+                    block_idx: 0,
+                })
+                .await
+                .unwrap()
+                .is_some()
+        );
+
+        sstable_store.clear_meta_cache().await.unwrap();
+        assert!(
+            sstable_store
+                .sstable_cached(info.object_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        sstable_store.sstable(&info, &mut stats).await.unwrap();
+        assert!(
+            sstable_store
+                .sstable_cached(info.object_id)
+                .await
+                .unwrap()
+                .is_some()
+        );
+
+        sstable_store.clear_block_cache().await.unwrap();
+        assert!(
+            sstable_store
+                .block_cache()
+                .get(&super::SstableBlockIndex {
+                    sst_id: info.object_id,
+                    block_idx: 0,
+                })
+                .await
+                .unwrap()
+                .is_none()
+        );
+        sstable_store
+            .get(
+                &sstable,
+                0,
+                CachePolicy::Fill(foyer::Hint::Normal),
+                &mut stats,
+            )
+            .await
+            .unwrap();
+        assert!(
+            sstable_store
+                .block_cache()
+                .get(&super::SstableBlockIndex {
+                    sst_id: info.object_id,
+                    block_idx: 0,
+                })
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
 }

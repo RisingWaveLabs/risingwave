@@ -309,6 +309,7 @@ pub(crate) fn field_to_json(field: &Field) -> Value {
 
         risingwave_common::types::DataType::Bytea => ("bytes", ""),
         risingwave_common::types::DataType::Jsonb => ("string", "io.debezium.data.Json"),
+        risingwave_common::types::DataType::Variant => ("string", "io.debezium.data.Json"),
         risingwave_common::types::DataType::Serial => ("int32", ""),
         // since the original debezium pg support HSTORE via encoded as json string by default,
         // we do the same here

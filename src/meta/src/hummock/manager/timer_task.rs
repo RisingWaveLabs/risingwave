@@ -300,6 +300,20 @@ async fn supervise_child_loops(
                 Ok(()) => {
                     panic!("Hummock timer handler loop [{name}] exited unexpectedly");
                 }
+                // A cancellation means the runtime is aborting detached tasks during shutdown;
+                // treat it as a benign shutdown signal and drain the rest instead of failing.
+                Err(e) if e.is_cancelled() => {
+                    let _ = child_shutdown_tx.send(true);
+                    while let Some((name, result)) = child_handles.next().await {
+                        if let Err(e) = result {
+                            warn!(
+                                handler = name,
+                                error = %e.as_report(),
+                                "Hummock timer handler loop failed during shutdown"
+                            );
+                        }
+                    }
+                }
                 Err(e) => {
                     panic!("Hummock timer handler loop [{name}] failed: {}", e.as_report());
                 }
@@ -423,7 +437,10 @@ impl HummockManager {
         // This keeps the report lane from blocking writers on `versioning` or
         // `compaction_group_manager` while doing potentially heavy metric iteration.
         let (current_version, version_stats) = {
-            let versioning_guard = self.versioning.read().await;
+            let versioning_guard = self
+                .versioning
+                .read_with_process_name("handle_timer_report")
+                .await;
             (
                 versioning_guard.current_version.clone(),
                 versioning_guard.version_stats.clone(),
@@ -569,8 +586,14 @@ impl HummockManager {
         const MAX_COMPACTION_L0_MULTIPLIER: u64 = 32;
         const MAX_COMPACTION_DURATION_SEC: u64 = 20 * 60;
         let slowdown_groups = {
-            let versioning_guard = self.versioning.read().await;
-            let compaction_group_manager = self.compaction_group_manager.read().await;
+            let versioning_guard = self
+                .versioning
+                .read_with_process_name("check_dead_task")
+                .await;
+            let compaction_group_manager = self
+                .compaction_group_manager
+                .read_with_process_name("check_dead_task")
+                .await;
             let mut slowdown_groups: HashMap<CompactionGroupId, u64> = HashMap::default();
 
             for (group_id, group_levels) in &versioning_guard.current_version.levels {
@@ -603,7 +626,10 @@ impl HummockManager {
         let mut pending_tasks: HashMap<u64, (CompactionGroupId, usize, RunningCompactTask)> =
             HashMap::default();
         {
-            let compaction_guard = self.compaction.read().await;
+            let compaction_guard = self
+                .compaction
+                .read_with_process_name("check_dead_task")
+                .await;
             for group_id in slowdown_groups.keys() {
                 if let Some(status) = compaction_guard.compaction_statuses.get(group_id) {
                     for (idx, level_handler) in status.level_handlers.iter().enumerate() {

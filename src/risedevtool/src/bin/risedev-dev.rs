@@ -303,7 +303,7 @@ fn task_main(
                         .set_message(format!("pulsar {}:{}", c.address, c.broker_port));
                 }
                 ServiceConfig::Redis(c) => {
-                    let mut service = RedisService::new(c.clone())?;
+                    let mut service = RedisService::new(c.clone());
                     service.execute(&mut ctx)?;
                     let mut task = risedev::RedisReadyCheckTask::new(c.clone())?;
                     task.execute(&mut ctx)?;
@@ -326,7 +326,7 @@ fn task_main(
                 ServiceConfig::Postgres(c) => {
                     PostgresService::new(c.clone()).execute(&mut ctx)?;
                     let mut task = risedev::DbReadyCheckTask::new(
-                        PgConnectOptions::new()
+                        PgConnectOptions::new_without_pgpass()
                             .host(&c.address)
                             .port(c.port)
                             .database("template1")

@@ -79,7 +79,9 @@ pub fn date_trunc_timestamptz_at_timezone(
             let fixed = instant_local.offset().fix();
             // `unwrap` is okay because `FixedOffset` always returns single unique conversion result.
             let truncated_local = truncated_naive.0.and_local_timezone(fixed).unwrap();
-            Ok(Timestamptz::from_micros(truncated_local.timestamp_micros()))
+            Ok(Timestamptz::from_micros_uncheck(
+                truncated_local.timestamp_micros(),
+            ))
         }
         _ => timestamp_at_time_zone(truncated_naive, timezone),
     }

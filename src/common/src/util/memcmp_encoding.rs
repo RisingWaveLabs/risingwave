@@ -168,6 +168,7 @@ fn calculate_encoded_size_inner(
                 })
                 .try_fold(0, |a, b| b.map(|b| a + b))?,
             DataType::Jsonb => deserializer.skip_bytes()?,
+            DataType::Variant => deserializer.skip_bytes()?,
             DataType::Varchar => deserializer.skip_bytes()?,
             DataType::Bytea => deserializer.skip_bytes()?,
             DataType::Int256 => Int256::MEMCMP_ENCODED_SIZE,

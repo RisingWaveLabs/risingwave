@@ -193,8 +193,14 @@ impl HummockManager {
         group_2: CompactionGroupId,
         created_tables: Option<HashSet<TableId>>,
     ) -> Result<()> {
-        let compaction_guard = self.compaction.write().await;
-        let mut versioning_guard = self.versioning.write().await;
+        let compaction_guard = self
+            .compaction
+            .write_with_process_name("merge_compaction_group_impl")
+            .await;
+        let mut versioning_guard = self
+            .versioning
+            .write_with_process_name("merge_compaction_group_impl")
+            .await;
         let versioning = versioning_guard.deref_mut();
         // Validate parameters.
         if !versioning.current_version.levels.contains_key(&group_1) {
@@ -415,7 +421,10 @@ impl HummockManager {
         });
 
         {
-            let mut compaction_group_manager = self.compaction_group_manager.write().await;
+            let mut compaction_group_manager = self
+                .compaction_group_manager
+                .write_with_process_name("merge_compaction_group_impl")
+                .await;
             let mut compaction_groups_txn = compaction_group_manager.start_compaction_groups_txn();
 
             // for metrics reclaim
@@ -615,8 +624,14 @@ impl HummockManager {
         partition_vnode_count: Option<u32>,
     ) -> Result<Vec<(CompactionGroupId, Vec<StateTableId>)>> {
         let mut result = vec![];
-        let compaction_guard = self.compaction.write().await;
-        let mut versioning_guard = self.versioning.write().await;
+        let compaction_guard = self
+            .compaction
+            .write_with_process_name("split_compaction_group_impl")
+            .await;
+        let mut versioning_guard = self
+            .versioning
+            .write_with_process_name("split_compaction_group_impl")
+            .await;
         let versioning = versioning_guard.deref_mut();
         // Validate parameters.
         if !versioning
@@ -701,7 +716,7 @@ impl HummockManager {
             // Inherit config from parent group
             let config = self
                 .compaction_group_manager
-                .read()
+                .read_with_process_name("split_compaction_group_impl")
                 .await
                 .try_get_compaction_group_config(parent_group_id)
                 .ok_or_else(|| {
@@ -758,7 +773,10 @@ impl HummockManager {
         result.push((new_compaction_group_id, table_ids_right));
 
         {
-            let mut compaction_group_manager = self.compaction_group_manager.write().await;
+            let mut compaction_group_manager = self
+                .compaction_group_manager
+                .write_with_process_name("split_compaction_group_impl")
+                .await;
             let mut compaction_groups_txn = compaction_group_manager.start_compaction_groups_txn();
             compaction_groups_txn
                 .create_compaction_groups(new_compaction_group_id, Arc::new(config));
@@ -860,7 +878,10 @@ impl HummockManager {
         }
 
         let parent_table_ids = {
-            let versioning_guard = self.versioning.read().await;
+            let versioning_guard = self
+                .versioning
+                .read_with_process_name("move_state_tables_to_dedicated_compaction_group")
+                .await;
             versioning_guard
                 .current_version
                 .state_table_info
@@ -977,9 +998,15 @@ impl HummockManager {
 
     async fn apply_normalize_plan(&self, plan: &NormalizePlan) -> Result<bool> {
         let (table_ids_right, boundary_table_id, new_compaction_group_id) = {
-            let mut versioning_guard = self.versioning.write().await;
+            let mut versioning_guard = self
+                .versioning
+                .write_with_process_name("apply_normalize_plan")
+                .await;
             let versioning = versioning_guard.deref_mut();
-            let mut compaction_group_manager = self.compaction_group_manager.write().await;
+            let mut compaction_group_manager = self
+                .compaction_group_manager
+                .write_with_process_name("apply_normalize_plan")
+                .await;
 
             let groups = collect_normalize_group_statistics(
                 &versioning.current_version,
@@ -1101,8 +1128,14 @@ impl HummockManager {
         parent_group_id: CompactionGroupId,
     ) -> Result<()> {
         let mut canceled_tasks = vec![];
-        let compaction_guard = self.compaction.write().await;
-        let mut versioning_guard = self.versioning.write().await;
+        let compaction_guard = self
+            .compaction
+            .write_with_process_name("cancel_expired_normalize_split_tasks")
+            .await;
+        let mut versioning_guard = self
+            .versioning
+            .write_with_process_name("cancel_expired_normalize_split_tasks")
+            .await;
         let versioning = versioning_guard.deref_mut();
         let compact_task_assignments =
             compaction_guard.get_compact_task_assignments_by_group_id(parent_group_id);
@@ -1612,18 +1645,20 @@ impl GroupMergeValidator {
 
         {
             // Avoid merge when the group is in emergency state
-            let versioning_guard = versioning.read().await;
+            let versioning_guard = versioning
+                .read_with_process_name("validate_group_merge")
+                .await;
             let levels = &versioning_guard.current_version.levels;
             if !levels.contains_key(&group.group_id) {
                 return Err(Error::CompactionGroup(format!(
-                    "Cannot merge group {} not exist",
+                    "cannot merge compaction group {} because it does not exist",
                     group.group_id
                 )));
             }
 
             if !levels.contains_key(&next_group.group_id) {
                 return Err(Error::CompactionGroup(format!(
-                    "Cannot merge next group {} not exist",
+                    "cannot merge next compaction group {} because it does not exist",
                     next_group.group_id
                 )));
             }

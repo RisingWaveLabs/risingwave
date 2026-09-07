@@ -45,7 +45,7 @@ mod reexport {
         FromArrow as IcebergFromArrow, ToArrow as IcebergToArrow,
         arrow_array as arrow_array_iceberg, arrow_buffer as arrow_buffer_iceberg,
         arrow_cast as arrow_cast_iceberg, arrow_schema as arrow_schema_iceberg,
-        is_parquet_schema_match_source_schema,
+        is_parquet_field_match_source_schema, is_parquet_schema_match_source_schema,
     };
     pub use super::arrow_udf::{
         FromArrow as UdfFromArrow, ToArrow as UdfToArrow, arrow_array as arrow_array_udf,

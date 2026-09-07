@@ -123,6 +123,12 @@
     select * from t;
   expected_outputs:
   - logical_plan
+- name: qualified wildcard on zero-column subquery
+  sql: |
+    create table t ();
+    select q.* from (select * from t) q;
+  expected_outputs:
+  - logical_plan
 - name: disallow subquery in values
   sql: |
     values(1, (select 1));

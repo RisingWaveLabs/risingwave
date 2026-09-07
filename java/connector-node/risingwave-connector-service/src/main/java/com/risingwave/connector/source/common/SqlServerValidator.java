@@ -18,6 +18,8 @@ package com.risingwave.connector.source.common;
 
 import com.risingwave.connector.api.TableSchema;
 import com.risingwave.connector.api.source.SourceTypeE;
+import com.risingwave.java.binding.Binding;
+import com.risingwave.proto.Catalog;
 import com.risingwave.proto.Data;
 import java.sql.Connection;
 import java.sql.DriverManager;
@@ -28,6 +30,8 @@ import org.slf4j.LoggerFactory;
 
 public class SqlServerValidator extends DatabaseValidator implements AutoCloseable {
     static final Logger LOG = LoggerFactory.getLogger(SqlServerValidator.class);
+    private static final int CDC_TABLE_TYPE =
+            Catalog.Table.CdcTableType.CDC_TABLE_TYPE_SQLSERVER.getNumber();
 
     private final TableSchema tableSchema;
 
@@ -291,59 +295,7 @@ public class SqlServerValidator extends DatabaseValidator implements AutoCloseab
     }
 
     private boolean isDataTypeCompatible(String ssDataType, Data.DataType.TypeName typeName) {
-        // TODO: add more data type compatibility check, by WKX
-        int val = typeName.getNumber();
-        switch (ssDataType) {
-            case "bit":
-                return val == Data.DataType.TypeName.BOOLEAN_VALUE;
-            case "tinyint":
-            case "smallint":
-                return Data.DataType.TypeName.INT16_VALUE <= val
-                        && val <= Data.DataType.TypeName.INT64_VALUE;
-            case "integer":
-            case "int":
-                return Data.DataType.TypeName.INT32_VALUE <= val
-                        && val <= Data.DataType.TypeName.INT64_VALUE;
-            case "bigint":
-                return val == Data.DataType.TypeName.INT64_VALUE;
-            case "money":
-                return val == Data.DataType.TypeName.DECIMAL_VALUE;
-            case "float":
-            case "real":
-                return val == Data.DataType.TypeName.FLOAT_VALUE
-                        || val == Data.DataType.TypeName.DOUBLE_VALUE;
-            case "boolean":
-                return val == Data.DataType.TypeName.BOOLEAN_VALUE;
-            case "double":
-            case "double precision":
-                return val == Data.DataType.TypeName.DOUBLE_VALUE;
-            case "decimal":
-            case "numeric":
-                return val == Data.DataType.TypeName.DECIMAL_VALUE;
-            case "char":
-            case "nchar":
-            case "varchar":
-            case "nvarchar":
-            case "text":
-            case "ntext":
-            case "xml":
-            case "uniqueidentifier":
-                return val == Data.DataType.TypeName.VARCHAR_VALUE;
-            case "binary":
-            case "varbinary":
-                return val == Data.DataType.TypeName.BYTEA_VALUE;
-            case "date":
-                return val == Data.DataType.TypeName.DATE_VALUE;
-            case "time":
-                return val == Data.DataType.TypeName.TIME_VALUE;
-            case "datetime":
-            case "datetime2":
-            case "smalldatetime":
-                return val == Data.DataType.TypeName.TIMESTAMP_VALUE;
-            case "datetimeoffset":
-                return val == Data.DataType.TypeName.TIMESTAMPTZ_VALUE;
-            default:
-                return false; // false for other uncovered types
-        }
+        return Binding.validateCdcSourceColumnType(
+                CDC_TABLE_TYPE, ssDataType, typeName.getNumber(), -1, false, null);
     }
 }

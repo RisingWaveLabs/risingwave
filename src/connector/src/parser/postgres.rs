@@ -14,12 +14,13 @@
 
 use std::sync::LazyLock;
 
+use anyhow::{Context, anyhow, bail};
 use bytes::Buf;
 use risingwave_common::array::Finite32;
 use risingwave_common::catalog::Schema;
 use risingwave_common::log::LogSuppressor;
 use risingwave_common::row::OwnedRow;
-use risingwave_common::types::{DataType, Decimal, ScalarImpl, VectorVal};
+use risingwave_common::types::{DataType, Datum, Decimal, ScalarImpl, VectorVal};
 use thiserror_ext::AsReport;
 use tokio_postgres::types::{FromSql, Type};
 
@@ -66,16 +67,17 @@ impl PgVectorAdapter {
     }
 }
 
-macro_rules! handle_data_type {
+macro_rules! try_handle_data_type {
     ($row:expr, $i:expr, $name:expr, $type:ty) => {{
-        let res = $row.try_get::<_, Option<$type>>($i);
-        match res {
-            Ok(val) => val.map(|v| ScalarImpl::from(v)),
-            Err(err) => {
-                log_error!($name, err, "parse column failed");
-                None
-            }
-        }
+        $row.try_get::<_, Option<$type>>($i)
+            .map(|value| value.map(ScalarImpl::from))
+            .with_context(|| {
+                format!(
+                    "failed to decode PostgreSQL snapshot column `{}` as {}",
+                    $name,
+                    stringify!($type)
+                )
+            })
     }};
 }
 
@@ -90,12 +92,45 @@ pub fn postgres_row_to_owned_row(row: tokio_postgres::Row, schema: &Schema) -> O
     OwnedRow::new(datums)
 }
 
+/// Decode primary-key columns strictly while preserving the legacy lenient behavior for all
+/// other columns in a PostgreSQL CDC snapshot row.
+pub fn postgres_row_to_owned_row_with_strict_pk(
+    row: tokio_postgres::Row,
+    schema: &Schema,
+    pk_indices: &[usize],
+) -> anyhow::Result<OwnedRow> {
+    super::decode_row_with_strict_pk(
+        "PostgreSQL",
+        schema,
+        pk_indices,
+        |index, field| {
+            postgres_cell_to_scalar_impl_strict(&row, &field.data_type, index, &field.name)
+        },
+        |name, err| log_error!(name, err, "parse column failed"),
+    )
+}
+
 pub fn postgres_cell_to_scalar_impl(
     row: &tokio_postgres::Row,
     data_type: &DataType,
     i: usize,
     name: &str,
 ) -> Option<ScalarImpl> {
+    match postgres_cell_to_scalar_impl_strict(row, data_type, i, name) {
+        Ok(datum) => datum,
+        Err(err) => {
+            log_error!(name, err, "parse column failed");
+            None
+        }
+    }
+}
+
+pub fn postgres_cell_to_scalar_impl_strict(
+    row: &tokio_postgres::Row,
+    data_type: &DataType,
+    i: usize,
+    name: &str,
+) -> anyhow::Result<Datum> {
     // We observe several incompatibility issue in Debezium's Postgres connector. We summarize them here:
     // Issue #1. The null of enum list is not supported in Debezium. An enum list contains `NULL` will fallback to `NULL`.
     // Issue #2. In our parser, when there's inf, -inf, nan or invalid item in a list, the whole list will fallback null.
@@ -114,89 +149,76 @@ pub fn postgres_cell_to_scalar_impl(
         | DataType::Interval
         | DataType::Bytea => {
             // ScalarAdapter is also fine. But ScalarImpl is more efficient
-            let res = row.try_get::<_, Option<ScalarImpl>>(i);
-            match res {
-                Ok(val) => val,
-                Err(err) => {
-                    log_error!(name, err, "parse column failed");
-                    None
-                }
-            }
+            row.try_get::<_, Option<ScalarImpl>>(i)
+                .with_context(|| format!("failed to decode PostgreSQL snapshot column `{name}`"))
         }
         DataType::Decimal => {
             // Decimal is more efficient than PgNumeric in ScalarAdapter
-            handle_data_type!(row, i, name, Decimal)
+            try_handle_data_type!(row, i, name, Decimal)
         }
-        DataType::Varchar | DataType::Int256 => {
-            let res = row.try_get::<_, Option<ScalarAdapter>>(i);
-            match res {
-                Ok(val) => val.and_then(|v| v.into_scalar(data_type)),
-                Err(err) => {
-                    log_error!(name, err, "parse column failed");
-                    None
-                }
+        DataType::Varchar | DataType::Int256 | DataType::Struct(_) => {
+            match row
+                .try_get::<_, Option<ScalarAdapter>>(i)
+                .with_context(|| format!("failed to decode PostgreSQL snapshot column `{name}`"))?
+            {
+                Some(value) => value.into_scalar(data_type).map(Some).ok_or_else(|| {
+                    anyhow!("failed to convert PostgreSQL snapshot column `{name}` to {data_type}")
+                }),
+                None => Ok(None),
             }
         }
         DataType::Vector(expected_size) => {
-            let res = row.try_get::<_, Option<PgVectorAdapter>>(i);
-            match res {
-                Ok(Some(PgVectorAdapter(v))) => {
+            match row
+                .try_get::<_, Option<PgVectorAdapter>>(i)
+                .with_context(|| format!("failed to decode PostgreSQL snapshot column `{name}`"))?
+            {
+                Some(PgVectorAdapter(v)) => {
                     if v.len() != *expected_size {
-                        log_error!(
-                            name,
-                            anyhow::anyhow!(
-                                "vector dimension mismatch: expected {}, got {}",
-                                expected_size,
-                                v.len()
-                            ),
-                            "parse column failed"
+                        bail!(
+                            "PostgreSQL snapshot column `{name}` vector dimension mismatch: \
+                             expected {}, got {}",
+                            expected_size,
+                            v.len()
                         );
-                        return None;
                     }
                     let finite = v
                         .into_iter()
                         .map(Finite32::try_from)
-                        .collect::<Result<Vec<_>, _>>();
-                    match finite {
-                        Ok(finite) => Some(ScalarImpl::Vector(VectorVal::from(finite))),
-                        Err(err) => {
-                            log_error!(name, anyhow::anyhow!(err), "parse column failed");
-                            None
-                        }
-                    }
+                        .collect::<Result<Vec<_>, _>>()
+                        .map_err(anyhow::Error::msg)
+                        .with_context(|| {
+                            format!(
+                                "PostgreSQL snapshot column `{name}` contains a non-finite vector \
+                                 element"
+                            )
+                        })?;
+                    Ok(Some(ScalarImpl::Vector(VectorVal::from(finite))))
                 }
-                Ok(None) => None,
-                Err(err) => {
-                    log_error!(name, err, "parse column failed");
-                    None
-                }
+                None => Ok(None),
             }
         }
         DataType::List(list) => match list.elem() {
             // TODO(Kexiang): allow DataType::List(_)
             elem @ (DataType::Struct(_) | DataType::List(_) | DataType::Serial) => {
-                tracing::warn!(
-                    "unsupported List data type {:?}, set the List to empty",
-                    elem
-                );
-                None
+                bail!("unsupported PostgreSQL snapshot list element type {elem}")
             }
             _ => {
-                let res = row.try_get::<_, Option<ScalarAdapter>>(i);
-                match res {
-                    Ok(val) => val.and_then(|v| v.into_scalar(data_type)),
-                    Err(err) => {
-                        log_error!(name, err, "parse list column failed");
-                        None
-                    }
+                match row
+                    .try_get::<_, Option<ScalarAdapter>>(i)
+                    .with_context(|| {
+                        format!("failed to decode PostgreSQL snapshot list column `{name}`")
+                    })? {
+                    Some(value) => value.into_scalar(data_type).map(Some).ok_or_else(|| {
+                        anyhow!(
+                            "failed to convert PostgreSQL snapshot column `{name}` to {data_type}"
+                        )
+                    }),
+                    None => Ok(None),
                 }
             }
         },
-        DataType::Struct(_) | DataType::Serial | DataType::Map(_) => {
-            // Is this branch reachable?
-            // Struct and Serial are not supported
-            tracing::warn!(name, ?data_type, "unsupported data type, set to null");
-            None
+        DataType::Serial | DataType::Map(_) | DataType::Variant => {
+            bail!("unsupported PostgreSQL snapshot data type {data_type} for column `{name}`")
         }
     }
 }

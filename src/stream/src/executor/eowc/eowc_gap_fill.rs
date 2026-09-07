@@ -198,7 +198,7 @@ impl<S: StateStore> ExecutorInner<S> {
                         ScalarRefImpl::Timestamptz(_) => {
                             let micros = fill_time.0.and_utc().timestamp_micros();
                             ScalarImpl::Timestamptz(
-                                risingwave_common::types::Timestamptz::from_micros(micros),
+                                risingwave_common::types::Timestamptz::from_micros_uncheck(micros),
                             )
                         }
                         _ => unreachable!("Time column should be Timestamp or Timestamptz"),

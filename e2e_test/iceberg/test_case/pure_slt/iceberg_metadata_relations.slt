@@ -1,0 +1,255 @@
+# Per-table Iceberg metadata relations for Iceberg engine tables, sources, and standalone sinks.
+
+statement ok
+CREATE SECRET iceberg_metadata_relations_secret WITH (
+  backend = 'meta'
+) AS 'hummockadmin';
+
+statement ok
+CREATE CONNECTION iceberg_metadata_relations_conn WITH (
+  type = 'iceberg',
+  warehouse.path = 's3://hummock001/iceberg_metadata_relations_26465',
+  s3.access.key = secret iceberg_metadata_relations_secret,
+  s3.secret.key = secret iceberg_metadata_relations_secret,
+  s3.endpoint = 'http://127.0.0.1:9301',
+  s3.region = 'us-west-2',
+  catalog.type = 'storage'
+);
+
+statement ok
+SET iceberg_engine_connection = 'public.iceberg_metadata_relations_conn';
+
+statement ok
+CREATE TABLE iceberg_metadata_relations_engine_t (
+  id INT PRIMARY KEY,
+  name VARCHAR
+) WITH (
+  commit_checkpoint_interval = 1
+) ENGINE = ICEBERG;
+
+statement ok
+INSERT INTO iceberg_metadata_relations_engine_t VALUES
+  (1, 'Alice'),
+  (2, 'Bob');
+
+statement ok
+FLUSH;
+
+query ??? retry 20 backoff 1s
+SELECT
+  count(*) > 0,
+  bool_and(snapshot_id IS NOT NULL),
+  bool_and(committed_at IS NOT NULL)
+FROM "iceberg_metadata_relations_engine_t$snapshots";
+----
+t t t
+
+query ??? retry 20 backoff 1s
+SELECT
+  count(*) > 0,
+  bool_and(length > 0),
+  bool_and(path LIKE '%.avro')
+FROM "iceberg_metadata_relations_engine_t$manifests";
+----
+t t t
+
+query ??? retry 20 backoff 1s
+SELECT
+  count(*) > 0,
+  bool_and(file_size_in_bytes > 0),
+  bool_and(manifest_path LIKE '%.avro')
+FROM "iceberg_metadata_relations_engine_t$files";
+----
+t t t
+
+query I retry 20 backoff 1s
+SELECT count(*)
+FROM (
+  SELECT *
+  FROM "iceberg_metadata_relations_engine_t$files"
+  LIMIT 1
+) AS limited_files;
+----
+1
+
+query ? retry 20 backoff 1s
+SELECT count(*) > 0
+FROM "iceberg_metadata_relations_engine_t$files"
+FOR SYSTEM_TIME AS OF '2222-12-10 11:48:06';
+----
+t
+
+# Use a different warehouse for the standalone sink so the base object is
+# resolved through the sink catalog rather than the Iceberg engine table path.
+system ok
+sparksql --e "
+DROP TABLE IF EXISTS demo.demo_db.iceberg_metadata_relations_sink_table PURGE;
+"
+
+statement ok
+SET sink_decouple = false;
+
+statement ok
+CREATE TABLE iceberg_metadata_relations_source_t (
+  id INT PRIMARY KEY,
+  name VARCHAR
+);
+
+statement ok
+CREATE SINK iceberg_metadata_relations_sink
+FROM iceberg_metadata_relations_source_t WITH (
+  connector = 'iceberg',
+  type = 'upsert',
+  primary_key = 'id',
+  warehouse.path = 's3a://icebergdata',
+  s3.endpoint = 'http://127.0.0.1:9301',
+  s3.access.key = secret iceberg_metadata_relations_secret,
+  s3.secret.key = secret iceberg_metadata_relations_secret,
+  s3.region = 'us-east-1',
+  catalog.name = 'demo',
+  catalog.type = 'storage',
+  database.name = 'demo_db',
+  table.name = 'iceberg_metadata_relations_sink_table',
+  commit_checkpoint_interval = 1,
+  create_table_if_not_exists = 'true'
+);
+
+statement ok
+INSERT INTO iceberg_metadata_relations_source_t VALUES
+  (1, 'Carol'),
+  (2, 'Dave');
+
+statement ok
+FLUSH;
+
+query ? retry 20 backoff 1s
+SELECT count(*) > 0
+FROM "iceberg_metadata_relations_sink$snapshots";
+----
+t
+
+query ? retry 20 backoff 1s
+SELECT count(*) > 0
+FROM "iceberg_metadata_relations_sink$manifests";
+----
+t
+
+query ? retry 20 backoff 1s
+SELECT count(*) > 0
+FROM "iceberg_metadata_relations_sink$files"
+WHERE content = 'Data' AND file_format = 'parquet';
+----
+t
+
+statement ok
+CREATE SOURCE iceberg_metadata_relations_iceberg_source WITH (
+  connector = 'iceberg',
+  warehouse.path = 's3a://icebergdata',
+  s3.endpoint = 'http://127.0.0.1:9301',
+  s3.access.key = secret iceberg_metadata_relations_secret,
+  s3.secret.key = secret iceberg_metadata_relations_secret,
+  s3.region = 'us-east-1',
+  catalog.name = 'demo',
+  catalog.type = 'storage',
+  database.name = 'demo_db',
+  table.name = 'iceberg_metadata_relations_sink_table'
+);
+
+query ? retry 20 backoff 1s
+SELECT count(*) > 0
+FROM "iceberg_metadata_relations_iceberg_source$files"
+WHERE content = 'Data';
+----
+t
+
+# Resolve all relation kinds within one schema before moving to the next
+# search_path entry.
+statement ok
+CREATE SCHEMA iceberg_metadata_relations_source_schema;
+
+statement ok
+CREATE SCHEMA iceberg_metadata_relations_table_schema;
+
+statement ok
+CREATE SOURCE iceberg_metadata_relations_source_schema.iceberg_metadata_relations_shadowed WITH (
+  connector = 'iceberg',
+  warehouse.path = 's3a://icebergdata',
+  s3.endpoint = 'http://127.0.0.1:9301',
+  s3.access.key = secret public.iceberg_metadata_relations_secret,
+  s3.secret.key = secret public.iceberg_metadata_relations_secret,
+  s3.region = 'us-east-1',
+  catalog.name = 'demo',
+  catalog.type = 'storage',
+  database.name = 'demo_db',
+  table.name = 'iceberg_metadata_relations_sink_table'
+);
+
+statement ok
+CREATE TABLE iceberg_metadata_relations_table_schema.iceberg_metadata_relations_shadowed (
+  id INT
+);
+
+statement ok
+SET search_path TO
+  iceberg_metadata_relations_source_schema,
+  iceberg_metadata_relations_table_schema;
+
+query ? retry 20 backoff 1s
+SELECT count(*) > 0
+FROM "iceberg_metadata_relations_shadowed$files";
+----
+t
+
+statement ok
+SET search_path TO public;
+
+# Check object privilege before exposing that a base table uses Hummock.
+statement ok
+CREATE USER iceberg_metadata_relations_probe WITH PASSWORD 'password';
+
+system ok
+bash -c 'set -euo pipefail; psql -h "$SLT_HOST" -p "$SLT_PORT" -U root -d "$SLT_DB" -c "GRANT CONNECT ON DATABASE \"$SLT_DB\" TO iceberg_metadata_relations_probe"'
+
+statement ok
+GRANT USAGE ON SCHEMA public TO iceberg_metadata_relations_probe;
+
+system ok
+bash -c 'set -euo pipefail; out=$(PGPASSWORD=password psql -h "$SLT_HOST" -p "$SLT_PORT" -U iceberg_metadata_relations_probe -d "$SLT_DB" -Atc "SELECT * FROM \"iceberg_metadata_relations_source_t\$files\" LIMIT 0;" 2>&1 || true); grep -q '\''permission denied for table or materialized view "iceberg_metadata_relations_source_t"'\'' <<<"$out"; ! grep -q "uses Hummock" <<<"$out"'
+
+statement ok
+DROP USER iceberg_metadata_relations_probe;
+
+statement ok
+DROP SOURCE iceberg_metadata_relations_source_schema.iceberg_metadata_relations_shadowed;
+
+statement ok
+DROP TABLE iceberg_metadata_relations_table_schema.iceberg_metadata_relations_shadowed;
+
+statement ok
+DROP SCHEMA iceberg_metadata_relations_source_schema;
+
+statement ok
+DROP SCHEMA iceberg_metadata_relations_table_schema;
+
+statement ok
+DROP SOURCE iceberg_metadata_relations_iceberg_source;
+
+statement ok
+DROP SINK iceberg_metadata_relations_sink;
+
+statement ok
+DROP TABLE iceberg_metadata_relations_source_t;
+
+statement ok
+DROP TABLE iceberg_metadata_relations_engine_t;
+
+statement ok
+DROP CONNECTION iceberg_metadata_relations_conn;
+
+statement ok
+DROP SECRET iceberg_metadata_relations_secret;
+
+system ok
+sparksql --e "
+DROP TABLE IF EXISTS demo.demo_db.iceberg_metadata_relations_sink_table PURGE;
+"

@@ -16,6 +16,7 @@ use std::collections::HashMap;
 use std::fmt::Debug;
 use std::sync::LazyLock;
 
+use anyhow::{Context, bail};
 use auto_enums::auto_enum;
 pub use avro::AvroParserConfig;
 pub use canal::*;
@@ -27,18 +28,29 @@ use futures_async_stream::try_stream;
 pub use json_parser::*;
 pub use parquet_parser::ParquetParser;
 pub use protobuf::*;
-use risingwave_common::catalog::{CDC_TABLE_NAME_COLUMN_NAME, KAFKA_TIMESTAMP_COLUMN_NAME};
+use risingwave_common::catalog::{
+    CDC_TABLE_NAME_COLUMN_NAME, Field, KAFKA_TIMESTAMP_COLUMN_NAME, Schema,
+};
 use risingwave_common::log::LogSuppressor;
 use risingwave_common::metrics::GLOBAL_ERROR_METRICS;
-use risingwave_common::types::{DatumCow, DatumRef};
+use risingwave_common::row::OwnedRow;
+use risingwave_common::types::{Datum, DatumCow, DatumRef};
 use risingwave_common::util::tracing::InstrumentStream;
 use risingwave_connector_codec::decoder::avro::MapHandling;
 use thiserror_ext::AsReport;
 
-pub use self::mysql::{mysql_datum_to_rw_datum, mysql_row_to_owned_row};
+pub use self::mysql::{
+    mysql_datum_to_rw_datum, mysql_row_to_owned_row, mysql_row_to_owned_row_with_strict_pk,
+};
 use self::plain_parser::PlainParser;
-pub use self::postgres::{postgres_cell_to_scalar_impl, postgres_row_to_owned_row};
-pub use self::sql_server::{ScalarImplTiberiusWrapper, sql_server_row_to_owned_row};
+pub use self::postgres::{
+    postgres_cell_to_scalar_impl, postgres_cell_to_scalar_impl_strict, postgres_row_to_owned_row,
+    postgres_row_to_owned_row_with_strict_pk,
+};
+pub use self::sql_server::{
+    ScalarImplTiberiusWrapper, sql_server_row_to_owned_row,
+    sql_server_row_to_owned_row_with_strict_pk,
+};
 pub use self::unified::Access;
 pub use self::unified::json::{
     BigintUnsignedHandlingMode, JsonAccess, TimeHandling, TimestampHandling, TimestamptzHandling,
@@ -53,6 +65,132 @@ use crate::source::{
     SourceContext, SourceContextRef, SourceCtrlOpts, SourceMessageEvent, SourceMeta,
     SourceReaderEvent,
 };
+
+fn decode_row_with_strict_pk(
+    connector_name: &str,
+    schema: &Schema,
+    pk_indices: &[usize],
+    mut decode: impl FnMut(usize, &Field) -> anyhow::Result<Datum>,
+    mut log_non_pk_error: impl FnMut(&str, anyhow::Error),
+) -> anyhow::Result<OwnedRow> {
+    if let Some(index) = pk_indices
+        .iter()
+        .copied()
+        .find(|index| *index >= schema.fields.len())
+    {
+        bail!(
+            "{connector_name} snapshot primary-key index {index} is out of bounds for {} columns",
+            schema.fields.len()
+        );
+    }
+
+    let mut datums = Vec::with_capacity(schema.fields.len());
+    for (index, field) in schema.fields.iter().enumerate() {
+        let is_pk = pk_indices.contains(&index);
+        let decode_result = decode(index, field);
+        let datum = if is_pk {
+            decode_result.with_context(|| {
+                format!(
+                    "failed to decode {connector_name} snapshot primary key `{}`",
+                    field.name
+                )
+            })?
+        } else {
+            match decode_result {
+                Ok(datum) => datum,
+                Err(err) => {
+                    log_non_pk_error(&field.name, err);
+                    None
+                }
+            }
+        };
+        if is_pk && datum.is_none() {
+            bail!(
+                "{connector_name} snapshot primary key `{}` cannot be NULL",
+                field.name
+            );
+        }
+        datums.push(datum);
+    }
+    Ok(OwnedRow::new(datums))
+}
+
+#[cfg(test)]
+mod strict_pk_tests {
+    use anyhow::anyhow;
+    use risingwave_common::row::Row;
+    use risingwave_common::types::{DataType, ScalarImpl};
+
+    use super::*;
+
+    fn test_schema() -> Schema {
+        Schema::new(vec![
+            Field::with_name(DataType::Int32, "id"),
+            Field::with_name(DataType::Int32, "payload"),
+        ])
+    }
+
+    #[test]
+    fn strict_pk_propagates_decode_error() {
+        let err = decode_row_with_strict_pk(
+            "test",
+            &test_schema(),
+            &[0],
+            |index, _| {
+                if index == 0 {
+                    Err(anyhow!("malformed integer"))
+                } else {
+                    Ok(Some(ScalarImpl::Int32(1)))
+                }
+            },
+            |_, _| unreachable!(),
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("snapshot primary key `id`"));
+        assert!(format!("{err:#}").contains("malformed integer"));
+    }
+
+    #[test]
+    fn strict_pk_rejects_decoded_null() {
+        let err = decode_row_with_strict_pk(
+            "test",
+            &test_schema(),
+            &[0],
+            |_, _| Ok(None),
+            |_, _| unreachable!(),
+        )
+        .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("snapshot primary key `id` cannot be NULL")
+        );
+    }
+
+    #[test]
+    fn strict_pk_keeps_non_pk_decode_lenient() {
+        let mut logged_columns = Vec::new();
+        let row = decode_row_with_strict_pk(
+            "test",
+            &test_schema(),
+            &[0],
+            |index, _| {
+                if index == 0 {
+                    Ok(Some(ScalarImpl::Int32(1)))
+                } else {
+                    Err(anyhow!("malformed payload"))
+                }
+            },
+            |name, _| logged_columns.push(name.to_owned()),
+        )
+        .unwrap();
+
+        assert!(row.datum_at(0).is_some());
+        assert!(row.datum_at(1).is_none());
+        assert_eq!(logged_columns, ["payload"]);
+    }
+}
 
 mod access_builder;
 pub mod additional_columns;

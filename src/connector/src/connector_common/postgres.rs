@@ -31,10 +31,10 @@ use thiserror_ext::AsReport;
 use tokio_postgres::types::Kind as PgKind;
 use tokio_postgres::{Client as PgClient, NoTls};
 
+use super::TcpKeepaliveConfig;
 #[cfg(not(madsim))]
 use super::maybe_tls_connector::MaybeMakeTlsConnector;
 use crate::error::ConnectorResult;
-use crate::sink::postgres::TcpKeepaliveConfig;
 
 /// SQL query to discover primary key columns directly from PostgreSQL system tables.
 /// This bypasses querying `information_schema.table_constraints` to avoid permission issues.
@@ -73,14 +73,61 @@ const DISCOVER_PGVECTOR_COLUMNS_QUERY: &str = r#"
     ORDER BY a.attnum
 "#;
 
+const CHECK_TABLE_PRIVILEGE_QUERY: &str = r#"
+    SELECT
+      current_user::text AS user_name,
+      n.oid IS NOT NULL AS schema_exists,
+      c.oid IS NOT NULL AS table_exists,
+      COALESCE(has_schema_privilege(current_user, n.oid, 'USAGE'), false) AS has_schema_usage,
+      COALESCE(has_table_privilege(current_user, c.oid, $3), false) AS has_table_privilege,
+      COALESCE(has_any_column_privilege(current_user, c.oid, $3), false) AS has_any_column_privilege
+    FROM (SELECT 1) AS one
+    LEFT JOIN pg_namespace n ON n.nspname = $1
+    LEFT JOIN pg_class c ON c.relnamespace = n.oid
+      AND c.relname = $2
+      AND c.relkind IN ('r', 'p')
+    LIMIT 1
+"#;
+
+/// Canonical Postgres connection parameters shared across sink, source CDC, batch
+/// executor, and frontend `postgres_query` table function. Each caller constructs
+/// this from its own user-facing config struct before invoking the shared helpers
+/// like `create_pg_client` or `PostgresExternalTable::connect`.
+#[derive(Debug, Clone)]
 pub struct PgConnectionConfig {
     pub host: String,
-    pub port: String,
+    pub port: u16,
     pub user: String,
     pub password: String,
     pub database: String,
     pub ssl_mode: SslMode,
     pub ssl_root_cert: Option<String>,
+}
+
+impl PgConnectionConfig {
+    fn to_sqlx_connect_options(&self) -> PgConnectOptions {
+        let mut options = PgConnectOptions::new()
+            .username(&self.user)
+            .password(&self.password)
+            .host(&self.host)
+            .port(self.port)
+            .database(&self.database)
+            .ssl_mode(match self.ssl_mode {
+                SslMode::Disabled => PgSslMode::Disable,
+                SslMode::Preferred => PgSslMode::Prefer,
+                SslMode::Required => PgSslMode::Require,
+                SslMode::VerifyCa => PgSslMode::VerifyCa,
+                SslMode::VerifyFull => PgSslMode::VerifyFull,
+            });
+
+        if matches!(self.ssl_mode, SslMode::VerifyCa | SslMode::VerifyFull)
+            && let Some(root_cert) = &self.ssl_root_cert
+        {
+            options = options.ssl_root_cert(root_cert.as_str());
+        }
+
+        options
+    }
 }
 
 pub fn pg_connection_config_from_properties(
@@ -91,10 +138,13 @@ pub fn pg_connection_config_from_properties(
             .get("hostname")
             .context("missing `hostname` in postgres-cdc properties")?
             .clone(),
-        port: props
-            .get("port")
-            .context("missing `port` in postgres-cdc properties")?
-            .clone(),
+        port: {
+            let raw = props
+                .get("port")
+                .context("missing `port` in postgres-cdc properties")?;
+            raw.parse::<u16>()
+                .with_context(|| format!("invalid postgres port `{}`", raw))?
+        },
         user: props
             .get("username")
             .context("missing `username` in postgres-cdc properties")?
@@ -117,18 +167,9 @@ pub async fn create_pg_client_from_properties(
     tcp_keepalive: Option<TcpKeepaliveConfig>,
 ) -> ConnectorResult<PgClient> {
     let config = pg_connection_config_from_properties(props)?;
-    create_pg_client(
-        &config.user,
-        &config.password,
-        &config.host,
-        &config.port,
-        &config.database,
-        &config.ssl_mode,
-        &config.ssl_root_cert,
-        tcp_keepalive,
-    )
-    .await
-    .map_err(Into::into)
+    create_pg_client(&config, tcp_keepalive)
+        .await
+        .map_err(Into::into)
 }
 
 pub async fn discover_pgvector_dimensions(
@@ -178,6 +219,15 @@ pub struct PostgresExternalTable {
     pk_names: Vec<String>,
 }
 
+struct PostgresTablePrivilege {
+    user_name: String,
+    schema_exists: bool,
+    table_exists: bool,
+    has_schema_usage: bool,
+    has_table_privilege: bool,
+    has_any_column_privilege: bool,
+}
+
 impl PostgresExternalTable {
     /// Discover primary key columns directly from PostgreSQL system tables.
     /// This bypasses querying `information_schema.table_constraints` to avoid requiring table owner permissions.
@@ -205,39 +255,15 @@ impl PostgresExternalTable {
     /// This method uses direct PostgreSQL system table queries for primary keys
     /// to avoid permission issues when querying `information_schema.table_constraints`
     async fn discover_pk_and_full_columns(
-        username: &str,
-        password: &str,
-        host: &str,
-        port: u16,
-        database: &str,
+        config: &PgConnectionConfig,
         schema: &str,
         table: &str,
-        ssl_mode: &SslMode,
-        ssl_root_cert: &Option<String>,
+        required_table_privilege: Option<&str>,
     ) -> ConnectorResult<(Vec<sea_schema::postgres::def::ColumnInfo>, Vec<String>)> {
-        let mut options = PgConnectOptions::new()
-            .username(username)
-            .password(password)
-            .host(host)
-            .port(port)
-            .database(database)
-            .ssl_mode(match ssl_mode {
-                SslMode::Disabled => PgSslMode::Disable,
-                SslMode::Preferred => PgSslMode::Prefer,
-                SslMode::Required => PgSslMode::Require,
-                SslMode::VerifyCa => PgSslMode::VerifyCa,
-                SslMode::VerifyFull => PgSslMode::VerifyFull,
-            });
-
-        if (*ssl_mode == SslMode::VerifyCa || *ssl_mode == SslMode::VerifyFull)
-            && let Some(root_cert) = ssl_root_cert
-        {
-            options = options.ssl_root_cert(root_cert.as_str());
-        }
-
+        let options = config.to_sqlx_connect_options();
         let connection = PgPool::connect_with(options).await?;
 
-        // Use sea-schema only for column discovery (no permission issues)
+        // Keep using sea-schema for column discovery, then run targeted access diagnostics below.
         let schema_discovery = SchemaDiscovery::new(connection.clone(), schema);
         let empty_map: HashMap<String, Vec<String>> = HashMap::new();
         let columns = schema_discovery
@@ -267,6 +293,10 @@ impl PostgresExternalTable {
         // sea-schema reports pgvector as `Unknown("vector")` and drops the dimension.
         // Patch it with PostgreSQL's formatted type text so we can derive vector(n).
         let mut columns = columns;
+        if let Some(privilege) = required_table_privilege {
+            Self::ensure_table_privilege(&connection, schema, table, privilege).await?;
+        }
+
         for col in &mut columns {
             if let SeaType::Unknown(name) = &col.col_type
                 && name.eq_ignore_ascii_case("vector")
@@ -282,37 +312,79 @@ impl PostgresExternalTable {
         Ok((columns, pk_columns))
     }
 
-    async fn discover_schema(
-        username: &str,
-        password: &str,
-        host: &str,
-        port: u16,
-        database: &str,
+    async fn ensure_table_privilege(
+        connection: &PgPool,
         schema: &str,
         table: &str,
-        ssl_mode: &SslMode,
-        ssl_root_cert: &Option<String>,
-    ) -> ConnectorResult<TableDef> {
-        let mut options = PgConnectOptions::new()
-            .username(username)
-            .password(password)
-            .host(host)
-            .port(port)
-            .database(database)
-            .ssl_mode(match ssl_mode {
-                SslMode::Disabled => PgSslMode::Disable,
-                SslMode::Preferred => PgSslMode::Prefer,
-                SslMode::Required => PgSslMode::Require,
-                SslMode::VerifyCa => PgSslMode::VerifyCa,
-                SslMode::VerifyFull => PgSslMode::VerifyFull,
-            });
+        required_privilege: &str,
+    ) -> ConnectorResult<()> {
+        let row = sqlx::query(CHECK_TABLE_PRIVILEGE_QUERY)
+            .bind(schema)
+            .bind(table)
+            .bind(required_privilege)
+            .fetch_one(connection)
+            .await
+            .context("Failed to check PostgreSQL table privileges")?;
 
-        if (*ssl_mode == SslMode::VerifyCa || *ssl_mode == SslMode::VerifyFull)
-            && let Some(root_cert) = ssl_root_cert
-        {
-            options = options.ssl_root_cert(root_cert.as_str());
+        let privilege_status = PostgresTablePrivilege {
+            user_name: row.get("user_name"),
+            schema_exists: row.get("schema_exists"),
+            table_exists: row.get("table_exists"),
+            has_schema_usage: row.get("has_schema_usage"),
+            has_table_privilege: row.get("has_table_privilege"),
+            has_any_column_privilege: row.get("has_any_column_privilege"),
+        };
+
+        if !privilege_status.schema_exists {
+            return Err(anyhow!("PostgreSQL schema `{schema}` does not exist").into());
         }
 
+        if !privilege_status.table_exists {
+            return Err(anyhow!("PostgreSQL table `{schema}`.`{table}` does not exist").into());
+        }
+
+        if !privilege_status.has_schema_usage {
+            return Err(anyhow!(
+                "PostgreSQL table {} exists, but the connection user `{}` does not have USAGE privilege on schema `{}`. Grant privileges on the upstream PostgreSQL database: {}",
+                format_pg_table_name(schema, table),
+                privilege_status.user_name,
+                schema,
+                format_grant_usage(schema, &privilege_status.user_name),
+            )
+            .into());
+        }
+
+        if !privilege_status.has_table_privilege {
+            let column_privilege_msg = if privilege_status.has_any_column_privilege {
+                " The user has column-level privilege on at least one column, but RisingWave requires table-level privilege for CDC schema discovery and snapshot reads."
+            } else {
+                ""
+            };
+            return Err(anyhow!(
+                "PostgreSQL table {} exists, but the connection user `{}` does not have {} privilege on it.{} Grant privileges on the upstream PostgreSQL database: {}",
+                format_pg_table_name(schema, table),
+                privilege_status.user_name,
+                required_privilege,
+                column_privilege_msg,
+                format_required_table_grants(
+                    schema,
+                    table,
+                    &privilege_status.user_name,
+                    required_privilege
+                ),
+            )
+            .into());
+        }
+
+        Ok(())
+    }
+
+    async fn discover_schema(
+        config: &PgConnectionConfig,
+        schema: &str,
+        table: &str,
+    ) -> ConnectorResult<TableDef> {
+        let options = config.to_sqlx_connect_options();
         let connection = PgPool::connect_with(options).await?;
         let schema_discovery = SchemaDiscovery::new(connection, schema);
         // fetch column schema and primary key
@@ -330,31 +402,17 @@ impl PostgresExternalTable {
     }
 
     pub async fn connect(
-        username: &str,
-        password: &str,
-        host: &str,
-        port: u16,
-        database: &str,
+        config: &PgConnectionConfig,
         schema: &str,
         table: &str,
-        ssl_mode: &SslMode,
-        ssl_root_cert: &Option<String>,
         is_append_only: bool,
+        required_table_privilege: Option<&str>,
     ) -> ConnectorResult<Self> {
         tracing::debug!("connect to postgres external table");
 
-        let (columns, pk_names) = Self::discover_pk_and_full_columns(
-            username,
-            password,
-            host,
-            port,
-            database,
-            schema,
-            table,
-            ssl_mode,
-            ssl_root_cert,
-        )
-        .await?;
+        let (columns, pk_names) =
+            Self::discover_pk_and_full_columns(config, schema, table, required_table_privilege)
+                .await?;
 
         let mut column_descs = vec![];
         for col in &columns {
@@ -377,7 +435,10 @@ impl PostgresExternalTable {
                         Some(scalar),
                     ),
                     Err(err) => {
-                        tracing::warn!(error=%err.as_report(), "failed to parse postgres default value expression, only constant is supported");
+                        tracing::warn!(
+                            error=%err.as_report(),
+                            "failed to parse the PostgreSQL default value expression; only constants are supported",
+                        );
                         ColumnDesc::named(col.name.clone(), ColumnId::placeholder(), rw_data_type)
                     }
                 }
@@ -403,30 +464,13 @@ impl PostgresExternalTable {
 
     // return the mapping from column name to pg type, the pg type is used for writing data to postgres
     pub async fn type_mapping(
-        username: &str,
-        password: &str,
-        host: &str,
-        port: u16,
-        database: &str,
+        config: &PgConnectionConfig,
         schema: &str,
         table: &str,
-        ssl_mode: &SslMode,
-        ssl_root_cert: &Option<String>,
         is_append_only: bool,
     ) -> ConnectorResult<HashMap<String, tokio_postgres::types::Type>> {
         tracing::debug!("connect to postgres external table to get type mapping");
-        let table_schema = Self::discover_schema(
-            username,
-            password,
-            host,
-            port,
-            database,
-            schema,
-            table,
-            ssl_mode,
-            ssl_root_cert,
-        )
-        .await?;
+        let table_schema = Self::discover_schema(config, schema, table).await?;
         let mut column_name_to_pg_type = HashMap::new();
         for col in &table_schema.columns {
             let pg_type = sea_type_to_pg_type(&col.col_type)?;
@@ -450,6 +494,53 @@ impl PostgresExternalTable {
     }
 }
 
+fn format_pg_table_name(schema: &str, table: &str) -> String {
+    format!(
+        "{}.{}",
+        quote_pg_identifier(schema),
+        quote_pg_identifier(table)
+    )
+}
+
+fn format_grant_usage(schema: &str, user_name: &str) -> String {
+    format!(
+        "GRANT USAGE ON SCHEMA {} TO {};",
+        quote_pg_identifier(schema),
+        quote_pg_identifier(user_name)
+    )
+}
+
+fn format_grant_table_privilege(
+    schema: &str,
+    table: &str,
+    user_name: &str,
+    privilege: &str,
+) -> String {
+    format!(
+        "GRANT {} ON TABLE {} TO {};",
+        privilege,
+        format_pg_table_name(schema, table),
+        quote_pg_identifier(user_name)
+    )
+}
+
+fn format_required_table_grants(
+    schema: &str,
+    table: &str,
+    user_name: &str,
+    privilege: &str,
+) -> String {
+    format!(
+        "{} {}",
+        format_grant_usage(schema, user_name),
+        format_grant_table_privilege(schema, table, user_name, privilege)
+    )
+}
+
+fn quote_pg_identifier(identifier: &str) -> String {
+    format!("\"{}\"", identifier.replace('"', "\"\""))
+}
+
 impl fmt::Display for SslMode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
@@ -471,22 +562,16 @@ impl std::str::FromStr for SslMode {
 }
 
 pub async fn create_pg_client(
-    user: &str,
-    password: &str,
-    host: &str,
-    port: &str,
-    database: &str,
-    ssl_mode: &SslMode,
-    ssl_root_cert: &Option<String>,
+    config: &PgConnectionConfig,
     tcp_keepalive: Option<TcpKeepaliveConfig>,
 ) -> anyhow::Result<PgClient> {
     let mut pg_config = tokio_postgres::Config::new();
     pg_config
-        .user(user)
-        .password(password)
-        .host(host)
-        .port(port.parse::<u16>().unwrap())
-        .dbname(database);
+        .user(&config.user)
+        .password(&config.password)
+        .host(&config.host)
+        .port(config.port)
+        .dbname(&config.database);
 
     // Configure TCP keepalive if provided
     if let Some(keepalive) = tcp_keepalive {
@@ -509,14 +594,10 @@ pub async fn create_pg_client(
         );
     }
 
-    let (_verify_ca, verify_hostname) = match ssl_mode {
-        SslMode::VerifyCa => (true, false),
-        SslMode::VerifyFull => (true, true),
-        _ => (false, false),
-    };
+    let verify_hostname = matches!(config.ssl_mode, SslMode::VerifyFull);
 
     #[cfg(not(madsim))]
-    let connector = match ssl_mode {
+    let connector = match config.ssl_mode {
         SslMode::Disabled => {
             pg_config.ssl_mode(tokio_postgres::config::SslMode::Disable);
             MaybeMakeTlsConnector::NoTls(NoTls)
@@ -546,15 +627,15 @@ pub async fn create_pg_client(
         SslMode::VerifyCa | SslMode::VerifyFull => {
             pg_config.ssl_mode(tokio_postgres::config::SslMode::Require);
             let mut builder = SslConnector::builder(SslMethod::tls())?;
-            if let Some(ssl_root_cert) = ssl_root_cert {
+            if let Some(ssl_root_cert) = &config.ssl_root_cert {
                 builder.set_ca_file(ssl_root_cert).map_err(|e| {
                     anyhow!(format!("bad ssl root cert error: {}", e.to_report_string()))
                 })?;
             }
             let mut connector = MakeTlsConnector::new(builder.build());
             if !verify_hostname {
-                connector.set_callback(|config, _| {
-                    config.set_verify_hostname(false);
+                connector.set_callback(|c, _| {
+                    c.set_verify_hostname(false);
                     Ok(())
                 });
             }
@@ -575,6 +656,13 @@ pub async fn create_pg_client(
     Ok(client)
 }
 
+pub fn postgres_point_type() -> DataType {
+    DataType::Struct(StructType::new(vec![
+        ("x", DataType::Float64),
+        ("y", DataType::Float64),
+    ]))
+}
+
 // Used for both source and sink connector
 pub fn sea_type_to_rw_type(col_type: &SeaType) -> ConnectorResult<DataType> {
     let dtype = match col_type {
@@ -592,10 +680,7 @@ pub fn sea_type_to_rw_type(col_type: &SeaType) -> ConnectorResult<DataType> {
         SeaType::Time(_) | SeaType::TimeWithTimeZone(_) => DataType::Time,
         SeaType::Interval(_) => DataType::Interval,
         SeaType::Boolean => DataType::Boolean,
-        SeaType::Point => DataType::Struct(StructType::new(vec![
-            ("x", DataType::Float32),
-            ("y", DataType::Float32),
-        ])),
+        SeaType::Point => postgres_point_type(),
         SeaType::Uuid => DataType::Varchar,
         SeaType::Xml => DataType::Varchar,
         SeaType::Json => DataType::Jsonb,
@@ -632,14 +717,16 @@ pub fn sea_type_to_rw_type(col_type: &SeaType) -> ConnectorResult<DataType> {
         | SeaType::VarBit(_)
         | SeaType::TsVector
         | SeaType::TsQuery => {
-            bail!("{:?} type not supported", col_type);
+            bail!("{:?} data type is not supported", col_type);
         }
         SeaType::Unknown(name) => {
             if let Some(dim) = parse_pgvector_dimension(name)? {
                 DataType::Vector(dim)
+            } else if matches!(name.to_ascii_lowercase().as_str(), "geometry" | "geography") {
+                DataType::Bytea
             } else {
                 // NOTES: user-defined enum type is classified as `Unknown`
-                tracing::warn!("Unknown Postgres data type: {name}, map to varchar");
+                tracing::warn!("unknown PostgreSQL data type `{name}`; mapping it to varchar");
                 DataType::Varchar
             }
         }
@@ -766,7 +853,10 @@ fn sea_type_to_pg_type(sea_type: &SeaType) -> ConnectorResult<tokio_postgres::ty
 
 #[cfg(test)]
 mod tests {
-    use super::parse_pgvector_dimension;
+    use super::{
+        format_grant_table_privilege, format_grant_usage, format_pg_table_name,
+        format_required_table_grants, parse_pgvector_dimension,
+    };
 
     #[test]
     fn test_parse_pgvector_dimension() {
@@ -779,5 +869,25 @@ mod tests {
     fn test_parse_pgvector_dimension_requires_size() {
         let err = parse_pgvector_dimension("vector").unwrap_err();
         assert!(err.to_string().contains("missing dimension"));
+    }
+
+    #[test]
+    fn test_format_postgres_privilege_grants_quote_identifiers() {
+        assert_eq!(
+            format_pg_table_name("public", "GlobalBrandContentAnalysis"),
+            r#""public"."GlobalBrandContentAnalysis""#
+        );
+        assert_eq!(
+            format_grant_usage("tenant schema", r#"cdc"user"#),
+            r#"GRANT USAGE ON SCHEMA "tenant schema" TO "cdc""user";"#
+        );
+        assert_eq!(
+            format_grant_table_privilege("tenant schema", "Orders", r#"cdc"user"#, "SELECT"),
+            r#"GRANT SELECT ON TABLE "tenant schema"."Orders" TO "cdc""user";"#
+        );
+        assert_eq!(
+            format_required_table_grants("tenant schema", "Orders", r#"cdc"user"#, "SELECT"),
+            r#"GRANT USAGE ON SCHEMA "tenant schema" TO "cdc""user"; GRANT SELECT ON TABLE "tenant schema"."Orders" TO "cdc""user";"#
+        );
     }
 }

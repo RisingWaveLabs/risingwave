@@ -52,7 +52,7 @@ use crate::hummock::value::HummockValue;
 use crate::hummock::{
     Block, BlockBuilder, BlockHolder, BlockIterator, BlockMeta, BlockedXor16FilterBuilder,
     CachePolicy, CompressionAlgorithm, FilterBuilder, GetObjectId, HummockResult,
-    SstableBuilderOptions, TableHolder, UnifiedSstableWriterFactory,
+    SstableBuilderOptions, StreamingSstableWriterFactory, TableHolder,
 };
 use crate::monitor::{CompactorMetrics, StoreLocalStatistic};
 
@@ -360,7 +360,7 @@ pub struct CompactorRunner<
     left: Box<ConcatSstableIterator>,
     right: Box<ConcatSstableIterator>,
     task_id: u64,
-    executor: CompactTaskExecutor<RemoteBuilderFactory<UnifiedSstableWriterFactory, B>, C>,
+    executor: CompactTaskExecutor<RemoteBuilderFactory<StreamingSstableWriterFactory, B>, C>,
     compression_algorithm: CompressionAlgorithm,
     metrics: Arc<CompactorMetrics>,
 }
@@ -401,7 +401,7 @@ impl<B: FilterBuilder, C: CompactionFilter> CompactorRunner<B, C> {
             table_schemas: Default::default(),
             disable_drop_column_optimization: false,
         };
-        let factory = UnifiedSstableWriterFactory::new(context.sstable_store.clone());
+        let factory = StreamingSstableWriterFactory::new(context.sstable_store.clone());
 
         let builder_factory = RemoteBuilderFactory::<_, B> {
             object_id_getter,
@@ -817,6 +817,7 @@ impl<F: TableBuilderFactory, C: CompactionFilter> CompactTaskExecutor<F, C> {
             }
             self.builder
                 .add_full_key(iter.key(), value, is_new_user_key)
+                .instrument_await("fast_add_full_key".verbose())
                 .await?;
             iter.next();
         }

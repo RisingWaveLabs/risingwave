@@ -6,41 +6,45 @@ on:
       - closed
       - labeled
 
+permissions:
+  contents: read
+  pull-requests: read
+
 jobs:
-  check_pr_description:
+  analyze:
     runs-on: ubuntu-latest
+    outputs:
+      should_process: ${{ steps.analyze.outputs.should_process }}
+      canonical_pr_number: ${{ steps.analyze.outputs.canonical_pr_number }}
+      reason: ${{ steps.analyze.outputs.reason }}
 
     steps:
-      - name: Check if PR is merged
-        id: check_merged
-        run: echo "merged=$(echo ${{ github.event.pull_request.merged }} | tr '[:upper:]' '[:lower:]')" >> $GITHUB_OUTPUT
-
-      - name: Retrieve PR information
-        uses: 8BitJonny/gh-get-current-pr@3.0.0
-        id: PR
+      - uses: actions/checkout@v5
         with:
-          sha: ${{ github.event.pull_request.head.sha }}
-
-      - name: Check if documentation update is needed
-        id: check_documentation_update
-        if: steps.PR.outputs.pr_found == 'true'
+          ref: ${{ github.event.repository.default_branch }}
+      - name: Analyze documentation follow-up
+        id: analyze
         run: |
-          REGEX_PATTERN="-\ \[x\].*My PR needs documentation updates\."
-          if echo "$PR_BODY" | grep -q -- "$REGEX_PATTERN"; then
-            echo "documentation_update=true" >> $GITHUB_OUTPUT
-          elif [[ $PR_LABEL == *"user-facing-changes"* ]]; then
-            echo "documentation_update=true" >> $GITHUB_OUTPUT
-          elif [[ $PR_LABEL == *"breaking-change"* ]]; then
-            echo "documentation_update=true" >> $GITHUB_OUTPUT
-          else
-            echo "documentation_update=false" >> $GITHUB_OUTPUT
-          fi
+          python3 .github/scripts/doc_issue_tracker.py analyze \
+            --event-path "$GITHUB_EVENT_PATH" \
+            --source-repo "$GITHUB_REPOSITORY"
         env:
-          PR_BODY: ${{ steps.PR.outputs.pr_body }}
-          PR_LABEL: ${{ steps.PR.outputs.pr_labels }}
+          SOURCE_GITHUB_TOKEN: ${{ github.token }}
+
+  track:
+    needs: analyze
+    if: needs.analyze.outputs.should_process == 'true'
+    runs-on: ubuntu-latest
+    concurrency:
+      group: docs-issue-${{ github.repository }}-${{ needs.analyze.outputs.canonical_pr_number }}
+      cancel-in-progress: false
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.repository.default_branch }}
 
       - name: Generate GitHub App token
-        if: steps.check_merged.outputs.merged == 'true' && steps.check_documentation_update.outputs.documentation_update == 'true'
         id: app-token
         uses: actions/create-github-app-token@v1
         with:
@@ -49,42 +53,23 @@ jobs:
           owner: risingwavelabs
           repositories: risingwave-docs
 
-      - name: Create issue in other repository
-        if: steps.check_merged.outputs.merged == 'true' && steps.check_documentation_update.outputs.documentation_update == 'true'
+      - name: Create or update documentation issue
+        id: track
         run: |
-          ISSUE_BODY="This issue tracks the documentation update needed for the merged PR #${PR_ID}.
-
-          Source PR URL: ${PR_URL}
-          Source PR Merged At: ${PR_MERGED_AT}
-
-          If it is a major improvement that deserves a new page or a new section in the documentation, please check if we should label it as an experiment feature."
-
-          jq -n --arg title "Document: $PR_TITLE" --arg body "$ISSUE_BODY" \
-            '{title: $title, body: $body}' | \
-          curl -X POST --fail-with-body \
-            -H "Authorization: Bearer ${{ steps.app-token.outputs.token }}" \
-            -H "Accept: application/vnd.github+json" \
-            -H "Content-Type: application/json" \
-            -d @- \
-            "https://api.github.com/repos/risingwavelabs/risingwave-docs/issues"
+          python3 .github/scripts/doc_issue_tracker.py track \
+            --event-path "$GITHUB_EVENT_PATH" \
+            --source-repo "$GITHUB_REPOSITORY" \
+            --docs-repo "risingwavelabs/risingwave-docs" \
+            --canonical-pr-number "${{ needs.analyze.outputs.canonical_pr_number }}" \
+            --source-token "$SOURCE_GITHUB_TOKEN" \
+            --docs-token "$DOCS_GITHUB_TOKEN"
         env:
-          PR_ID: ${{ steps.PR.outputs.number }}
-          PR_URL: ${{ steps.PR.outputs.pr_url }}
-          PR_TITLE: ${{ steps.PR.outputs.pr_title }}
-          PR_BODY: ${{ steps.PR.outputs.pr_body }}
-          PR_CREATED_AT: ${{ steps.PR.outputs.pr_created_at }}
-          PR_MERGED_AT: ${{ steps.PR.outputs.pr_merged_at }}
-          PR_CLOSED_AT: ${{ steps.PR.outputs.pr_closed_at }}
-          PR_LABEL: ${{ steps.PR.outputs.pr_labels }}
+          SOURCE_GITHUB_TOKEN: ${{ github.token }}
+          DOCS_GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
 
-      - name: print_output_variables
+      - name: Print result
         run: |
-          echo "Merged: ${{ steps.check_merged.outputs.merged }}"
-          echo "PR ID: ${{ steps.PR.outputs.number }}"
-          echo "PR URL: ${{ steps.PR.outputs.pr_url }}"
-          echo "PR Title: ${{ steps.PR.outputs.pr_title }}"
-          echo "PR Created At: ${{ steps.PR.outputs.pr_created_at }}"
-          echo "PR Merged At: ${{ steps.PR.outputs.pr_merged_at }}"
-          echo "PR Closed At: ${{ steps.PR.outputs.pr_closed_at }}"
-          echo "PR Labels: ${{ steps.PR.outputs.pr_labels }}"
-          echo "Documentation Update: ${{ steps.check_documentation_update.outputs.documentation_update }}"
+          echo "Analysis reason: ${{ needs.analyze.outputs.reason }}"
+          echo "Canonical source PR: #${{ steps.track.outputs.canonical_pr_number }}"
+          echo "Documentation issue action: ${{ steps.track.outputs.action }}"
+          echo "Documentation issue: ${{ steps.track.outputs.issue_url }}"

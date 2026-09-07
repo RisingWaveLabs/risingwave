@@ -22,6 +22,7 @@ import com.risingwave.connector.api.sink.SinkWriter;
 import com.risingwave.connector.jdbc.JdbcDialect;
 import com.risingwave.proto.ConnectorServiceProto;
 import com.risingwave.proto.Data;
+import com.risingwave.proto.Data.DataType.TypeName;
 import io.grpc.Status;
 import java.sql.*;
 import java.util.*;
@@ -60,7 +61,14 @@ public class BatchAppendOnlyJDBCSink implements SinkWriter {
             // A vector of upstream column types
             List<Integer> columnSqlTypes =
                     Arrays.stream(tableSchema.getColumnNames())
-                            .map(columnTypeMapping::get)
+                            .map(
+                                    columnName -> {
+                                        Integer sqlType = columnTypeMapping.get(columnName);
+                                        return sqlType != null
+                                                ? sqlType
+                                                : getSqlTypeFromTableSchema(
+                                                        tableSchema, columnName);
+                                    })
                             .collect(Collectors.toList());
 
             List<Integer> pkIndices =
@@ -134,6 +142,29 @@ public class BatchAppendOnlyJDBCSink implements SinkWriter {
                 tableName,
                 columnTypeMap);
         return columnTypeMap;
+    }
+
+    private static int getSqlTypeFromTableSchema(TableSchema tableSchema, String columnName) {
+        TypeName typeName = tableSchema.getColumnType(columnName);
+        return switch (typeName) {
+            case INT16 -> Types.SMALLINT;
+            case INT32 -> Types.INTEGER;
+            case INT64 -> Types.BIGINT;
+            case FLOAT -> Types.REAL;
+            case DOUBLE -> Types.DOUBLE;
+            case BOOLEAN -> Types.BOOLEAN;
+            case VARCHAR, JSONB, INTERVAL -> Types.VARCHAR;
+            case DECIMAL -> Types.DECIMAL;
+            case TIME -> Types.TIME;
+            case TIMESTAMP -> Types.TIMESTAMP;
+            case TIMESTAMPTZ -> Types.TIMESTAMP_WITH_TIMEZONE;
+            case DATE -> Types.DATE;
+            default ->
+                    throw Status.INVALID_ARGUMENT
+                            .withDescription(
+                                    "Unsupported table schema type for JDBC sink: " + typeName)
+                            .asRuntimeException();
+        };
     }
 
     @Override

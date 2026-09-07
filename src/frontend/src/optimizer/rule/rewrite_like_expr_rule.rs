@@ -111,7 +111,7 @@ impl ExprRewriter for LikeExprRewriter {
             .collect();
         let func_call = FunctionCall::new_unchecked(func_type, inputs, ret.clone());
 
-        if func_call.func_type() != ExprType::Like {
+        if func_call.func_type() != ExprType::Like || func_call.inputs().len() != 2 {
             return func_call.into();
         }
 

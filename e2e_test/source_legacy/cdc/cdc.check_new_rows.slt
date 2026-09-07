@@ -83,14 +83,14 @@ select id, my_num_2 from list_with_null_shared order by id;
 5 NULL
 6 NULL
 
-# Due to the bug in Debezium, if a enum list contains `NULL`, the list will be converted to `NULL`
+# Streaming user-defined arrays go through the PG custom converter and preserve NULL elements.
 query II
 select id, my_mood from list_with_null_shared order by id;
 ----
 1 NULL
 2 {happy,ok,sad}
-3 NULL
-4 NULL
+3 {NULL,sad,ok}
+4 {NULL,sad,ok}
 5 NULL
 6 NULL
 
@@ -236,10 +236,10 @@ ORDER BY c_boolean, c_bigint, c_date;
 {}                            {}                                          {}
 NULL                          NULL                                        NULL
 {NULL,"{\"key\": \"value\"}"} {NULL,123e4567-e89b-12d3-a456-426614174000} NULL
-{"{}"}                        {bb488f9b-330d-4012-b849-12adeb49e57e}      NULL
+{"{}"}                        {bb488f9b-330d-4012-b849-12adeb49e57e}      {happy,ok,NULL}
 {}                            {}                                          {}
 NULL                          NULL                                        NULL
-{NULL,"{\"key\": \"value\"}"} {NULL,123e4567-e89b-12d3-a456-426614174000} NULL
+{NULL,"{\"key\": \"value\"}"} {NULL,123e4567-e89b-12d3-a456-426614174000} {NULL,happy}
 
 query TTT
 SELECT * FROM partitioned_timestamp_table_shared ORDER BY c_boolean, c_int;

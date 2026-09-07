@@ -20,9 +20,33 @@ use risingwave_sqlparser::ast::ObjectName;
 use crate::Binder;
 use crate::catalog::CatalogError;
 use crate::catalog::root_catalog::SchemaPath;
-use crate::catalog::table_catalog::TableType;
+use crate::catalog::table_catalog::{TableCatalog, TableType};
 use crate::error::{Result, bail_invalid_input_syntax};
 use crate::session::SessionImpl;
+
+pub(super) fn validate_table_type_for_alter(
+    table: &TableCatalog,
+    alter_stmt_type: StatementType,
+    alter_target: &str,
+) -> Result<()> {
+    match (table.table_type(), alter_stmt_type) {
+        (TableType::Internal, _) => {
+            // We treat internal tables as not found because they are not user-addressable objects.
+            Err(CatalogError::not_found("table", table.name()).into())
+        }
+        (TableType::Table, StatementType::ALTER_TABLE)
+        | (TableType::MaterializedView, StatementType::ALTER_MATERIALIZED_VIEW)
+        | (TableType::Index, StatementType::ALTER_INDEX) => Ok(()),
+        _ => {
+            bail_invalid_input_syntax!(
+                "cannot alter {alter_target} of {} {} by {}",
+                table.table_type().to_prost().as_str_name(),
+                table.name(),
+                alter_stmt_type,
+            );
+        }
+    }
+}
 
 /// Resolve the **streaming** job id for alter operations.
 ///
@@ -33,25 +57,6 @@ pub(super) fn resolve_streaming_job_id_for_alter(
     obj_name: ObjectName,
     alter_stmt_type: StatementType,
     alter_target: &str,
-) -> Result<JobId> {
-    resolve_streaming_job_id_for_alter_impl(session, obj_name, alter_stmt_type, alter_target, false)
-}
-
-pub(super) fn resolve_streaming_job_id_for_alter_parallelism(
-    session: &SessionImpl,
-    obj_name: ObjectName,
-    alter_stmt_type: StatementType,
-    alter_target: &str,
-) -> Result<JobId> {
-    resolve_streaming_job_id_for_alter_impl(session, obj_name, alter_stmt_type, alter_target, true)
-}
-
-fn resolve_streaming_job_id_for_alter_impl(
-    session: &SessionImpl,
-    obj_name: ObjectName,
-    alter_stmt_type: StatementType,
-    alter_target: &str,
-    include_creating_table: bool,
 ) -> Result<JobId> {
     let db_name = &session.database();
     let (schema_name, real_table_name) = Binder::resolve_schema_qualified_name(db_name, &obj_name)?;
@@ -64,29 +69,10 @@ fn resolve_streaming_job_id_for_alter_impl(
         StatementType::ALTER_TABLE
         | StatementType::ALTER_MATERIALIZED_VIEW
         | StatementType::ALTER_INDEX => {
-            let (table, schema_name) = if include_creating_table {
-                reader.get_table_by_name(db_name, schema_path, &real_table_name, true)?
-            } else {
-                reader.get_created_table_by_name(db_name, schema_path, &real_table_name)?
-            };
+            let (table, schema_name) =
+                reader.get_table_by_name(db_name, schema_path, &real_table_name, true)?;
 
-            match (table.table_type(), alter_stmt_type) {
-                (TableType::Internal, _) => {
-                    // we treat internal table as NOT FOUND
-                    return Err(CatalogError::not_found("table", table.name()).into());
-                }
-                (TableType::Table, StatementType::ALTER_TABLE)
-                | (TableType::MaterializedView, StatementType::ALTER_MATERIALIZED_VIEW)
-                | (TableType::Index, StatementType::ALTER_INDEX) => {}
-                _ => {
-                    bail_invalid_input_syntax!(
-                        "cannot alter {alter_target} of {} {} by {}",
-                        table.table_type().to_prost().as_str_name(),
-                        table.name(),
-                        alter_stmt_type,
-                    );
-                }
-            }
+            validate_table_type_for_alter(table, alter_stmt_type, alter_target)?;
 
             session.check_privilege_for_drop_alter(schema_name, &**table)?;
             table.id.as_job_id()
@@ -107,7 +93,7 @@ fn resolve_streaming_job_id_for_alter_impl(
         }
         StatementType::ALTER_SINK => {
             let (sink, schema_name) =
-                reader.get_created_sink_by_name(db_name, schema_path, &real_table_name)?;
+                reader.get_any_sink_by_name(db_name, schema_path, &real_table_name)?;
 
             session.check_privilege_for_drop_alter(schema_name, &**sink)?;
             sink.id.as_job_id()

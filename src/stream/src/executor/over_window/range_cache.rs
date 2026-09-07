@@ -191,6 +191,12 @@ impl PartitionCache {
         const MAGIC_CACHE_SIZE: usize = 1024;
         const MAGIC_JITTER_PREVENTION: usize = MAGIC_CACHE_SIZE / 8;
 
+        // The cache can have zero entry (not even sentinels), e.g., after all rows of the
+        // fully-cached partition are deleted. The `Recent` branch below can't handle this.
+        if self.is_empty() {
+            return;
+        }
+
         tracing::trace!(
             partition=?deduped_part_key,
             cache_policy=?cache_policy,

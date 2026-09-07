@@ -71,9 +71,13 @@ impl SourceManager {
         &self,
         table_fragments: &StreamJobFragments,
     ) -> MetaResult<SourceSplitAssignment> {
-        let core = self.core.lock().await;
-
         let source_fragments = table_fragments.stream_source_fragments();
+        // Avoid touching the contended `core` lock for jobs with no source fragments.
+        if source_fragments.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let core = self.core.lock().await;
 
         let mut assigned = HashMap::new();
 
@@ -83,11 +87,11 @@ impl SourceManager {
                 .get(&source_id)
                 .with_context(|| format!("could not find source {}", source_id))?;
 
-            if handle.splits.lock().await.splits.is_none() {
+            if handle.splits.is_unset() {
                 handle.force_tick().await?;
             }
 
-            let Some(discovered) = handle.discovered_splits(source_id).await? else {
+            let Some(discovered) = handle.discovered_splits(source_id)? else {
                 tracing::warn!(%source_id, "no splits detected (not ready)");
                 continue;
             };
@@ -367,7 +371,7 @@ impl SourceManagerCore {
                     }
                 };
 
-                let Some(discovered) = handle.discovered_splits(*source_id).await? else {
+                let Some(discovered) = handle.discovered_splits(*source_id)? else {
                     // The discover loop for this source is not ready yet; we'll wait for the next run
                     continue 'loop_source;
                 };

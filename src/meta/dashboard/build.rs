@@ -13,9 +13,9 @@
 // limitations under the License.
 
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use cargo_emit::{rerun_if_changed, rustc_cfg};
-use npm_rs::NpmEnv;
 
 fn env_var_is_true(key: &str) -> bool {
     cargo_emit::rerun_if_env_changed!(key);
@@ -41,15 +41,22 @@ fn build() -> anyhow::Result<()> {
     // while excluding the `out` directory. There's no elegant way to do this.
     rerun_if_changed!(format!("{DASHBOARD_DIR}/components"));
 
-    let exit_status = NpmEnv::default()
-        .set_path(DASHBOARD_DIR)
-        .init_env()
-        .install(None)
-        .run("build")
-        .exec()?;
+    for args in [
+        ["install", "--frozen-lockfile"].as_slice(),
+        ["run", "build"].as_slice(),
+    ] {
+        let exit_status = Command::new("pnpm")
+            .args(args)
+            .current_dir(DASHBOARD_DIR)
+            .status()?;
 
-    if !exit_status.success() {
-        anyhow::bail!("dashboard build failed with status: {}", exit_status);
+        if !exit_status.success() {
+            anyhow::bail!(
+                "pnpm {} failed with status: {}",
+                args.join(" "),
+                exit_status
+            );
+        }
     }
 
     let dest = dest_dir();

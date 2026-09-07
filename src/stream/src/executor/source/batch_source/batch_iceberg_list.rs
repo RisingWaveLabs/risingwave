@@ -12,23 +12,23 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use anyhow::{Context, anyhow};
+use anyhow::anyhow;
 use either::Either;
-use iceberg::scan::FileScanTask;
 use parking_lot::RwLock;
 use risingwave_common::array::Op;
 use risingwave_common::catalog::ColumnCatalog;
 use risingwave_common::id::TableId;
 use risingwave_common::metrics::GLOBAL_ERROR_METRICS;
 use risingwave_connector::source::ConnectorProperties;
-use risingwave_connector::source::iceberg::IcebergProperties;
-use risingwave_connector::source::iceberg::metrics::GLOBAL_ICEBERG_SCAN_METRICS;
+use risingwave_connector::source::iceberg::{
+    IcebergScanMetricsLabels, IcebergScanPlanner, IcebergScanProjection, PersistedFileScanTask,
+};
 use risingwave_connector::source::reader::desc::SourceDescBuilder;
 use thiserror_ext::AsReport;
 use tokio::sync::mpsc::UnboundedReceiver;
 
 use crate::executor::prelude::*;
-use crate::executor::source::{PersistedFileScanTask, StreamSourceCore, barrier_to_message_stream};
+use crate::executor::source::{StreamSourceCore, barrier_to_message_stream};
 use crate::executor::stream_reader::StreamReaderWithPause;
 use crate::task::LocalBarrierManager;
 
@@ -95,29 +95,16 @@ impl<S: StateStore> BatchIcebergListExecutor<S> {
             unreachable!()
         };
 
-        // Get consistent column names for schema stability across snapshots
-        let downstream_columns = self.downstream_columns.map(|columns| {
-            columns
-                .iter()
-                .filter_map(|col| {
-                    if col.is_hidden() {
-                        None
-                    } else {
-                        Some(col.name().to_owned())
-                    }
-                })
-                .collect::<Vec<_>>()
-        });
-        // Initialize metrics context.
-        let iceberg_metrics = &GLOBAL_ICEBERG_SCAN_METRICS;
         let iceberg_table_name = iceberg_properties.table.table_name().to_owned();
         let source_id_str = self.stream_source_core.source_id.to_string();
         let source_name_str = self.stream_source_core.source_name.clone();
-        let metrics_labels = [
-            source_id_str.as_str(),
-            source_name_str.as_str(),
-            iceberg_table_name.as_str(),
-        ];
+        let scan_metrics =
+            IcebergScanMetricsLabels::new(source_id_str, source_name_str, iceberg_table_name);
+        let scan_planner = IcebergScanPlanner::new(
+            (*iceberg_properties).clone(),
+            IcebergScanProjection::from_downstream_columns(self.downstream_columns.as_deref()),
+            Some(scan_metrics.clone()),
+        );
 
         yield Message::Barrier(first_barrier);
         let barrier_stream = barrier_to_message_stream(barrier_receiver).boxed();
@@ -141,15 +128,7 @@ impl<S: StateStore> BatchIcebergListExecutor<S> {
                         self.associated_table_id.to_string(),
                     ]);
 
-                    iceberg_metrics
-                        .iceberg_source_scan_errors_total
-                        .with_guarded_label_values(&[
-                            metrics_labels[0],
-                            metrics_labels[1],
-                            metrics_labels[2],
-                            "list_error",
-                        ])
-                        .inc();
+                    scan_metrics.record_scan_error("list_error");
 
                     if is_refreshing {
                         tracing::info!(
@@ -158,11 +137,8 @@ impl<S: StateStore> BatchIcebergListExecutor<S> {
                             "re-listing iceberg scan tasks due to error"
                         );
                         let iceberg_list_stream = Self::list_iceberg_scan_task(
-                            *iceberg_properties.clone(),
-                            downstream_columns.clone(),
+                            scan_planner.clone(),
                             is_list_finished.clone(),
-                            source_id_str.clone(),
-                            source_name_str.clone(),
                         )
                         .boxed();
                         stream.replace_data_stream(iceberg_list_stream);
@@ -197,11 +173,8 @@ impl<S: StateStore> BatchIcebergListExecutor<S> {
 
                                         // re-list iceberg scan tasks
                                         let iceberg_list_stream = Self::list_iceberg_scan_task(
-                                            *iceberg_properties.clone(),
-                                            downstream_columns.clone(),
+                                            scan_planner.clone(),
                                             is_list_finished.clone(),
-                                            source_id_str.clone(),
-                                            source_name_str.clone(),
                                         )
                                         .boxed();
                                         stream.replace_data_stream(iceberg_list_stream);
@@ -232,14 +205,14 @@ impl<S: StateStore> BatchIcebergListExecutor<S> {
                         _ => unreachable!(),
                     },
                     Either::Right(file_scan_task) => {
+                        let data_file_path = file_scan_task.data_file_path.clone();
+                        let persisted_task = PersistedFileScanTask::encode(file_scan_task)?;
                         let chunk = StreamChunk::from_rows(
                             &[(
                                 Op::Insert,
                                 OwnedRow::new(vec![
-                                    Some(ScalarImpl::Utf8(file_scan_task.data_file_path().into())),
-                                    Some(ScalarImpl::Jsonb(PersistedFileScanTask::encode(
-                                        file_scan_task,
-                                    ))),
+                                    Some(ScalarImpl::Utf8(data_file_path.into())),
+                                    Some(ScalarImpl::Jsonb(persisted_task)),
                                 ]),
                             )],
                             &[DataType::Varchar, DataType::Jsonb],
@@ -252,100 +225,24 @@ impl<S: StateStore> BatchIcebergListExecutor<S> {
         }
     }
 
-    #[try_stream(ok = FileScanTask, error = StreamExecutorError)]
+    #[try_stream(
+        ok = iceberg::scan::FileScanTask,
+        error = StreamExecutorError
+    )]
     async fn list_iceberg_scan_task(
-        iceberg_properties: IcebergProperties,
-        downstream_columns: Option<Vec<String>>,
+        scan_planner: IcebergScanPlanner,
         is_list_finished: Arc<RwLock<bool>>,
-        source_id: String,
-        source_name: String,
     ) {
-        let metrics = &GLOBAL_ICEBERG_SCAN_METRICS;
-        let table_name = iceberg_properties.table.table_name().to_owned();
-        let label_values = [
-            source_id.as_str(),
-            source_name.as_str(),
-            table_name.as_str(),
-        ];
-
-        let table = iceberg_properties.load_table().await?;
-        if let Some(start_snapshot) = table.metadata().current_snapshot() {
-            let latest_snapshot = start_snapshot.snapshot_id();
-            let snapshot_scan_builder = table.scan().snapshot_id(latest_snapshot);
-            let snapshot_scan = if let Some(ref downstream_columns) = downstream_columns {
-                snapshot_scan_builder.select(downstream_columns)
-            } else {
-                snapshot_scan_builder.select_all()
-            }
-            .build()
-            .context("failed to build iceberg scan")?;
-
-            let list_start = std::time::Instant::now();
-            let mut data_file_count: u64 = 0;
-            let mut eq_delete_count: u64 = 0;
-            let mut pos_delete_count: u64 = 0;
-
+        if let Some(snapshot_plan) = scan_planner.plan_current_snapshot().await? {
             #[for_await]
-            for scan_task in snapshot_scan
-                .plan_files()
-                .await
-                .context("failed to plan iceberg files")?
-            {
-                let scan_task = scan_task.context("failed to get scan task")?;
-                data_file_count += 1;
-                for delete_task in &scan_task.deletes {
-                    match delete_task.data_file_content {
-                        iceberg::spec::DataContentType::EqualityDeletes => eq_delete_count += 1,
-                        iceberg::spec::DataContentType::PositionDeletes => pos_delete_count += 1,
-                        _ => {}
-                    }
-                }
+            for scan_task in snapshot_plan.tasks {
+                let scan_task = scan_task?;
                 tracing::debug!(
                     "list_iceberg_scan_task: data_file_path={}, scan_task={:?}",
                     scan_task.data_file_path,
                     scan_task
                 );
                 yield scan_task;
-            }
-
-            let list_duration = list_start.elapsed();
-            metrics
-                .iceberg_source_list_duration_seconds
-                .with_guarded_label_values(&label_values)
-                .observe(list_duration.as_secs_f64());
-
-            if data_file_count > 0 {
-                metrics
-                    .iceberg_source_files_discovered_total
-                    .with_guarded_label_values(&[
-                        label_values[0],
-                        label_values[1],
-                        label_values[2],
-                        "data",
-                    ])
-                    .inc_by(data_file_count);
-            }
-            if eq_delete_count > 0 {
-                metrics
-                    .iceberg_source_files_discovered_total
-                    .with_guarded_label_values(&[
-                        label_values[0],
-                        label_values[1],
-                        label_values[2],
-                        "eq_delete",
-                    ])
-                    .inc_by(eq_delete_count);
-            }
-            if pos_delete_count > 0 {
-                metrics
-                    .iceberg_source_files_discovered_total
-                    .with_guarded_label_values(&[
-                        label_values[0],
-                        label_values[1],
-                        label_values[2],
-                        "pos_delete",
-                    ])
-                    .inc_by(pos_delete_count);
             }
         }
         *is_list_finished.write() = true;

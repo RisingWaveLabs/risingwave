@@ -17,10 +17,10 @@ use risingwave_common_heap_profiling::ProfileServiceImpl;
 use risingwave_pb::monitor_service::monitor_service_server::MonitorService;
 use risingwave_pb::monitor_service::{
     AnalyzeHeapRequest, AnalyzeHeapResponse, GetProfileStatsRequest, GetProfileStatsResponse,
-    GetStreamingStatsRequest, GetStreamingStatsResponse, HeapProfilingRequest,
-    HeapProfilingResponse, ListHeapProfilingRequest, ListHeapProfilingResponse, ProfilingRequest,
-    ProfilingResponse, StackTraceRequest, StackTraceResponse, TieredCacheTracingRequest,
-    TieredCacheTracingResponse,
+    GetStreamingStatsRequest, GetStreamingStatsResponse, GetTableCacheRefillStatsRequest,
+    GetTableCacheRefillStatsResponse, HeapProfilingRequest, HeapProfilingResponse,
+    ListHeapProfilingRequest, ListHeapProfilingResponse, ProfilingRequest, ProfilingResponse,
+    StackTraceRequest, StackTraceResponse, TieredCacheTracingRequest, TieredCacheTracingResponse,
 };
 use tonic::{Request, Response, Status};
 
@@ -92,6 +92,13 @@ impl MonitorService for MonitorServiceImpl {
         &self,
         _request: Request<GetProfileStatsRequest>,
     ) -> Result<Response<GetProfileStatsResponse>, Status> {
+        Err(Status::unimplemented("not implemented in frontend node"))
+    }
+
+    async fn get_table_cache_refill_stats(
+        &self,
+        _request: Request<GetTableCacheRefillStatsRequest>,
+    ) -> Result<Response<GetTableCacheRefillStatsResponse>, Status> {
         Err(Status::unimplemented("not implemented in frontend node"))
     }
 }

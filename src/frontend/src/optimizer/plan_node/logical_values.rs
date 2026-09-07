@@ -12,51 +12,43 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
 use std::vec;
 
 use itertools::Itertools;
-use pretty_xmlish::{Pretty, XmlNode};
 use risingwave_common::catalog::{Field, Schema};
 use risingwave_common::types::{DataType, ScalarImpl};
 
 use super::generic::GenericPlanRef;
-use super::utils::{Distill, childless_record};
+use super::utils::impl_distill_by_unit;
 use super::{
     BatchValues, ColPrunable, ExprRewritable, Logical, LogicalFilter, LogicalPlanRef as PlanRef,
-    PlanBase, PredicatePushdown, StreamValues, ToBatch, ToStream,
+    PlanBase, PredicatePushdown, StreamValues, ToBatch, ToStream, generic,
 };
 use crate::error::Result;
-use crate::expr::{Expr, ExprImpl, ExprRewriter, ExprVisitor, Literal};
+use crate::expr::{ExprImpl, ExprRewriter, ExprVisitor, Literal};
 use crate::optimizer::optimizer_context::OptimizerContextRef;
 use crate::optimizer::plan_node::expr_visitable::ExprVisitable;
 use crate::optimizer::plan_node::{
     ColumnPruningContext, PredicatePushdownContext, RewriteStreamContext, ToStreamContext,
 };
-use crate::optimizer::property::FunctionalDependencySet;
 use crate::utils::{ColIndexMapping, Condition};
 
 /// `LogicalValues` builds rows according to a list of expressions
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct LogicalValues {
     pub base: PlanBase<Logical>,
-    rows: Arc<[Vec<ExprImpl>]>,
+    pub(super) core: generic::Values,
 }
 
 impl LogicalValues {
+    fn with_core(core: generic::Values) -> Self {
+        let base = PlanBase::new_logical_with_core(&core);
+        Self { base, core }
+    }
+
     /// Create a [`LogicalValues`] node. Used internally by optimizer.
     pub fn new(rows: Vec<Vec<ExprImpl>>, schema: Schema, ctx: OptimizerContextRef) -> Self {
-        for exprs in &rows {
-            for (i, expr) in exprs.iter().enumerate() {
-                assert_eq!(schema.fields()[i].data_type(), expr.return_type())
-            }
-        }
-        let functional_dependency = FunctionalDependencySet::new(schema.len());
-        let base = PlanBase::new_logical(ctx, schema, None, functional_dependency);
-        Self {
-            rows: rows.into(),
-            base,
-        }
+        Self::with_core(generic::Values::new(rows, schema, ctx))
     }
 
     /// Used only by `LogicalValues.rewrite_logical_for_stream`, set the `_row_id` column as pk
@@ -66,17 +58,12 @@ impl LogicalValues {
         ctx: OptimizerContextRef,
         pk_index: usize,
     ) -> Self {
-        for exprs in &rows {
-            for (i, expr) in exprs.iter().enumerate() {
-                assert_eq!(schema.fields()[i].data_type(), expr.return_type())
-            }
-        }
-        let functional_dependency = FunctionalDependencySet::new(schema.len());
-        let base = PlanBase::new_logical(ctx, schema, Some(vec![pk_index]), functional_dependency);
-        Self {
-            rows: rows.into(),
-            base,
-        }
+        Self::with_core(generic::Values::new_with_stream_key(
+            rows,
+            schema,
+            ctx,
+            vec![pk_index],
+        ))
     }
 
     /// Create a [`LogicalValues`] node. Used by planner.
@@ -92,35 +79,17 @@ impl LogicalValues {
 
     /// Check whether this is an empty scalar, typically created by [`LogicalValues::create_empty_scalar`].
     pub fn is_empty_scalar(&self) -> bool {
-        self.schema().is_empty() && self.rows.len() == 1 && self.rows[0].is_empty()
+        self.schema().is_empty() && self.rows().len() == 1 && self.rows()[0].is_empty()
     }
 
     /// Get a reference to the logical values' rows.
     pub fn rows(&self) -> &[Vec<ExprImpl>] {
-        self.rows.as_ref()
-    }
-
-    pub(super) fn rows_pretty<'a>(&self) -> Pretty<'a> {
-        let data = self
-            .rows()
-            .iter()
-            .map(|row| {
-                let collect = row.iter().map(Pretty::debug).collect();
-                Pretty::Array(collect)
-            })
-            .collect();
-        Pretty::Array(data)
+        self.core.rows()
     }
 }
 
 impl_plan_tree_node_for_leaf! { Logical, LogicalValues }
-impl Distill for LogicalValues {
-    fn distill<'a>(&self) -> XmlNode<'a> {
-        let data = self.rows_pretty();
-        let fields = vec![("rows", data), ("schema", Pretty::debug(&self.schema()))];
-        childless_record("LogicalValues", fields)
-    }
-}
+impl_distill_by_unit!(LogicalValues, core, "LogicalValues");
 
 impl ExprRewritable<Logical> for LogicalValues {
     fn has_rewritable_expr(&self) -> bool {
@@ -128,33 +97,22 @@ impl ExprRewritable<Logical> for LogicalValues {
     }
 
     fn rewrite_exprs(&self, r: &mut dyn ExprRewriter) -> PlanRef {
-        let mut new = self.clone();
-        new.rows = new
-            .rows
-            .iter()
-            .map(|exprs| {
-                exprs
-                    .iter()
-                    .map(|e| r.rewrite_expr(e.clone()))
-                    .collect::<Vec<_>>()
-            })
-            .collect::<Vec<_>>()
-            .into();
-        new.base = new.base.clone_with_new_plan_id();
-        new.into()
+        let mut core = self.core.clone();
+        core.rewrite_exprs(r);
+        Self::with_core(core).into()
     }
 }
 
 impl ExprVisitable for LogicalValues {
     fn visit_exprs(&self, v: &mut dyn ExprVisitor) {
-        self.rows.iter().flatten().for_each(|e| v.visit_expr(e));
+        self.core.visit_exprs(v);
     }
 }
 
 impl ColPrunable for LogicalValues {
     fn prune_col(&self, required_cols: &[usize], _ctx: &mut ColumnPruningContext) -> PlanRef {
         let rows = self
-            .rows
+            .rows()
             .iter()
             .map(|row| required_cols.iter().map(|i| row[*i].clone()).collect())
             .collect();
@@ -178,7 +136,7 @@ impl PredicatePushdown for LogicalValues {
 
 impl ToBatch for LogicalValues {
     fn to_batch(&self) -> Result<crate::optimizer::plan_node::BatchPlanRef> {
-        Ok(BatchValues::new(self.clone()).into())
+        Ok(BatchValues::new(self.core.clone()).into())
     }
 }
 
@@ -187,7 +145,7 @@ impl ToStream for LogicalValues {
         &self,
         _ctx: &mut ToStreamContext,
     ) -> Result<crate::optimizer::plan_node::StreamPlanRef> {
-        Ok(StreamValues::new(self.clone()).into())
+        Ok(StreamValues::new(self.core.clone()).into())
     }
 
     fn logical_rewrite_for_stream(

@@ -151,6 +151,14 @@ See `src/risedevtool/src/risedev_env.rs` for variables supported for each servic
 > How it works: `risedev d` will write env vars to `.risingwave/config/risedev-env`,
 > and `risedev slt` will load env vars from this file.
 
+For example, run the Redis sink test locally without preparing Redis separately:
+
+```sh
+./risedev d local-redis-sink-test
+./risedev slt './e2e_test/sink/redis_sink.slt'
+./risedev k
+```
+
 ### Tips for writing `system` commands
 
 Refer to

@@ -20,7 +20,7 @@ use risingwave_common::catalog::{Field, Schema};
 use risingwave_common::row::OwnedRow;
 use risingwave_common::types::{DataType, Datum, Decimal, ScalarImpl};
 use risingwave_common::util::chunk_coalesce::DataChunkBuilder;
-use risingwave_connector::connector_common::{SslMode, create_pg_client};
+use risingwave_connector::connector_common::{PgConnectionConfig, create_pg_client};
 use risingwave_pb::batch_plan::plan_node::NodeBody;
 use tokio_postgres;
 
@@ -30,20 +30,10 @@ use crate::executor::{BoxedExecutor, BoxedExecutorBuilder, Executor, ExecutorBui
 /// `PostgresQuery` executor. Runs a query against a Postgres database.
 pub struct PostgresQueryExecutor {
     schema: Schema,
-    params: PostgresConnectionParams,
+    config: PgConnectionConfig,
     query: String,
     identity: String,
     chunk_size: usize,
-}
-
-pub struct PostgresConnectionParams {
-    pub host: String,
-    pub port: String,
-    pub username: String,
-    pub password: String,
-    pub database: String,
-    pub ssl_mode: SslMode,
-    pub ssl_root_cert: Option<String>,
 }
 
 impl Executor for PostgresQueryExecutor {
@@ -115,14 +105,14 @@ fn postgres_cell_to_scalar_impl(
 impl PostgresQueryExecutor {
     pub fn new(
         schema: Schema,
-        params: PostgresConnectionParams,
+        config: PgConnectionConfig,
         query: String,
         identity: String,
         chunk_size: usize,
     ) -> Self {
         Self {
             schema,
-            params,
+            config,
             query,
             identity,
             chunk_size,
@@ -133,17 +123,7 @@ impl PostgresQueryExecutor {
     async fn do_execute(self: Box<Self>) {
         tracing::debug!("postgres_query_executor: started");
 
-        let client = create_pg_client(
-            &self.params.username,
-            &self.params.password,
-            &self.params.host,
-            &self.params.port,
-            &self.params.database,
-            &self.params.ssl_mode,
-            &self.params.ssl_root_cert,
-            None,
-        )
-        .await?;
+        let client = create_pg_client(&self.config, None).await?;
 
         let params: &[&str] = &[];
         let row_stream = client
@@ -180,12 +160,16 @@ impl BoxedExecutorBuilder for PostgresQueryExecutorBuilder {
             NodeBody::PostgresQuery
         )?;
 
+        let port = postgres_query_node
+            .port
+            .parse::<u16>()
+            .with_context(|| format!("invalid postgres port `{}`", postgres_query_node.port))?;
         Ok(Box::new(PostgresQueryExecutor::new(
             Schema::from_iter(postgres_query_node.columns.iter().map(Field::from)),
-            PostgresConnectionParams {
+            PgConnectionConfig {
                 host: postgres_query_node.hostname.clone(),
-                port: postgres_query_node.port.clone(),
-                username: postgres_query_node.username.clone(),
+                port,
+                user: postgres_query_node.username.clone(),
                 password: postgres_query_node.password.clone(),
                 database: postgres_query_node.database.clone(),
                 ssl_mode: postgres_query_node.ssl_mode.parse().unwrap_or_default(),

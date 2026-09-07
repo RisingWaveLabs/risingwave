@@ -190,6 +190,39 @@ mod test {
     }
 
     #[tokio::test]
+    async fn in_list_parameters_stay_flat_after_binding() {
+        expect_actual_eq(
+            create_expect_bound("select 1::int4 in (2::int4, 3::int4)"),
+            create_actual_bound(
+                "select 1::int4 in ($1::int4, $2::int4)",
+                vec![],
+                vec![Some("2".into()), Some("3".into())],
+                vec![Format::Text, Format::Text],
+            ),
+        );
+    }
+
+    #[tokio::test]
+    async fn large_in_list_parameters_do_not_recurse() {
+        let param_count = 4096;
+        let params = (1..=param_count)
+            .map(|index| format!("${index}::int4"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!("select 0::int4 in ({params})");
+
+        let mut binder = mock_binder();
+        let stmt = parse_sql_statements(&sql).unwrap().remove(0);
+        let bound = binder.bind(stmt).unwrap();
+        bound
+            .bind_parameter(
+                vec![Some("1".into()); param_count],
+                vec![Format::Text; param_count],
+            )
+            .unwrap();
+    }
+
+    #[tokio::test]
     async fn cast_after_specific() {
         expect_actual_eq(
             create_expect_bound("select 1::varchar"),

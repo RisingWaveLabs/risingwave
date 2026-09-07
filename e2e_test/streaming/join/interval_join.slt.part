@@ -190,17 +190,13 @@ SELECT right_table_id, right_table_ts FROM ${right_state_table};
 1 2024-01-01 00:00:05+00:00
 2 2024-01-01 00:00:25+00:00
 
-query I retry 21 backoff 1s
-SELECT total_key_count
-FROM rw_catalog.rw_table_stats
-WHERE id = ${left_state_table_id};
+query I
+SELECT count(*) FROM ${left_state_table};
 ----
 1
 
-query I retry 21 backoff 1s
-SELECT total_key_count
-FROM rw_catalog.rw_table_stats
-WHERE id = ${right_state_table_id};
+query I
+SELECT count(*) FROM ${right_state_table};
 ----
 2
 
@@ -457,10 +453,8 @@ SELECT stream_b_id, stream_b_ts FROM ${between_right_state_tname} ORDER BY strea
 ----
 3 2024-01-01 00:00:55+00:00
 
-query I retry 21 backoff 1s
-SELECT total_key_count
-FROM rw_catalog.rw_table_stats
-WHERE id = ${between_left_state_tid};
+query I
+SELECT count(*) FROM ${between_left_state_tname};
 ----
 1
 

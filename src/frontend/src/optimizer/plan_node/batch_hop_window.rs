@@ -47,8 +47,21 @@ impl BatchHopWindow {
         let distribution = core
             .i2o_col_mapping()
             .rewrite_provided_distribution(core.input.distribution());
-        let base =
-            PlanBase::new_batch_with_core(&core, distribution, core.get_out_column_index_order());
+        let orders = if core.window_slide == core.window_size {
+            // A single window is emitted for each input chunk, so orders on pass-through columns
+            // are preserved.
+            core.input
+                .orders()
+                .into_iter()
+                .map(|order| core.i2o_col_mapping().rewrite_provided_order(&order))
+                .collect()
+        } else {
+            // `HopWindowExecutor` emits one whole input chunk for each overlapping window. An input
+            // ordered as `[1, 2]` is therefore emitted as `[1, 2, 1, 2, ...]`, so even orders on
+            // pass-through columns are not preserved.
+            vec![Order::any()]
+        };
+        let base = PlanBase::new_batch_with_core_and_orders(&core, distribution, orders);
         BatchHopWindow {
             base,
             core,
@@ -95,9 +108,19 @@ impl ToDistributedBatch for BatchHopWindow {
             .core
             .o2i_col_mapping()
             .rewrite_required_distribution(required_dist);
+        let input_required_order = if self.core.window_slide == self.core.window_size {
+            self.core
+                .o2i_col_mapping()
+                .rewrite_required_order(required_order)
+                .unwrap_or_else(Order::any)
+        } else {
+            // An overlapping hop window does not preserve input order, so sorting its input cannot
+            // satisfy an output order requirement. Enforce the requirement on the output below.
+            Order::any()
+        };
         let new_input = self
             .input()
-            .to_distributed_with_required(required_order, &input_required)?;
+            .to_distributed_with_required(&input_required_order, &input_required)?;
         let mut new_logical = self.core.clone();
         new_logical.input = new_input;
         let batch_plan = BatchHopWindow::new(

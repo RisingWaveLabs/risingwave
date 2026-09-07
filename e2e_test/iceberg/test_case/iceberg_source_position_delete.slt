@@ -1,4 +1,7 @@
-# Deletions in a single commit are posistion delete, deletions across multiple commits are equail delete. sink_decouple = default(true), so we'll commit every 10s.
+# A delete is encoded as a position delete only when it shares an iceberg commit with the
+# insert it deletes, and as an equality delete otherwise. The sink commits every
+# commit_checkpoint_interval checkpoints counted from sink startup, so the interval has to be
+# comfortably larger than the number of checkpoints the statements below can consume.
 statement ok
 set streaming_parallelism=4;
 
@@ -22,7 +25,7 @@ CREATE SINK sink1 AS select * from mv1 WITH (
     s3.access.key = 'hummockadmin',
     s3.secret.key = 'hummockadmin',
     create_table_if_not_exists = 'true',
-    commit_checkpoint_interval = 5,
+    commit_checkpoint_interval = 20,
     primary_key = 'i1,i2',
     partition_by = 'i1'
 );
@@ -36,8 +39,10 @@ flush
 statement ok
 DELETE FROM s1 WHERE i1 < 3;
 
-sleep 20s
-
+# DELETE does not flush implicitly; flushing keeps it in the checkpoint right after the
+# insert's instead of leaving it to the next periodic barrier.
+statement ok
+flush
 
 statement ok
 CREATE SOURCE iceberg_t1_source
@@ -53,9 +58,9 @@ WITH (
     table.name = 'test_position_delete',
 );
 
-# check there should be at least one PositionDeletes
-query T
-select count(*) >= 1 from rw_iceberg_files where content = 'PositionDeletes';
+# Wait for the sink's first commit instead of sleeping for a fixed guess of the interval.
+query T retry 20 backoff 3s
+select count(*) >= 1 from rw_iceberg_files where source_name = 'iceberg_t1_source' and content = 'PositionDeletes';
 ----
 t
 

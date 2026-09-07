@@ -21,7 +21,7 @@ use itertools::Itertools;
 pub use plan_cloner::*;
 pub use share_source_rewriter::*;
 
-use crate::optimizer::plan_node::generic::GenericPlanRef;
+use crate::optimizer::ShareId;
 use crate::optimizer::plan_node::*;
 
 pub trait PlanRewriter<C: ConventionMarker> {
@@ -37,7 +37,7 @@ impl<C: ConventionMarker> PlanRef<C> {
     fn rewrite_recursively(
         &self,
         rewriter: &mut impl PlanRewriter<C>,
-        share_map: &mut HashMap<PlanNodeId, PlanRef<C>>,
+        share_map: &mut HashMap<ShareId, PlanRef<C>>,
     ) -> PlanRef<C> {
         use risingwave_common::util::recursive::{Recurse, tracker};
 
@@ -48,13 +48,13 @@ impl<C: ConventionMarker> PlanRef<C> {
             }
 
             if let Some(share) = self.as_share_node() {
-                let id = share.plan_base().id();
+                let id = share.share_id();
                 return if let Some(share) = share_map.get(&id) {
                     share.clone()
                 } else {
                     let input = share.input();
                     let new_input = input.rewrite_recursively(rewriter, share_map);
-                    let new_plan = C::ShareNode::new_share(generic::Share::new(new_input));
+                    let new_plan = share.fork_with_input(new_input);
                     share_map
                         .try_insert(id, new_plan.clone())
                         .expect("non-duplicate");

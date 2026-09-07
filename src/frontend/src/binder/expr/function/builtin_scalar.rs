@@ -423,6 +423,11 @@ impl Binder {
                 ("jsonb_set", raw_call(ExprType::JsonbSet)),
                 ("jsonb_populate_map", raw_call(ExprType::JsonbPopulateMap)),
                 ("jsonb_to_array", raw_call(ExprType::JsonbToArray)),
+                // variant
+                ("to_variant", raw_call(ExprType::ToVariant)),
+                ("variant_get", raw_call(ExprType::VariantGet)),
+                ("try_variant_get", raw_call(ExprType::TryVariantGet)),
+                ("variant_typeof", raw_call(ExprType::VariantTypeof)),
                 // map
                 ("map_from_entries", raw_call(ExprType::MapFromEntries)),
                 ("map_access", raw_call(ExprType::MapAccess)),
@@ -781,6 +786,8 @@ impl Binder {
                 ("pg_sleep", raw_call(ExprType::PgSleep)),
                 ("pg_sleep_for", raw_call(ExprType::PgSleepFor)),
                 ("random", raw_call(ExprType::Random)),
+                ("clock_timestamp", raw_call(ExprType::ClockTimestamp)),
+                ("gen_random_uuid", raw_call(ExprType::GenRandomUuid)),
                 // TODO: implement pg_sleep_until
                 // ("pg_sleep_until", raw_call(ExprType::PgSleepUntil)),
 

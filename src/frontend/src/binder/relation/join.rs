@@ -57,13 +57,7 @@ impl Binder {
             let right = self.bind_table_with_joins(t)?;
             self.pop_and_merge_lateral_context()?;
 
-            let is_lateral = match &right {
-                Relation::Subquery(subquery) if subquery.lateral => true,
-                Relation::TableFunction { .. } => true,
-                _ => false,
-            };
-
-            root = if is_lateral {
+            root = if Self::requires_apply(&right) {
                 Relation::Apply(Box::new(BoundJoin {
                     join_type: JoinType::Inner,
                     left: root,
@@ -80,6 +74,12 @@ impl Binder {
             }
         }
         Ok(Some(root))
+    }
+
+    fn requires_apply(relation: &Relation) -> bool {
+        matches!(relation, Relation::Subquery(subquery) if subquery.lateral)
+            || matches!(relation, Relation::TableFunction { .. })
+            || relation.is_correlated_by_depth(0)
     }
 
     pub(crate) fn bind_table_with_joins(&mut self, table: &TableWithJoins) -> Result<Relation> {
@@ -110,13 +110,7 @@ impl Binder {
                 (cond, _) = self.bind_join_constraint(constraint, None, join_type)?;
             }
 
-            let is_lateral = match &right {
-                Relation::Subquery(subquery) if subquery.lateral => true,
-                Relation::TableFunction { .. } => true,
-                _ => false,
-            };
-
-            root = if is_lateral {
+            root = if Self::requires_apply(&right) {
                 match join_type {
                     JoinType::Inner | JoinType::LeftOuter => {}
                     _ => {

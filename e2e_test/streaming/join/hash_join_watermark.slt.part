@@ -151,17 +151,13 @@ SELECT hwm_left_ts, _degree FROM ${left_degree_tname};
 ----
 2024-01-01 00:00:10+00:00 1
 
-query I retry 21 backoff 1s
-SELECT total_key_count
-FROM rw_catalog.rw_table_stats
-WHERE id = ${right_state_tid};
+query I
+SELECT count(*) FROM ${right_state_tname};
 ----
 1
 
-query I retry 21 backoff 1s
-SELECT total_key_count
-FROM rw_catalog.rw_table_stats
-WHERE id = ${left_degree_tid};
+query I
+SELECT count(*) FROM ${left_degree_tname};
 ----
 1
 

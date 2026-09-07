@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use std::collections::{HashMap, VecDeque};
-use std::ops::Range;
 use std::pin::Pin;
 use std::sync::{Arc, LazyLock};
 use std::task::{Context, Poll};
@@ -142,7 +141,7 @@ impl ObjectStore for InMemObjectStore {
     async fn streaming_read(
         &self,
         path: &str,
-        read_range: Range<usize>,
+        read_range: impl ObjectRangeBounds,
     ) -> ObjectResult<ObjectDataStream> {
         fail_point!("mem_streaming_read_err", |_| Err(ObjectError::internal(
             "mem streaming read error"

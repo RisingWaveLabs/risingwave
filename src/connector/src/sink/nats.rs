@@ -16,6 +16,7 @@ use core::fmt::Debug;
 use core::future::IntoFuture;
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context as _, anyhow};
 use async_nats::jetstream::context::Context;
@@ -23,10 +24,11 @@ use futures::FutureExt;
 use futures::prelude::TryFuture;
 use risingwave_common::array::StreamChunk;
 use risingwave_common::catalog::Schema;
+use risingwave_common::util::retry::exponential_backoff;
 use serde::Deserialize;
 use serde_with::serde_as;
 use tokio_retry::Retry;
-use tokio_retry::strategy::{ExponentialBackoff, jitter};
+use tokio_retry::strategy::jitter;
 use with_options::WithOptions;
 
 use super::SinkWriterParam;
@@ -53,7 +55,12 @@ pub struct NatsConfig {
     pub common: NatsCommon,
     // accept "append-only"
     pub r#type: String,
+
+    #[serde(flatten)]
+    pub unknown_fields: std::collections::HashMap<String, String>,
 }
+
+crate::impl_sink_unknown_fields!(NatsConfig);
 
 #[derive(Clone, Debug)]
 pub struct NatsSink {
@@ -122,6 +129,8 @@ impl Sink for NatsSink {
 
     const SINK_NAME: &'static str = NATS_SINK;
 
+    crate::impl_validate_sink_unknown_fields!();
+
     async fn validate(&self) -> Result<()> {
         if !self.is_append_only {
             return Err(SinkError::Nats(anyhow!(
@@ -181,7 +190,9 @@ impl AsyncTruncateSinkWriter for NatsSinkWriter {
         let mut data = chunk_to_json(chunk, &self.json_encoder)?;
         for item in &mut data {
             let publish_ack_future = Retry::spawn(
-                ExponentialBackoff::from_millis(100).map(jitter).take(3),
+                exponential_backoff(Duration::from_millis(100), 2, Duration::MAX)
+                    .map(jitter)
+                    .take(3),
                 || async {
                     self.context
                         .publish(self.config.common.subject.clone(), item.clone().into())

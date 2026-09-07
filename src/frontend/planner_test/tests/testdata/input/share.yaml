@@ -95,3 +95,32 @@
   expected_outputs:
   - batch_plan
   - stream_plan
+- id: predicate_pushdown_blocked_by_over_window
+  sql: |
+    create table t (a int, b int, c int);
+    with cte as (select a, b from t where c > 0)
+    select x.a, x.r1, x.r2, y.b
+    from (
+      select a,
+             rank() over (partition by a order by b) as r1,
+             rank() over (partition by b order by a) as r2
+      from cte
+    ) x
+    join cte y on x.a = y.a;
+  expected_outputs:
+  - stream_plan
+- id: column_pruning_with_different_parent_column_subsets
+  sql: |
+    create table t (a int, b int, c int, d int);
+    with cte as (select a, b, c, d from t where a > 0)
+    select cte1.a, cte1.b, cte2.c from cte cte1 join cte cte2 on cte1.a = cte2.a;
+  expected_outputs:
+  - stream_plan
+- id: nested_multi_parent_share
+  sql: |
+    create table t (a int, b int, c int);
+    with cte1 as (select a, b from t where c > 0),
+         cte2 as (select c1.a, c2.b from cte1 c1 join cte1 c2 on c1.a = c2.a)
+    select x.a, y.b from cte2 x join cte2 y on x.a = y.a;
+  expected_outputs:
+  - stream_plan

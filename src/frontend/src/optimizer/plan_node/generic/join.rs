@@ -768,11 +768,7 @@ pub fn can_push_on_from_filter(ty: JoinType) -> bool {
 pub fn can_push_left_from_on(ty: JoinType) -> bool {
     matches!(
         ty,
-        JoinType::Inner
-            | JoinType::RightOuter
-            | JoinType::LeftSemi
-            | JoinType::AsofInner
-            | JoinType::AsofLeftOuter
+        JoinType::Inner | JoinType::RightOuter | JoinType::LeftSemi | JoinType::AsofInner
     )
 }
 

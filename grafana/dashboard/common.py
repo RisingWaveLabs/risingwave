@@ -36,6 +36,7 @@ COMPONENT_VARIABLE = "job"
 NODE_LABEL = "instance"
 NODE_VARIABLE_LABEL = "Node"
 NODE_VARIABLE = "node"
+NODE_VARIABLE_CUSTOM_ALL_VALUE = None
 
 # Use different labels for role and instance when namespace filter enabled. (Kubernetes)
 if namespace_filter_enabled:
@@ -45,6 +46,7 @@ if namespace_filter_enabled:
     NODE_LABEL = "pod"
     NODE_VARIABLE_LABEL = "Pod"
     NODE_VARIABLE = "pod"
+    NODE_VARIABLE_CUSTOM_ALL_VALUE = ".+"
 
 templating = Templating()
 if namespace_filter_enabled:

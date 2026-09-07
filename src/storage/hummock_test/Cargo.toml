@@ -9,7 +9,7 @@ repository = { workspace = true }
 
 [features]
 failpoints = ["risingwave_storage/failpoints"]
-sync_point = ["sync-point/sync_point", "serial_test"]
+sync_point = ["risingwave_storage/sync_point", "sync-point/sync_point", "serial_test"]
 test = []
 
 [dependencies]
@@ -32,7 +32,7 @@ risingwave_object_store = { workspace = true }
 risingwave_pb = { workspace = true }
 risingwave_rpc_client = { workspace = true }
 risingwave_storage = { workspace = true, features = ["test"] }
-serial_test = { version = "3.4", optional = true }
+serial_test = { version = "4.0", optional = true }
 tokio = { workspace = true }
 
 [target.'cfg(not(madsim))'.dependencies]

@@ -37,9 +37,10 @@ use super::{Access, AccessError, AccessResult};
 use crate::parser::DatumCow;
 use crate::schema::{InvalidOptionError, bail_invalid_option_error};
 
-/// Try to parse Debezium `PostGIS` `geometry` object.
+/// Try to parse a Debezium `PostGIS` spatial object.
 ///
-/// Debezium represents `PostGIS` `geometry` as an object: `{"srid": <int>, "wkb": <base64_string>}`.
+/// Debezium represents `PostGIS` `geometry` and `geography` values as an object:
+/// `{"srid": <int>, "wkb": <base64_string>}`.
 /// For our current Postgres CDC ingestion, the `wkb` field is expected to be EWKB bytes (base64-encoded),
 /// and `srid` is redundant. We decode `wkb` into raw bytes and store it as `bytea`.
 ///
@@ -47,14 +48,14 @@ use crate::schema::{InvalidOptionError, bail_invalid_option_error};
 /// unification across connectors (e.g., MySQL): see `GeometryFormatTransformer`.
 ///
 /// Return semantics:
-/// - `Ok(Some(bytes))`: The input matches the Debezium geometry shape (`srid` is numeric AND `wkb` is string),
+/// - `Ok(Some(bytes))`: The input matches the Debezium spatial shape (`srid` is numeric AND `wkb` is string),
 ///   and we successfully decoded `wkb` into bytes.
-/// - `Ok(None)`: The input does NOT look like a Debezium geometry object. This allows the caller to keep the
+/// - `Ok(None)`: The input does NOT look like a Debezium spatial object. This allows the caller to keep the
 ///   match arm focused on dispatching, and avoids misclassifying other JSON objects that might map to `bytea`
 ///   in the future.
-/// - `Err(...)`: The input looks like a Debezium geometry object, but decoding/parsing failed (e.g. invalid
+/// - `Err(...)`: The input looks like a Debezium spatial object, but decoding/parsing failed (e.g. invalid
 ///   base64). This indicates a real data/format error and should not be silently ignored.
-fn try_parse_debezium_geometry_as_bytea(
+fn try_parse_debezium_postgis_spatial_as_bytea(
     value: &BorrowedValue<'_>,
     create_error: impl Fn() -> AccessError,
 ) -> AccessResult<Option<Box<[u8]>>> {
@@ -63,7 +64,7 @@ fn try_parse_debezium_geometry_as_bytea(
         None => return Ok(None),
     };
 
-    // Strictly identify the geometry object by checking both fields and their types.
+    // Strictly identify the spatial object by checking both fields and their types.
     // There may be other objects that map to bytea in the future.
     let srid = obj.get("srid").and_then(|v| v.as_i64());
     let wkb = obj.get("wkb").and_then(|v| v.as_str());
@@ -137,6 +138,7 @@ impl TimestamptzHandling {
 #[derive(Clone, Debug)]
 pub enum TimestampHandling {
     Milli,
+    Micro,
     GuessNumberUnit,
 }
 
@@ -571,18 +573,23 @@ impl JsonParseOptions {
             (
                 DataType::Timestamp,
                 ValueType::I64 | ValueType::I128 | ValueType::U64 | ValueType::U128,
-            ) => {
-                match self.timestamp_handling {
+            ) => value
+                .as_i64()
+                .map(|num| match self.timestamp_handling {
                     // Only when user configures debezium.time.precision.mode = 'connect',
                     // the Milli branch will be executed
-                    TimestampHandling::Milli => Timestamp::with_millis(value.as_i64().unwrap())
-                        .map_err(|_| create_error())?
-                        .into(),
-                    TimestampHandling::GuessNumberUnit => i64_to_timestamp(value.as_i64().unwrap())
-                        .map_err(|_| create_error())?
-                        .into(),
-                }
-            }
+                    TimestampHandling::Milli => {
+                        Timestamp::with_millis(num).map_err(|_| create_error())
+                    }
+                    TimestampHandling::Micro => {
+                        Timestamp::with_micros(num).map_err(|_| create_error())
+                    }
+                    TimestampHandling::GuessNumberUnit => {
+                        i64_to_timestamp(num).map_err(|_| create_error())
+                    }
+                })
+                .ok_or_else(create_error)??
+                .into(),
             // ---- Timestamptz -----
             (DataType::Timestamptz, ValueType::String) => match self.timestamptz_handling {
                 TimestamptzHandling::UtcWithoutSuffix => value
@@ -590,7 +597,7 @@ impl JsonParseOptions {
                     .unwrap()
                     .parse::<Timestamp>()
                     .map(|naive_utc| {
-                        Timestamptz::from_micros(naive_utc.0.and_utc().timestamp_micros())
+                        Timestamptz::from_micros_uncheck(naive_utc.0.and_utc().timestamp_micros())
                     })
                     .map_err(|_| create_error())?
                     .into(),
@@ -609,7 +616,7 @@ impl JsonParseOptions {
                 .as_i64()
                 .and_then(|num| match self.timestamptz_handling {
                     TimestamptzHandling::GuessNumberUnit => i64_to_timestamptz(num).ok(),
-                    TimestamptzHandling::Micro => Some(Timestamptz::from_micros(num)),
+                    TimestamptzHandling::Micro => Timestamptz::from_micros(num),
                     TimestamptzHandling::Milli => Timestamptz::from_millis(num),
                     // When explicitly requested string format, number without units are rejected.
                     TimestamptzHandling::UtcString | TimestamptzHandling::UtcWithoutSuffix => None,
@@ -757,10 +764,11 @@ impl JsonParseOptions {
                         .into(),
                 }
             }
-            // Handle Debezium PostGIS geometry type: {"srid": <int>, "wkb": <base64_string>}
-            // We extract the wkb field and decode it as EWKB bytes
+            // Handle Debezium PostGIS geometry and geography types:
+            // {"srid": <int>, "wkb": <base64_string>}. We extract the wkb field and
+            // decode it as EWKB bytes.
             (DataType::Bytea, ValueType::Object) => {
-                match try_parse_debezium_geometry_as_bytea(value, create_error)? {
+                match try_parse_debezium_postgis_spatial_as_bytea(value, create_error)? {
                     Some(bytes) => bytes.into(),
                     None => Err(create_error())?,
                 }

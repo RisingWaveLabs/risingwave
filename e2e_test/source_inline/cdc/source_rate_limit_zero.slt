@@ -1,0 +1,30 @@
+# MySQL and SQL Server CDC sources must read an initial offset before creation finishes,
+# so they cannot start with source_rate_limit set to 0.
+
+statement error source_rate_limit.*cannot be 0.*mysql-cdc.*initial CDC offset
+create source mysql_explicit_zero with (
+  connector = 'mysql-cdc',
+  source_rate_limit = '0'
+) format plain encode json;
+
+statement error source_rate_limit.*cannot be 0.*sqlserver-cdc.*initial CDC offset
+create source sqlserver_explicit_zero with (
+  connector = 'sqlserver-cdc',
+  source_rate_limit = '0'
+) format plain encode json;
+
+statement ok
+set source_rate_limit to 0;
+
+statement error source_rate_limit.*cannot be 0.*mysql-cdc.*initial CDC offset
+create source mysql_session_zero with (
+  connector = 'mysql-cdc'
+) format plain encode json;
+
+statement error source_rate_limit.*cannot be 0.*sqlserver-cdc.*initial CDC offset
+create source sqlserver_session_zero with (
+  connector = 'sqlserver-cdc'
+) format plain encode json;
+
+statement ok
+set source_rate_limit to default;

@@ -16,16 +16,17 @@ use core::fmt::Formatter;
 use std::cell::{Cell, RefCell, RefMut};
 use std::collections::HashMap;
 use std::marker::PhantomData;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 use std::sync::Arc;
 
+use risingwave_common::id::SourceId;
 use risingwave_sqlparser::ast::{ExplainFormat, ExplainOptions, ExplainType};
 
 use super::property::WatermarkGroupId;
 use crate::expr::{CorrelatedId, SessionTimezone};
 use crate::handler::HandlerArgs;
-use crate::optimizer::LogicalPlanRef;
-use crate::optimizer::plan_node::PlanNodeId;
+use crate::optimizer::plan_node::generic::Share;
+use crate::optimizer::plan_node::{LogicalPlanRef, PlanNodeId, StreamPlanRef};
 use crate::session::SessionImpl;
 use crate::utils::{OverwriteOptions, WithOptions};
 use crate::{Explain, TableCatalog};
@@ -33,6 +34,51 @@ use crate::{Explain, TableCatalog};
 const RESERVED_ID_NUM: u16 = 10000;
 
 type PhantomUnsend = PhantomData<Rc<()>>;
+
+/// The stable identity of a shared subplan.
+///
+/// Unlike [`PlanNodeId`], a `ShareId` survives rebuilding the wrapper plan node around a share.
+/// [`OptimizerContext`] tracks the current input used to rebuild wrappers after a DAG pass.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ShareId(u32);
+
+#[derive(Debug)]
+pub(in crate::optimizer) struct ShareEntry<P> {
+    current: RefCell<P>,
+    plan_node_id: PlanNodeId,
+}
+
+impl<P> ShareEntry<P> {
+    fn update_current(&self, current: P) {
+        *self.current.borrow_mut() = current;
+    }
+
+    pub(in crate::optimizer) fn plan_node_id(&self) -> PlanNodeId {
+        self.plan_node_id
+    }
+}
+
+impl<P: Clone> ShareEntry<P> {
+    fn current(&self) -> P {
+        self.current.borrow().clone()
+    }
+}
+
+pub(in crate::optimizer) type ShareEntryRef<P> = Rc<ShareEntry<P>>;
+
+struct ShareTable<P> {
+    /// Weak entries avoid a reference cycle through `PlanBase::ctx` in the stored plans. A live
+    /// share handle owns the corresponding strong entry.
+    entries: HashMap<ShareId, Weak<ShareEntry<P>>>,
+}
+
+impl<P> Default for ShareTable<P> {
+    fn default() -> Self {
+        Self {
+            entries: HashMap::new(),
+        }
+    }
+}
 
 pub struct OptimizerContext {
     session_ctx: Arc<SessionImpl>,
@@ -55,14 +101,16 @@ pub struct OptimizerContext {
     /// Store the configs can be overwritten in with clause
     /// if not specified, use the value from session variable.
     overwrite_options: OverwriteOptions,
-    /// Mapping from iceberg table identifier to current snapshot id.
-    /// Used to keep same snapshot id when multiple scans from the same iceberg table exist in a query.
-    iceberg_snapshot_id_map: RefCell<HashMap<String, Option<i64>>>,
+    /// Mapping from Iceberg table identifier to the current snapshot and its RisingWave commit
+    /// boundary. Used to keep multiple scans of the same table consistent within one query.
+    iceberg_snapshot_info_map: RefCell<HashMap<SourceId, Option<IcebergSnapshotInfo>>>,
     /// Batch materialized view candidates for exact-match rewriting.
     batch_mview_candidates: RefCell<Vec<MaterializedViewCandidate>>,
 
     /// Last assigned plan node ID.
     last_plan_node_id: Cell<i32>,
+    /// Last assigned share ID.
+    last_share_id: Cell<u32>,
     /// Last assigned correlated ID.
     last_correlated_id: Cell<u32>,
     /// Last assigned expr display ID.
@@ -70,10 +118,9 @@ pub struct OptimizerContext {
     /// Last assigned watermark group ID.
     last_watermark_group_id: Cell<u32>,
 
-    // TODO: remove this when locality backfill is enabled by default
-    /// Count of places where locality backfill could have been applied but was not,
-    /// because `enable_locality_backfill` is off.
-    missed_locality_providers: Cell<usize>,
+    /// Tracks the current input of each live share while DAG-aware passes rebuild wrappers.
+    logical_share_table: RefCell<ShareTable<LogicalPlanRef>>,
+    stream_share_table: RefCell<ShareTable<StreamPlanRef>>,
 
     _phantom: PhantomUnsend,
 }
@@ -82,6 +129,12 @@ pub struct OptimizerContext {
 pub struct MaterializedViewCandidate {
     pub plan: LogicalPlanRef,
     pub table: Arc<TableCatalog>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct IcebergSnapshotInfo {
+    pub(crate) snapshot_id: i64,
+    pub(crate) commit_epoch: Option<u64>,
 }
 
 pub(in crate::optimizer) struct LastAssignedIds {
@@ -117,16 +170,17 @@ impl OptimizerContext {
             session_timezone,
             total_rule_applied: RefCell::new(0),
             overwrite_options,
-            iceberg_snapshot_id_map: RefCell::new(HashMap::new()),
+            iceberg_snapshot_info_map: RefCell::new(HashMap::new()),
             batch_mview_candidates: RefCell::new(Vec::new()),
 
             last_plan_node_id: Cell::new(RESERVED_ID_NUM.into()),
+            last_share_id: Cell::new(0),
             last_correlated_id: Cell::new(0),
             last_expr_display_id: Cell::new(RESERVED_ID_NUM.into()),
             last_watermark_group_id: Cell::new(RESERVED_ID_NUM.into()),
 
-            // TODO: remove this when locality backfill is enabled by default
-            missed_locality_providers: Cell::new(0),
+            logical_share_table: RefCell::new(ShareTable::default()),
+            stream_share_table: RefCell::new(ShareTable::default()),
 
             _phantom: Default::default(),
         }
@@ -145,15 +199,17 @@ impl OptimizerContext {
             session_timezone: RefCell::new(SessionTimezone::new("UTC".into())),
             total_rule_applied: RefCell::new(0),
             overwrite_options: OverwriteOptions::default(),
-            iceberg_snapshot_id_map: RefCell::new(HashMap::new()),
+            iceberg_snapshot_info_map: RefCell::new(HashMap::new()),
             batch_mview_candidates: RefCell::new(Vec::new()),
 
             last_plan_node_id: Cell::new(0),
+            last_share_id: Cell::new(0),
             last_correlated_id: Cell::new(0),
             last_expr_display_id: Cell::new(0),
             last_watermark_group_id: Cell::new(0),
 
-            missed_locality_providers: Cell::new(0),
+            logical_share_table: RefCell::new(ShareTable::default()),
+            stream_share_table: RefCell::new(ShareTable::default()),
 
             _phantom: Default::default(),
         }
@@ -163,6 +219,94 @@ impl OptimizerContext {
     pub fn next_plan_node_id(&self) -> PlanNodeId {
         self.last_plan_node_id.update(|id| id + 1);
         PlanNodeId(self.last_plan_node_id.get())
+    }
+
+    fn next_share_id(&self) -> ShareId {
+        self.last_share_id.update(|id| id + 1);
+        ShareId(self.last_share_id.get())
+    }
+
+    fn share_entry<P>(
+        table: &RefCell<ShareTable<P>>,
+        share_id: ShareId,
+        convention: &str,
+    ) -> ShareEntryRef<P> {
+        table
+            .borrow()
+            .entries
+            .get(&share_id)
+            .unwrap_or_else(|| panic!("{convention} share {share_id:?} is not registered"))
+            .upgrade()
+            .unwrap_or_else(|| panic!("{convention} share {share_id:?} is no longer live"))
+    }
+
+    fn register_share<P: Clone>(&self, table: &RefCell<ShareTable<P>>, input: P) -> Share<P> {
+        let share_id = self.next_share_id();
+        let entry = Rc::new(ShareEntry {
+            current: RefCell::new(input.clone()),
+            plan_node_id: self.next_plan_node_id(),
+        });
+        table
+            .borrow_mut()
+            .entries
+            .try_insert(share_id, Rc::downgrade(&entry))
+            .expect("share id must be unique");
+        Share::new(share_id, input, entry)
+    }
+
+    fn share<P: Clone>(
+        &self,
+        table: &RefCell<ShareTable<P>>,
+        share_id: ShareId,
+        convention: &str,
+    ) -> Share<P> {
+        let entry = Self::share_entry(table, share_id, convention);
+        let input = entry.current();
+        Share::new(share_id, input, entry)
+    }
+
+    fn update_share<P>(
+        table: &RefCell<ShareTable<P>>,
+        share_id: ShareId,
+        new_input: P,
+        convention: &str,
+    ) {
+        let entry = Self::share_entry(table, share_id, convention);
+        entry.update_current(new_input);
+    }
+
+    pub(in crate::optimizer) fn register_logical_share(
+        &self,
+        input: LogicalPlanRef,
+    ) -> Share<LogicalPlanRef> {
+        self.register_share(&self.logical_share_table, input)
+    }
+
+    pub(in crate::optimizer) fn logical_share(&self, share_id: ShareId) -> Share<LogicalPlanRef> {
+        self.share(&self.logical_share_table, share_id, "logical")
+    }
+
+    pub(in crate::optimizer) fn update_logical_share(
+        &self,
+        share_id: ShareId,
+        new_input: LogicalPlanRef,
+    ) {
+        Self::update_share(&self.logical_share_table, share_id, new_input, "logical");
+    }
+
+    pub(in crate::optimizer) fn register_stream_share(
+        &self,
+        input: StreamPlanRef,
+    ) -> Share<StreamPlanRef> {
+        self.register_share(&self.stream_share_table, input)
+    }
+
+    pub(in crate::optimizer) fn update_stream_share(
+        &self,
+        share_id: ShareId,
+        new_input: StreamPlanRef,
+    ) {
+        Self::update_share(&self.stream_share_table, share_id, new_input, "stream");
     }
 
     pub fn next_correlated_id(&self) -> CorrelatedId {
@@ -241,20 +385,6 @@ impl OptimizerContext {
         self.session_ctx().notice_to_user(str);
     }
 
-    // TODO: remove this when locality backfill is enabled by default
-    /// Increment the counter for missed locality providers.
-    /// Called when locality backfill could have been applied but `enable_locality_backfill` is off.
-    pub fn inc_missed_locality_providers(&self) {
-        self.missed_locality_providers
-            .set(self.missed_locality_providers.get() + 1);
-    }
-
-    // TODO: remove this when locality backfill is enabled by default
-    /// Get the number of missed locality providers.
-    pub fn missed_locality_providers(&self) -> usize {
-        self.missed_locality_providers.get()
-    }
-
     fn explain_plan_impl(&self, plan: &impl Explain) -> String {
         match self.explain_options.explain_format {
             ExplainFormat::Text => plan.explain_to_string(),
@@ -325,8 +455,10 @@ impl OptimizerContext {
         self.session_timezone.borrow().timezone()
     }
 
-    pub fn iceberg_snapshot_id_map(&self) -> RefMut<'_, HashMap<String, Option<i64>>> {
-        self.iceberg_snapshot_id_map.borrow_mut()
+    pub(crate) fn iceberg_snapshot_info_map(
+        &self,
+    ) -> RefMut<'_, HashMap<SourceId, Option<IcebergSnapshotInfo>>> {
+        self.iceberg_snapshot_info_map.borrow_mut()
     }
 }
 

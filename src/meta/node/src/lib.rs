@@ -1,4 +1,4 @@
-// Copyright 2025 RisingWave Labs
+// Copyright 2023 RisingWave Labs
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -25,6 +25,7 @@ pub use error::{MetaError, MetaResult};
 use redact::Secret;
 use risingwave_common::config::OverrideConfig;
 use risingwave_common::license::LicenseKey;
+use risingwave_common::system_param::StateStoreUrl;
 use risingwave_common::util::meta_addr::MetaAddressStrategy;
 use risingwave_common::util::resource_util;
 use risingwave_common::util::tokio_util::sync::CancellationToken;
@@ -140,7 +141,7 @@ pub struct MetaNodeOpts {
     /// State store url
     #[clap(long, hide = true, env = "RW_STATE_STORE")]
     #[override_opts(path = system.state_store)]
-    pub state_store: Option<String>,
+    pub state_store: Option<StateStoreUrl>,
 
     /// Remote directory for storing data and metadata objects.
     #[clap(long, hide = true, env = "RW_DATA_DIRECTORY")]
@@ -321,6 +322,12 @@ pub fn start(
             Duration::from_secs(config.meta.max_heartbeat_interval_secs as u64);
         let max_idle_ms = config.meta.dangerous_max_idle_secs.unwrap_or(0) * 1000;
         let in_flight_barrier_nums = config.streaming.in_flight_barrier_nums;
+        let snapshot_backfill_finish_max_lagged_barriers = config
+            .streaming
+            .snapshot_backfill_finish_max_lagged_barriers;
+        let snapshot_backfill_barrier_amplification_factor = config
+            .streaming
+            .snapshot_backfill_barrier_amplification_factor;
         let privatelink_endpoint_default_tags =
             opts.privatelink_endpoint_default_tags.map(|tags| {
                 tags.split(',')
@@ -370,6 +377,9 @@ pub fn start(
             config.server.clone(),
             MetaOpts {
                 enable_recovery: !config.meta.disable_recovery,
+                clean_all_foreground_jobs_on_recovery: config
+                    .meta
+                    .clean_all_foreground_jobs_on_recovery,
                 disable_automatic_parallelism_control: config
                     .meta
                     .disable_automatic_parallelism_control,
@@ -381,6 +391,8 @@ pub fn start(
                     .meta
                     .parallelism_control_trigger_first_delay_sec,
                 in_flight_barrier_nums,
+                snapshot_backfill_finish_max_lagged_barriers,
+                snapshot_backfill_barrier_amplification_factor,
                 max_idle_ms,
                 compaction_deterministic_test: config.meta.enable_compaction_deterministic,
                 default_parallelism: config.meta.default_parallelism,
@@ -460,9 +472,6 @@ pub fn start(
                 enable_committed_sst_sanity_check: config.meta.enable_committed_sst_sanity_check,
                 periodic_compaction_interval_sec: config.meta.periodic_compaction_interval_sec,
                 node_num_monitor_interval_sec: config.meta.node_num_monitor_interval_sec,
-                protect_drop_table_with_incoming_sink: config
-                    .meta
-                    .protect_drop_table_with_incoming_sink,
                 prometheus_endpoint: opts.prometheus_endpoint,
                 prometheus_selector: opts.prometheus_selector,
                 vpc_id: opts.vpc_id,
@@ -567,6 +576,10 @@ pub fn start(
                     .meta
                     .developer
                     .table_change_log_delete_batch_size,
+                table_change_log_truncate_interval_sec: config
+                    .meta
+                    .developer
+                    .table_change_log_truncate_interval_sec,
                 license_key_path: opts.license_key_path,
                 compute_client_config: config.meta.developer.compute_client_config.clone(),
                 stream_client_config: config.meta.developer.stream_client_config.clone(),
@@ -603,43 +616,43 @@ pub fn start(
 
 fn validate_config(config: &RwConfig) {
     if config.meta.meta_leader_lease_secs <= 2 {
-        let error_msg = "meta leader lease secs should be larger than 2";
+        let error_msg = "`meta_leader_lease_secs` must be greater than 2";
         tracing::error!(error_msg);
         panic!("{}", error_msg);
     }
 
     if config.meta.parallelism_control_batch_size == 0 {
-        let error_msg = "parallelism control batch size should be larger than 0";
+        let error_msg = "`parallelism_control_batch_size` must be greater than 0";
         tracing::error!(error_msg);
         panic!("{}", error_msg);
     }
 
     if config.meta.checkpoint_read_chunk_size == 0 {
-        let error_msg = "checkpoint read chunk size should be larger than 0";
+        let error_msg = "`checkpoint_read_chunk_size` must be greater than 0";
         tracing::error!(error_msg);
         panic!("{}", error_msg);
     }
 
     if config.meta.checkpoint_read_max_in_flight_chunks == 0 {
-        let error_msg = "checkpoint read max in flight chunks should be larger than 0";
+        let error_msg = "`checkpoint_read_max_in_flight_chunks` must be greater than 0";
         tracing::error!(error_msg);
         panic!("{}", error_msg);
     }
 
     if config.meta.compaction_task_id_refill_capacity == 0 {
-        let error_msg = "compaction task id refill capacity should be larger than 0";
+        let error_msg = "`compaction_task_id_refill_capacity` must be greater than 0";
         tracing::error!(error_msg);
         panic!("{}", error_msg);
     }
 
     if config.meta.iceberg_compaction_report_timeout_sec == 0 {
-        let error_msg = "iceberg compaction report timeout sec should be larger than 0";
+        let error_msg = "`iceberg_compaction_report_timeout_sec` must be greater than 0";
         tracing::error!(error_msg);
         panic!("{}", error_msg);
     }
 
     if config.meta.iceberg_compaction_config_refresh_interval_sec == 0 {
-        let error_msg = "iceberg compaction config refresh interval sec should be larger than 0";
+        let error_msg = "`iceberg_compaction_config_refresh_interval_sec` must be greater than 0";
         tracing::error!(error_msg);
         panic!("{}", error_msg);
     }

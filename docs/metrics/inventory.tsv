@@ -1,0 +1,509 @@
+metric_name	type	labels	help	buckets	file
+batch_exchange_recv_row_number	counter		Total number of row that have been received from upstream source		src/batch/src/monitor/stats.rs
+batch_heartbeat_worker_num	gauge		Total number of heartbeat worker for batch tasks.		src/batch/src/monitor/stats.rs
+batch_row_seq_scan_next_duration	histogram		Time spent deserializing into a row in cell based table.		src/batch/src/monitor/stats.rs
+batch_spill_read_bytes	counter		Total bytes of requests read from spill files		src/batch/src/monitor/stats.rs
+batch_spill_write_bytes	counter		Total bytes of requests write to spill files		src/batch/src/monitor/stats.rs
+batch_task_num	gauge		Number of batch task in memory		src/batch/src/monitor/stats.rs
+compute_batch_total_mem	gauge		Total number of memory usage for batch tasks.		src/batch/src/monitor/stats.rs
+user_compute_error_cnt	counter	error_type,executor_name,fragment_id	Compute errors in the system, queryable by tags		src/common/metrics/src/error_metrics.rs
+user_sink_error_cnt	counter	error_type,sink_id,sink_name,fragment_id	Sink errors in the system, queryable by tags		src/common/metrics/src/error_metrics.rs
+user_source_error_cnt	counter	error_type,source_id,source_name,fragment_id	Source errors in the system, queryable by tags		src/common/metrics/src/error_metrics.rs
+aws_sdk_retry_counts	counter		Total number of aws sdk retry happens		src/common/metrics/src/lib.rs
+connection_count	gauge	connection_type,uri	The number of current existing connection		src/common/metrics/src/monitor/connection.rs
+connection_create_rate	counter	connection_type,uri	Rate on creating new connection		src/common/metrics/src/monitor/connection.rs
+connection_err_rate	counter	connection_type,uri	Error rate on creating new connection		src/common/metrics/src/monitor/connection.rs
+connection_io_err_rate	counter	connection_type,uri,op_type,error_kind	IO err rate of a connection		src/common/metrics/src/monitor/connection.rs
+connection_read_rate	counter	connection_type,uri	Read rate of a connection		src/common/metrics/src/monitor/connection.rs
+connection_reader_count	gauge	connection_type,uri	The number of current existing reader		src/common/metrics/src/monitor/connection.rs
+connection_write_rate	counter	connection_type,uri	Write rate of a connection		src/common/metrics/src/monitor/connection.rs
+connection_writer_count	gauge	connection_type,uri	The number of current existing writer		src/common/metrics/src/monitor/connection.rs
+process_cpu_core_num	gauge		Cpu core num.		src/common/metrics/src/monitor/process.rs
+process_cpu_seconds_total	counter		Total user and system CPU time spent in seconds.		src/common/metrics/src/monitor/process.rs
+process_resident_memory_bytes	gauge		Resident memory size in bytes.		src/common/metrics/src/monitor/process.rs
+process_virtual_memory_bytes	gauge		Virtual memory size in bytes.		src/common/metrics/src/monitor/process.rs
+backfill_rate_limit_bytes	gauge	table_id	backfill rate limit bytes per second		src/common/rate_limit/src/lib.rs
+stream_exchange_frag_send_size	counter	up_fragment_id,down_fragment_id	Total size of messages that have been send to downstream Fragment		src/compute/src/rpc/service/stream_exchange_service/metrics.rs
+connector_sink_rows_received	counter	actor_id,connector_type,sink_id,sink_name	Number of rows received by sink		src/connector/src/sink/mod.rs
+iceberg_partition_num	gauge	actor_id,sink_id,sink_name	The partition num of iceberg partition writer		src/connector/src/sink/mod.rs
+iceberg_position_delete_cache_num	gauge	actor_id,sink_id,sink_name	The delete cache num of iceberg position delete writer		src/connector/src/sink/mod.rs
+iceberg_rolling_unflushed_data_file	gauge	actor_id,sink_id,sink_name	The unflushed data file count of iceberg rolling writer		src/connector/src/sink/mod.rs
+iceberg_snapshot_num	gauge	sink_name,catalog_name,table_name	The snapshot number of iceberg table		src/connector/src/sink/mod.rs
+iceberg_write_bytes	counter	actor_id,sink_id,sink_name	The write bytes of iceberg writer		src/connector/src/sink/mod.rs
+iceberg_write_latency	histogram	actor_id,sink_id,sink_name	The latency of iceberg writer		src/connector/src/sink/mod.rs
+iceberg_write_qps	counter	actor_id,sink_id,sink_name	The qps of iceberg writer		src/connector/src/sink/mod.rs
+log_store_first_write_epoch	gauge	actor_id,sink_id,sink_name	The first write epoch of log store		src/connector/src/sink/mod.rs
+log_store_latest_read_epoch	gauge	actor_id,connector,sink_id,sink_name	The latest read epoch of log store		src/connector/src/sink/mod.rs
+log_store_latest_write_epoch	gauge	actor_id,sink_id,sink_name	The latest write epoch of log store		src/connector/src/sink/mod.rs
+log_store_read_bytes	counter	actor_id,connector,sink_id,sink_name	Total size of chunks read by log reader		src/connector/src/sink/mod.rs
+log_store_read_rows	counter	actor_id,connector,sink_id,sink_name	The read rate of rows		src/connector/src/sink/mod.rs
+log_store_reader_wait_new_future_duration_ns	counter	actor_id,connector,sink_id,sink_name	Accumulated duration of LogReader to wait for next call to create future		src/connector/src/sink/mod.rs
+log_store_write_rows	counter	actor_id,sink_id,sink_name	The write rate of rows		src/connector/src/sink/mod.rs
+sink_commit_duration	histogram	actor_id,connector,sink_id,sink_name	Duration of commit op in sink		src/connector/src/sink/mod.rs
+iceberg_read_bytes	counter	table_name	Total size of iceberg read requests		src/connector/src/source/iceberg/metrics.rs
+iceberg_source_delete_files_per_data_file	histogram	source_id,source_name,table_name	Number of delete files attached per data file scan task		src/connector/src/source/iceberg/metrics.rs
+iceberg_source_delete_rows_applied_total	counter	table_name,delete_type	Total rows removed by delete processing		src/connector/src/source/iceberg/metrics.rs
+iceberg_source_file_read_duration_seconds	histogram	table_name	Per-file read duration		src/connector/src/source/iceberg/metrics.rs
+iceberg_source_files_discovered_total	counter	source_id,source_name,table_name,file_type	Total number of files discovered per scan		src/connector/src/source/iceberg/metrics.rs
+iceberg_source_files_read_total	counter	table_name,file_type	Total files read from Iceberg source		src/connector/src/source/iceberg/metrics.rs
+iceberg_source_inflight_file_count	gauge	source_id,source_name,table_name	Number of files currently being fetched by the active reader		src/connector/src/source/iceberg/metrics.rs
+iceberg_source_list_duration_seconds	histogram	source_id,source_name,table_name	Time spent planning files from a snapshot		src/connector/src/source/iceberg/metrics.rs
+iceberg_source_rows_read_total	counter	table_name	Total rows read from Iceberg source		src/connector/src/source/iceberg/metrics.rs
+iceberg_source_scan_errors_total	counter	source_id,source_name,table_name,error_type	Total number of scan errors categorized by error type		src/connector/src/source/iceberg/metrics.rs
+iceberg_source_snapshot_lag_seconds	gauge	source_id,source_name,table_name	Lag between latest available snapshot and last ingested snapshot in seconds		src/connector/src/source/iceberg/metrics.rs
+iceberg_source_snapshots_discovered_total	counter	source_id,source_name,table_name	Total number of snapshots discovered via incremental scan		src/connector/src/source/iceberg/metrics.rs
+rdkafka_<PATH>_avg	gauge	id,client_id,broker,topic	Average value		src/connector/src/source/kafka/stats.rs
+rdkafka_<PATH>_cnt	gauge	id,client_id,broker,topic	Count of values		src/connector/src/source/kafka/stats.rs
+rdkafka_<PATH>_hdrsize	gauge	id,client_id,broker,topic	Size of the histogram header		src/connector/src/source/kafka/stats.rs
+rdkafka_<PATH>_max	gauge	id,client_id,broker,topic	Maximum value		src/connector/src/source/kafka/stats.rs
+rdkafka_<PATH>_min	gauge	id,client_id,broker,topic	Minimum value		src/connector/src/source/kafka/stats.rs
+rdkafka_<PATH>_out_of_range	gauge	id,client_id,broker,topic	Out of range values		src/connector/src/source/kafka/stats.rs
+rdkafka_<PATH>_p50	gauge	id,client_id,broker,topic	50th percentile		src/connector/src/source/kafka/stats.rs
+rdkafka_<PATH>_p75	gauge	id,client_id,broker,topic	75th percentile		src/connector/src/source/kafka/stats.rs
+rdkafka_<PATH>_p90	gauge	id,client_id,broker,topic	90th percentile		src/connector/src/source/kafka/stats.rs
+rdkafka_<PATH>_p95	gauge	id,client_id,broker,topic	95th percentile		src/connector/src/source/kafka/stats.rs
+rdkafka_<PATH>_p99	gauge	id,client_id,broker,topic	99th percentile		src/connector/src/source/kafka/stats.rs
+rdkafka_<PATH>_p99_99	gauge	id,client_id,broker,topic	99.99th percentile		src/connector/src/source/kafka/stats.rs
+rdkafka_<PATH>_stddev	gauge	id,client_id,broker,topic	Standard deviation		src/connector/src/source/kafka/stats.rs
+rdkafka_<PATH>_sum	gauge	id,client_id,broker,topic	Sum of values		src/connector/src/source/kafka/stats.rs
+rdkafka_broker_buf_grow	gauge	id,client_id,broker,state	Number of times the broker's input buffer has been reallocated		src/connector/src/source/kafka/stats.rs
+rdkafka_broker_connects	gauge	id,client_id,broker,state	Number of connection attempts		src/connector/src/source/kafka/stats.rs
+rdkafka_broker_disconnects	gauge	id,client_id,broker,state	Number of disconnects		src/connector/src/source/kafka/stats.rs
+rdkafka_broker_outbuf_cnt	gauge	id,client_id,broker,state	Number of messages waiting to be sent to broker		src/connector/src/source/kafka/stats.rs
+rdkafka_broker_outbuf_msg_cnt	gauge	id,client_id,broker,state	Number of messages waiting to be sent to broker		src/connector/src/source/kafka/stats.rs
+rdkafka_broker_req	gauge	id,client_id,broker,state,type	Number of requests in flight		src/connector/src/source/kafka/stats.rs
+rdkafka_broker_req_timeouts	gauge	id,client_id,broker,state	Number of request timeouts		src/connector/src/source/kafka/stats.rs
+rdkafka_broker_rx	gauge	id,client_id,broker,state	Number of received messages		src/connector/src/source/kafka/stats.rs
+rdkafka_broker_rx_bytes	gauge	id,client_id,broker,state	Number of received bytes		src/connector/src/source/kafka/stats.rs
+rdkafka_broker_rx_corriderrs	gauge	id,client_id,broker,state	Number of received messages with invalid correlation id		src/connector/src/source/kafka/stats.rs
+rdkafka_broker_rx_errs	gauge	id,client_id,broker,state	Number of failed received messages		src/connector/src/source/kafka/stats.rs
+rdkafka_broker_rx_idle	gauge	id,client_id,broker,state	Number of idle receive connections		src/connector/src/source/kafka/stats.rs
+rdkafka_broker_rx_partial	gauge	id,client_id,broker,state	Number of partial messages received		src/connector/src/source/kafka/stats.rs
+rdkafka_broker_state_age	gauge	id,client_id,broker,state	Age of the broker state in seconds		src/connector/src/source/kafka/stats.rs
+rdkafka_broker_tx	gauge	id,client_id,broker,state	Number of transmitted messages		src/connector/src/source/kafka/stats.rs
+rdkafka_broker_tx_bytes	gauge	id,client_id,broker,state	Number of transmitted bytes		src/connector/src/source/kafka/stats.rs
+rdkafka_broker_tx_errs	gauge	id,client_id,broker,state	Number of failed transmitted messages		src/connector/src/source/kafka/stats.rs
+rdkafka_broker_tx_idle	gauge	id,client_id,broker,state	Number of idle transmit connections		src/connector/src/source/kafka/stats.rs
+rdkafka_broker_tx_retries	gauge	id,client_id,broker,state	Number of message retries		src/connector/src/source/kafka/stats.rs
+rdkafka_broker_waitresp_cnt	gauge	id,client_id,broker,state	Number of requests waiting for response		src/connector/src/source/kafka/stats.rs
+rdkafka_broker_waitresp_msg_cnt	gauge	id,client_id,broker,state	Number of messages waiting for response		src/connector/src/source/kafka/stats.rs
+rdkafka_broker_wakeups	gauge	id,client_id,broker,state	Number of wakeups		src/connector/src/source/kafka/stats.rs
+rdkafka_broker_zbuf_grow	gauge	id,client_id,broker,state	Number of times the broker's output buffer has been reallocated		src/connector/src/source/kafka/stats.rs
+rdkafka_consumer_group_assignment_size	gauge	id,client_id,state	Number of assigned partitions		src/connector/src/source/kafka/stats.rs
+rdkafka_consumer_group_rebalance_age	gauge	id,client_id,state	Age of the last rebalance in seconds		src/connector/src/source/kafka/stats.rs
+rdkafka_consumer_group_rebalance_cnt	gauge	id,client_id,state	Number of rebalances		src/connector/src/source/kafka/stats.rs
+rdkafka_consumer_group_state_age	gauge	id,client_id,state	Age of the consumer group state in seconds		src/connector/src/source/kafka/stats.rs
+rdkafka_top_age	gauge	id,client_id	Age of the topic metadata in milliseconds		src/connector/src/source/kafka/stats.rs
+rdkafka_top_metadata_cache_cnt	gauge	id,client_id	Number of entries in the metadata cache		src/connector/src/source/kafka/stats.rs
+rdkafka_top_msg_cnt	gauge	id,client_id	Number of messages in all topics		src/connector/src/source/kafka/stats.rs
+rdkafka_top_msg_max	gauge	id,client_id	Maximum message size in all topics		src/connector/src/source/kafka/stats.rs
+rdkafka_top_msg_size	gauge	id,client_id	Size of messages in all topics		src/connector/src/source/kafka/stats.rs
+rdkafka_top_msg_size_max	gauge	id,client_id	Maximum message size in all topics		src/connector/src/source/kafka/stats.rs
+rdkafka_top_replyq	gauge	id,client_id	Number of replies waiting to be served		src/connector/src/source/kafka/stats.rs
+rdkafka_top_rx	gauge	id,client_id	Number of received messages		src/connector/src/source/kafka/stats.rs
+rdkafka_top_rx_bytes	gauge	id,client_id	Number of received bytes		src/connector/src/source/kafka/stats.rs
+rdkafka_top_rx_msgs	gauge	id,client_id	Number of received messages		src/connector/src/source/kafka/stats.rs
+rdkafka_top_rx_msgs_bytes	gauge	id,client_id	Number of received bytes		src/connector/src/source/kafka/stats.rs
+rdkafka_top_simple_cnt	gauge	id,client_id	Number of simple consumer queues		src/connector/src/source/kafka/stats.rs
+rdkafka_top_time	gauge	id,client_id	Wall clock time in seconds since the epoch		src/connector/src/source/kafka/stats.rs
+rdkafka_top_ts	gauge	id,client_id	librdkafka's internal monotonic clock (microseconds)		src/connector/src/source/kafka/stats.rs
+rdkafka_top_tx	gauge	id,client_id	Number of transmitted messages		src/connector/src/source/kafka/stats.rs
+rdkafka_top_tx_bytes	gauge	id,client_id	Number of transmitted bytes		src/connector/src/source/kafka/stats.rs
+rdkafka_top_tx_msgs	gauge	id,client_id	Number of transmitted messages		src/connector/src/source/kafka/stats.rs
+rdkafka_top_tx_msgs_bytes	gauge	id,client_id	Number of transmitted bytes		src/connector/src/source/kafka/stats.rs
+rdkafka_topic_metadata_age	gauge	id,client_id,topic	Age of the topic metadata in milliseconds		src/connector/src/source/kafka/stats.rs
+rdkafka_topic_partition_acked_msgid	gauge	id,client_id,topic,partition	Acknowledged message ID		src/connector/src/source/kafka/stats.rs
+rdkafka_topic_partition_app_offset	gauge	id,client_id,topic,partition	Last acknowledged offset		src/connector/src/source/kafka/stats.rs
+rdkafka_topic_partition_committed_offset	gauge	id,client_id,topic,partition	Last committed offset		src/connector/src/source/kafka/stats.rs
+rdkafka_topic_partition_consumer_lag	gauge	id,client_id,topic,partition	Consumer lag		src/connector/src/source/kafka/stats.rs
+rdkafka_topic_partition_consumer_lag_store	gauge	id,client_id,topic,partition	Consumer lag stored		src/connector/src/source/kafka/stats.rs
+rdkafka_topic_partition_eof_offset	gauge	id,client_id,topic,partition	Last offset in broker log		src/connector/src/source/kafka/stats.rs
+rdkafka_topic_partition_fetchq_cnt	gauge	id,client_id,topic,partition	Number of messages in the fetch queue		src/connector/src/source/kafka/stats.rs
+rdkafka_topic_partition_fetchq_size	gauge	id,client_id,topic,partition	Size of messages in the fetch queue		src/connector/src/source/kafka/stats.rs
+rdkafka_topic_partition_hi_offset	gauge	id,client_id,topic,partition	High offset		src/connector/src/source/kafka/stats.rs
+rdkafka_topic_partition_lo_offset	gauge	id,client_id,topic,partition	Low offset		src/connector/src/source/kafka/stats.rs
+rdkafka_topic_partition_msgq_bytes	gauge	id,client_id,topic,partition	Size of messages in the producer queue		src/connector/src/source/kafka/stats.rs
+rdkafka_topic_partition_msgq_cnt	gauge	id,client_id,topic,partition	Number of messages in the producer queue		src/connector/src/source/kafka/stats.rs
+rdkafka_topic_partition_msgs	gauge	id,client_id,topic,partition	Number of messages in partition		src/connector/src/source/kafka/stats.rs
+rdkafka_topic_partition_msgs_inflight	gauge	id,client_id,topic,partition	Number of messages in-flight		src/connector/src/source/kafka/stats.rs
+rdkafka_topic_partition_next_ack_seq	gauge	id,client_id,topic,partition	Next ack sequence number		src/connector/src/source/kafka/stats.rs
+rdkafka_topic_partition_next_err_seq	gauge	id,client_id,topic,partition	Next error sequence number		src/connector/src/source/kafka/stats.rs
+rdkafka_topic_partition_next_offset	gauge	id,client_id,topic,partition	Next offset to query		src/connector/src/source/kafka/stats.rs
+rdkafka_topic_partition_query_offset	gauge	id,client_id,topic,partition	Current query offset		src/connector/src/source/kafka/stats.rs
+rdkafka_topic_partition_rx_ver_drops	gauge	id,client_id,topic,partition	Number of received messages dropped due to version mismatch		src/connector/src/source/kafka/stats.rs
+rdkafka_topic_partition_rxbytes	gauge	id,client_id,topic,partition	Number of received bytes		src/connector/src/source/kafka/stats.rs
+rdkafka_topic_partition_rxmsgs	gauge	id,client_id,topic,partition	Number of received messages		src/connector/src/source/kafka/stats.rs
+rdkafka_topic_partition_stored_offset	gauge	id,client_id,topic,partition	Last stored offset		src/connector/src/source/kafka/stats.rs
+rdkafka_topic_partition_txbytes	gauge	id,client_id,topic,partition	Number of transmitted bytes		src/connector/src/source/kafka/stats.rs
+rdkafka_topic_partition_txmsgs	gauge	id,client_id,topic,partition	Number of transmitted messages		src/connector/src/source/kafka/stats.rs
+rdkafka_topic_partition_xmit_msgq_bytes	gauge	id,client_id,topic,partition	Size of messages in the transmit queue		src/connector/src/source/kafka/stats.rs
+rdkafka_topic_partition_xmit_msgq_cnt	gauge	id,client_id,topic,partition	Number of messages in the transmit queue		src/connector/src/source/kafka/stats.rs
+file_source_dirty_split_count	gauge	source_id,source_name,actor_id,fragment_id	Current number of dirty file splits in file source		src/connector/src/source/monitor/metrics.rs
+file_source_failed_split_count	counter	source_id,source_name,actor_id,fragment_id	Total number of file splits marked dirty in file source		src/connector/src/source/monitor/metrics.rs
+file_source_input_row_count	counter	source_id,source_name,actor_id,fragment_id	Total number of rows that have been read in file source		src/connector/src/source/monitor/metrics.rs
+kinesis_early_terminate_shard_count	counter	source_id,source_name,fragment_id,shard_id	Total number of times early terminate shard in kinesis source		src/connector/src/source/monitor/metrics.rs
+kinesis_lag_latency_ms	histogram	source_id,source_name,fragment_id,shard_id	Lag latency in kinesis source		src/connector/src/source/monitor/metrics.rs
+kinesis_rebuild_shard_iter_count	counter	source_id,source_name,fragment_id,shard_id	Total number of times rebuild shard iter in kinesis source		src/connector/src/source/monitor/metrics.rs
+kinesis_throughput_exceeded_count	counter	source_id,source_name,fragment_id,shard_id	Total number of times throughput exceeded in kinesis source		src/connector/src/source/monitor/metrics.rs
+kinesis_timeout_count	counter	source_id,source_name,fragment_id,shard_id	Total number of times timeout in kinesis source		src/connector/src/source/monitor/metrics.rs
+mysql_cdc_binlog_file_seq_max	gauge	source_id,hostname,port	MySQL CDC upstream binlog file sequence number (maximum/newest)		src/connector/src/source/monitor/metrics.rs
+mysql_cdc_binlog_file_seq_min	gauge	source_id,hostname,port	MySQL CDC upstream binlog file sequence number (minimum/oldest)		src/connector/src/source/monitor/metrics.rs
+parquet_source_skip_row_count	counter	actor_id,source_id,source_name,fragment_id	Total number of rows that have been set to null in parquet source		src/connector/src/source/monitor/metrics.rs
+pg_cdc_confirmed_flush_lsn	gauge	source_id,slot_name	PostgreSQL CDC confirmed flush LSN		src/connector/src/source/monitor/metrics.rs
+pg_cdc_upstream_max_lsn	gauge	source_id,slot_name	PostgreSQL CDC upstream max LSN (pg_current_wal_lsn)		src/connector/src/source/monitor/metrics.rs
+source_cdc_event_lag_duration_milliseconds	histogram	table_name	source_cdc_lag_latency		src/connector/src/source/monitor/metrics.rs
+source_connector_ack_failure_count	counter	source_name,connector_type,error_type	Total number of ack failures during checkpoint for source connectors		src/connector/src/source/monitor/metrics.rs
+source_kafka_high_watermark	gauge	source_id,partition	High watermark for a exec per partition		src/connector/src/source/monitor/metrics.rs
+source_latest_message_id	gauge	source_id,actor_id,partition	Latest message id for a exec per partition		src/connector/src/source/monitor/metrics.rs
+source_partition_eof_count	counter	source_id,partition,source_name,fragment_id	Total number of EOF events received from specific partition		src/connector/src/source/monitor/metrics.rs
+source_partition_eof_offset	gauge	source_id,partition,source_name,fragment_id	Latest resolved EOF offset for specific partition		src/connector/src/source/monitor/metrics.rs
+source_partition_input_bytes	counter	actor_id,source_id,partition,source_name,fragment_id	Total bytes that have been input from specific partition		src/connector/src/source/monitor/metrics.rs
+source_partition_input_count	counter	actor_id,source_id,partition,source_name,fragment_id	Total number of rows that have been input from specific partition		src/connector/src/source/monitor/metrics.rs
+sqlserver_cdc_upstream_max_lsn	gauge	source_id	SQL Server CDC upstream maximum LSN		src/connector/src/source/monitor/metrics.rs
+sqlserver_cdc_upstream_min_lsn	gauge	source_id	SQL Server CDC upstream minimum LSN		src/connector/src/source/monitor/metrics.rs
+udf_failure_count	counter	link,language,name,fragment_id	Total number of failed UDF calls		src/expr/core/src/expr/expr_udf.rs
+udf_input_bytes	counter	link,language,name,fragment_id	Total number of input bytes of UDF calls		src/expr/core/src/expr/expr_udf.rs
+udf_input_chunk_rows	histogram	link,language,name,fragment_id	Input chunk rows of UDF calls		src/expr/core/src/expr/expr_udf.rs
+udf_input_rows	counter	link,language,name,fragment_id	Total number of input rows of UDF calls		src/expr/core/src/expr/expr_udf.rs
+udf_latency	histogram	link,language,name,fragment_id	The latency(s) of UDF calls		src/expr/core/src/expr/expr_udf.rs
+udf_memory_usage	gauge	link,language,name,fragment_id,instance_id	Total memory usage of UDF runtime in bytes		src/expr/core/src/expr/expr_udf.rs
+udf_retry_count	counter	link,language,name,fragment_id	Total number of retried UDF calls		src/expr/core/src/expr/expr_udf.rs
+udf_success_count	counter	link,language,name,fragment_id	Total number of successful UDF calls		src/expr/core/src/expr/expr_udf.rs
+datafusion_completed_query_counter	counter		Total completed query number for DataFusion batch engine		src/frontend/src/datafusion/metrics.rs
+datafusion_failed_query_counter	counter		Total failed query number for DataFusion batch engine		src/frontend/src/datafusion/metrics.rs
+datafusion_latency	histogram		latency for DataFusion batch engine		src/frontend/src/datafusion/metrics.rs
+frontend_active_sessions	gauge		Total number of active sessions in frontend		src/frontend/src/monitor/stats.rs
+frontend_batch_total_mem	gauge		All memory usage of batch executors in bytes		src/frontend/src/monitor/stats.rs
+frontend_latency_local_execution	histogram		latency of local execution mode for RisingWave batch engine		src/frontend/src/monitor/stats.rs
+frontend_query_counter_local_execution	counter		Total query number of local execution mode for RisingWave batch engine		src/frontend/src/monitor/stats.rs
+invalid_subscription_cursor_nums	gauge		The number of invalid subscription cursor		src/frontend/src/monitor/stats.rs
+subscription_cursor_declare_duration	histogram	subscription_name	Subscription cursor duration of declare		src/frontend/src/monitor/stats.rs
+subscription_cursor_error_count	counter		The subscription error num of cursor		src/frontend/src/monitor/stats.rs
+subscription_cursor_fetch_duration	histogram	subscription_name	Subscription cursor duration of fetch		src/frontend/src/monitor/stats.rs
+subscription_cursor_last_fetch_duration	histogram	subscription_name	Since the last fetch, the time up to now		src/frontend/src/monitor/stats.rs
+subscription_cursor_nums	gauge		The number of subscription cursor		src/frontend/src/monitor/stats.rs
+subscription_cursor_query_duration	histogram	subscription_name	The amount of time a query exists inside the cursor		src/frontend/src/monitor/stats.rs
+distributed_completed_query_counter	counter		The number of query ended successfully in distributed execution mode		src/frontend/src/scheduler/distributed/stats.rs
+distributed_query_latency	histogram		latency of query executed successfully in distributed execution mode		src/frontend/src/scheduler/distributed/stats.rs
+distributed_rejected_query_counter	counter		The number of rejected query in distributed execution mode. 		src/frontend/src/scheduler/distributed/stats.rs
+distributed_running_query_num	gauge		The number of running query of distributed execution mode		src/frontend/src/scheduler/distributed/stats.rs
+backup_job_count	counter		total backup job count since meta node is started		src/meta/src/backup_restore/metrics.rs
+backup_job_latency	histogram	state	latency of backup jobs since meta node is started		src/meta/src/backup_restore/metrics.rs
+actor_info	gauge	actor_id,fragment_id,compute_node	Mapping from actor id to (fragment id, compute node)		src/meta/src/rpc/metrics.rs
+all_barrier_nums	gauge	database_id	num of of all_barrier		src/meta/src/rpc/metrics.rs
+auto_schema_change_failure_cnt	counter	table_id,table_name	Number of failed auto schema change		src/meta/src/rpc/metrics.rs
+auto_schema_change_latency	histogram	table_id,table_name	Latency of the auto schema change process		src/meta/src/rpc/metrics.rs
+auto_schema_change_success_cnt	counter	table_id,table_name	Number of success auto schema change		src/meta/src/rpc/metrics.rs
+backfill_fragment_progress	gauge	job_id,fragment_id,backfill_state_table_id,backfill_target_relation_id,backfill_target_relation_name,backfill_target_relation_type,backfill_type,backfill_epoch,upstream_type,backfill_progress	Backfill progress per fragment		src/meta/src/rpc/metrics.rs
+database_info	gauge	database_id,database_name	Mapping from database id to database name		src/meta/src/rpc/metrics.rs
+hummock_manager_lock_time	histogram	lock_name,lock_type	latency for hummock manager to acquire the rwlock		src/meta/src/rpc/metrics.rs
+in_flight_barrier_nums	gauge	database_id	num of of in_flight_barrier		src/meta/src/rpc/metrics.rs
+last_committed_barrier_time	gauge	database_id	The timestamp (UNIX epoch seconds) of the last committed barrier's epoch time.		src/meta/src/rpc/metrics.rs
+meta_barrier_duration_seconds	histogram	database_id	barrier latency		src/meta/src/rpc/metrics.rs
+meta_barrier_interval_by_database	gauge	database_id	barrier interval of each database		src/meta/src/rpc/metrics.rs
+meta_barrier_send_duration_seconds	histogram	database_id	barrier send latency		src/meta/src/rpc/metrics.rs
+meta_barrier_wait_commit_duration_seconds	histogram		barrier_wait_commit_latency		src/meta/src/rpc/metrics.rs
+meta_grpc_duration_seconds	histogram	path	gRPC latency of meta services		src/meta/src/rpc/metrics.rs
+meta_hummock_manager_real_process_time	histogram	method	latency for hummock manager to really process the request		src/meta/src/rpc/metrics.rs
+meta_num	gauge	worker_addr,role	role of meta nodes in the cluster		src/meta/src/rpc/metrics.rs
+meta_refresh_cron_job_miss_cnt	counter	table_id	The number of cron refresh jobs missed		src/meta/src/rpc/metrics.rs
+meta_refresh_cron_job_trigger_cnt	counter	table_id	The number of cron refresh jobs triggered		src/meta/src/rpc/metrics.rs
+meta_refresh_job_duration	gauge	table_id,status	The duration of refresh job		src/meta/src/rpc/metrics.rs
+meta_refresh_job_finish_cnt	counter	table_id,status	The number of finished refresh jobs		src/meta/src/rpc/metrics.rs
+meta_snapshot_backfill_barrier_duration_seconds	histogram	table_id,barrier_type	snapshot backfill barrier latency		src/meta/src/rpc/metrics.rs
+meta_snapshot_backfill_inflight_barrier_num	gauge	table_id	snapshot backfill inflight_barrier_num		src/meta/src/rpc/metrics.rs
+meta_snapshot_backfill_upstream_lag	gauge	table_id	snapshot backfill upstream_lag		src/meta/src/rpc/metrics.rs
+recovery_failure_cnt	counter	recovery_type	Number of failed recovery attempts		src/meta/src/rpc/metrics.rs
+recovery_latency	histogram	recovery_type	Latency of the recovery process		src/meta/src/rpc/metrics.rs
+relation_info	gauge	id,database,schema,name,resource_group,type	Information of the database relation (table/source/sink/materialized view/index/internal)		src/meta/src/rpc/metrics.rs
+sink_info	gauge	actor_id,sink_id,sink_name	Mapping from actor id to (actor id, sink name)		src/meta/src/rpc/metrics.rs
+source_status_is_up	gauge	source_id,source_name	source is up or not		src/meta/src/rpc/metrics.rs
+storage_branched_sst_count	gauge	group	Count of branched sst per compaction group		src/meta/src/rpc/metrics.rs
+storage_checkpoint_version_id	gauge		checkpoint version id		src/meta/src/rpc/metrics.rs
+storage_commit_write_throughput	counter	table_id	The number of compactions from one level to another level that have been skipped.		src/meta/src/rpc/metrics.rs
+storage_compact_level_compression_ratio	gauge	group,level,algorithm	compression ratio of each level of the lsm tree		src/meta/src/rpc/metrics.rs
+storage_compact_pending_bytes	gauge	group	bytes of lsm tree needed to reach balance		src/meta/src/rpc/metrics.rs
+storage_compact_task_batch_count	histogram	type	count of compact task batch		src/meta/src/rpc/metrics.rs
+storage_compact_task_file_count	histogram	group,type	file count of compact task		src/meta/src/rpc/metrics.rs
+storage_compact_task_size	histogram	group,type	Total size of compact that have been issued to state store		src/meta/src/rpc/metrics.rs
+storage_compact_task_trivial_move_sst_count	histogram	group	sst count of compact trivial-move task		src/meta/src/rpc/metrics.rs
+storage_compaction_event_consumed_latency	histogram		The latency(ms) of each event being consumed		src/meta/src/rpc/metrics.rs
+storage_compaction_event_loop_iteration_latency	histogram		The latency(ms) of each iteration of the compaction event loop		src/meta/src/rpc/metrics.rs
+storage_compaction_group_count	gauge		The number of compaction groups		src/meta/src/rpc/metrics.rs
+storage_compaction_group_file_count	gauge	group	The file count of compaction group		src/meta/src/rpc/metrics.rs
+storage_compaction_group_size	gauge	group	The size of compaction group		src/meta/src/rpc/metrics.rs
+storage_compaction_group_throughput	gauge	group	The throughput of compaction group		src/meta/src/rpc/metrics.rs
+storage_current_version_id	gauge		current version id		src/meta/src/rpc/metrics.rs
+storage_current_version_object_count	gauge		total number of objects that is referenced by current version		src/meta/src/rpc/metrics.rs
+storage_current_version_object_size	gauge		total size of objects that is referenced by current version		src/meta/src/rpc/metrics.rs
+storage_delta_log_count	gauge		total number of hummock version delta log		src/meta/src/rpc/metrics.rs
+storage_full_gc_candidate_object_count	histogram		the number of candidate object to delete after scanning object store		src/meta/src/rpc/metrics.rs
+storage_full_gc_selected_object_count	histogram		the number of object to delete after filtering by meta node		src/meta/src/rpc/metrics.rs
+storage_full_gc_trigger_count	gauge		the number of attempts to trigger full GC		src/meta/src/rpc/metrics.rs
+storage_l0_compact_level_count	histogram	group,type	level_count of l0 compact task		src/meta/src/rpc/metrics.rs
+storage_level_compact_cnt	gauge	level_index	num of SSTs to be merged to next level in each level		src/meta/src/rpc/metrics.rs
+storage_level_compact_frequency	counter	compactor,group,task_type,result	The number of compactions from one level to another level that have completed or failed.		src/meta/src/rpc/metrics.rs
+storage_level_compact_task_cnt	gauge	task	num of compact_task organized by group and level		src/meta/src/rpc/metrics.rs
+storage_level_sst_num	gauge	level_index	num of SSTs in each level		src/meta/src/rpc/metrics.rs
+storage_level_total_file_size	gauge	level_index	KBs total file bytes in each level		src/meta/src/rpc/metrics.rs
+storage_materialized_view_stats	gauge	table_id,metric	per materialized view stats in current hummock version		src/meta/src/rpc/metrics.rs
+storage_max_committed_epoch	gauge		max committed epoch		src/meta/src/rpc/metrics.rs
+storage_merge_compaction_group_count	counter	group	Count of trigger merge compaction group		src/meta/src/rpc/metrics.rs
+storage_min_committed_epoch	gauge		min committed epoch		src/meta/src/rpc/metrics.rs
+storage_min_pinned_version_id	gauge		min pinned version id		src/meta/src/rpc/metrics.rs
+storage_min_safepoint_version_id	gauge		min safepoint version id		src/meta/src/rpc/metrics.rs
+storage_old_version_object_count	gauge		total number of objects that is still referenced by non-current versions		src/meta/src/rpc/metrics.rs
+storage_old_version_object_size	gauge		total size of objects that is still referenced by non-current versions		src/meta/src/rpc/metrics.rs
+storage_skip_compact_frequency	counter	level,type	The number of compactions from one level to another level that have been skipped.		src/meta/src/rpc/metrics.rs
+storage_split_compaction_group_count	counter	group	Count of trigger split compaction group		src/meta/src/rpc/metrics.rs
+storage_stale_object_count	gauge		total number of objects that is no longer referenced by versions.		src/meta/src/rpc/metrics.rs
+storage_stale_object_size	gauge		total size of objects that is no longer referenced by versions.		src/meta/src/rpc/metrics.rs
+storage_state_table_count	gauge	group	Count of stable table per compaction group		src/meta/src/rpc/metrics.rs
+storage_table_change_log_min_epoch	gauge	table_id	min epoch currently retained in table change log		src/meta/src/rpc/metrics.rs
+storage_table_change_log_object_count	gauge	table_id	per table change log object count		src/meta/src/rpc/metrics.rs
+storage_table_change_log_object_size	gauge	table_id	per table change log object size		src/meta/src/rpc/metrics.rs
+storage_time_travel_object_count	gauge		total number of objects that is referenced by time travel.		src/meta/src/rpc/metrics.rs
+storage_time_travel_vacuum_metadata_latency	histogram		Latency of vacuuming metadata for time travel		src/meta/src/rpc/metrics.rs
+storage_time_travel_version_replay_latency	histogram		The latency(ms) of replaying a hummock version for time travel		src/meta/src/rpc/metrics.rs
+storage_time_travel_write_metadata_latency	histogram		Latency of writing metadata for time travel		src/meta/src/rpc/metrics.rs
+storage_total_object_count	gauge		Total number of objects that includes dangling objects. Note that the metric is updated right before full GC. So subsequent full GC may reduce the actual value significantly, without updating the metric.		src/meta/src/rpc/metrics.rs
+storage_total_object_size	gauge		Total size of objects that includes dangling objects. Note that the metric is updated right before full GC. So subsequent full GC may reduce the actual value significantly, without updating the metric.		src/meta/src/rpc/metrics.rs
+storage_version_checkpoint_latency	histogram		hummock version checkpoint latency		src/meta/src/rpc/metrics.rs
+storage_version_size	gauge		version size		src/meta/src/rpc/metrics.rs
+storage_version_stats	gauge	table_id,metric	per table stats in current hummock version		src/meta/src/rpc/metrics.rs
+storage_write_stop_compaction_groups	gauge	compaction_group_id	compaction groups of write stop state		src/meta/src/rpc/metrics.rs
+system_param_info	gauge	name,value	Information of system parameters		src/meta/src/rpc/metrics.rs
+table_info	gauge	materialized_view_id,table_id,fragment_id,table_name,table_type,compaction_group_id	Mapping from table id to (actor id, table name)		src/meta/src/rpc/metrics.rs
+worker_num	gauge	worker_type	number of nodes in the cluster		src/meta/src/rpc/metrics.rs
+object_store_failure_count	counter	type	The number of failures of object store operations		src/object_store/src/object/object_metrics.rs
+object_store_operation_bytes	histogram	type	Size of operation result on object store		src/object_store/src/object/object_metrics.rs
+object_store_operation_latency	histogram	media_type,type	Total latency of operation on object store		src/object_store/src/object/object_metrics.rs
+object_store_read_bytes	counter		Total bytes of requests read from object store		src/object_store/src/object/object_metrics.rs
+object_store_request_retry_count	counter	type	The number of retry times of object store request		src/object_store/src/object/object_metrics.rs
+object_store_write_bytes	counter		Total bytes of requests read from object store		src/object_store/src/object/object_metrics.rs
+refill_bytes	counter	type,op	refill bytes		src/storage/src/hummock/event_handler/refiller.rs
+refill_duration	histogram	type,op	refill duration		src/storage/src/hummock/event_handler/refiller.rs
+refill_queue_total	gauge		refill queue total		src/storage/src/hummock/event_handler/refiller.rs
+refill_total	counter	type,op	refill total		src/storage/src/hummock/event_handler/refiller.rs
+recent_filter_items	gauge		Item numbers of the recent filter.		src/storage/src/hummock/recent_filter/mod.rs
+recent_filter_ops	counter	op	Ops of the recent filter.		src/storage/src/hummock/recent_filter/mod.rs
+compactor_compact_sst_duration	histogram		Total time of compact_key_range that have been issued to state store		src/storage/src/monitor/compactor_metrics.rs
+compactor_compact_task_duration	histogram	group,level	Total time of compact that have been issued to state store		src/storage/src/monitor/compactor_metrics.rs
+compactor_compaction_event_consumed_latency	histogram		The latency of each event being consumed		src/storage/src/monitor/compactor_metrics.rs
+compactor_compaction_event_loop_iteration_latency	histogram		The latency of each iteration of the compaction event loop		src/storage/src/monitor/compactor_metrics.rs
+compactor_compaction_upload_sst_counts	counter		Total number of sst uploads during compaction		src/storage/src/monitor/compactor_metrics.rs
+compactor_fast_compact_bytes	counter		Total size of compaction files size of fast compactor runner		src/storage/src/monitor/compactor_metrics.rs
+compactor_get_table_id_total_time_duration	histogram		Total time of compact that have been issued to state store		src/storage/src/monitor/compactor_metrics.rs
+compactor_iter_scan_key_counts	counter	type	Total number of keys read by iterator		src/storage/src/monitor/compactor_metrics.rs
+compactor_remote_read_time	histogram		Total time of operations which read from remote storage when enable prefetch		src/storage/src/monitor/compactor_metrics.rs
+compactor_shared_buffer_to_sstable_size	histogram		Histogram of batch size compacted from shared buffer to remote storage		src/storage/src/monitor/compactor_metrics.rs
+compactor_sstable_avg_key_size	histogram		Total bytes gotten from sstable_avg_key_size, for observing sstable_avg_key_size		src/storage/src/monitor/compactor_metrics.rs
+compactor_sstable_avg_value_size	histogram		Total bytes gotten from sstable_avg_value_size, for observing sstable_avg_value_size		src/storage/src/monitor/compactor_metrics.rs
+compactor_sstable_block_size	histogram		Total bytes gotten from sstable_block_size, for observing sstable_block_size		src/storage/src/monitor/compactor_metrics.rs
+compactor_sstable_bloom_filter_size	histogram		Total bytes gotten from sstable_bloom_filter, for observing bloom_filter size		src/storage/src/monitor/compactor_metrics.rs
+compactor_sstable_distinct_epoch_count	histogram		Total number gotten from sstable_distinct_epoch_count, for observing sstable_distinct_epoch_count		src/storage/src/monitor/compactor_metrics.rs
+compactor_sstable_file_size	histogram		Total bytes gotten from sstable_file_size, for observing sstable_file_size		src/storage/src/monitor/compactor_metrics.rs
+compactor_write_build_l0_bytes	counter		Total size of compaction files size that have been written to object store from shared buffer		src/storage/src/monitor/compactor_metrics.rs
+state_store_write_build_l0_sst_duration	histogram		Total time of batch_write_build_table that have been issued to state store		src/storage/src/monitor/compactor_metrics.rs
+storage_compact_task_pending_num	gauge		the num of storage compact task		src/storage/src/monitor/compactor_metrics.rs
+storage_compact_task_pending_parallelism	gauge		the num of storage compact parallelism		src/storage/src/monitor/compactor_metrics.rs
+storage_level_compact_read_curr	counter	group,level_index	KBs read from current level during history compactions to next level		src/storage/src/monitor/compactor_metrics.rs
+storage_level_compact_read_next	counter	group,level_index	KBs read from next level during history compactions to next level		src/storage/src/monitor/compactor_metrics.rs
+storage_level_compact_read_sstn_curr	counter	group,level_index	num of SSTs read from current level during history compactions to next level		src/storage/src/monitor/compactor_metrics.rs
+storage_level_compact_read_sstn_next	counter	group,level_index	num of SSTs read from next level during history compactions to next level		src/storage/src/monitor/compactor_metrics.rs
+storage_level_compact_write	counter	group,level_index	KBs written into next level during history compactions to next level		src/storage/src/monitor/compactor_metrics.rs
+storage_level_compact_write_sstn	counter	group,level_index	num of SSTs written into next level during history compactions to next level		src/storage/src/monitor/compactor_metrics.rs
+state_store_get_new_sst_ids_counts	counter		Total number of get_new_table_id requests that have been issued to state store		src/storage/src/monitor/hummock_metrics.rs
+state_store_get_new_sst_ids_latency	histogram		Total latency of get new table id that have been issued to state store		src/storage/src/monitor/hummock_metrics.rs
+state_store_report_compaction_task_counts	counter		Total number of report_compaction_task requests that have been issued to state store		src/storage/src/monitor/hummock_metrics.rs
+state_store_report_compaction_task_latency	histogram		Total latency of report compaction task that have been issued to state store		src/storage/src/monitor/hummock_metrics.rs
+block_efficiency_histogram	histogram		Access ratio of in-memory block.		src/storage/src/monitor/hummock_state_store_metrics.rs
+state_store_block_cache_size	gauge		the size of cache for data block cache		src/storage/src/monitor/hummock_state_store_metrics.rs
+state_store_block_cache_usage_ratio	gauge		the ratio of block cache to it's pre-allocated memory		src/storage/src/monitor/hummock_state_store_metrics.rs
+state_store_bloom_filter_check_counts	counter	table_id,type	Total number of read request to check bloom filters		src/storage/src/monitor/hummock_state_store_metrics.rs
+state_store_bloom_filter_true_negative_counts	counter	table_id,type	Total number of sstables that have been considered true negative by bloom filters		src/storage/src/monitor/hummock_state_store_metrics.rs
+state_store_event_handler_latency	histogram	event_type	Latency to handle event		src/storage/src/monitor/hummock_state_store_metrics.rs
+state_store_event_handler_pending_event	gauge	event_type	The number of sent but unhandled events		src/storage/src/monitor/hummock_state_store_metrics.rs
+state_store_get_shared_buffer_hit_counts	counter	table_id	Total number of get requests that have been fulfilled by shared buffer		src/storage/src/monitor/hummock_state_store_metrics.rs
+state_store_iter_fetch_meta_cache_unhits	gauge		Number of SST meta cache unhit during one iterator meta fetch		src/storage/src/monitor/hummock_state_store_metrics.rs
+state_store_iter_fetch_meta_duration	histogram	table_id	Histogram of iterator fetch SST meta time that have been issued to state store		src/storage/src/monitor/hummock_state_store_metrics.rs
+state_store_iter_merge_sstable_counts	histogram	table_id,type	Number of child iterators merged into one MergeIterator		src/storage/src/monitor/hummock_state_store_metrics.rs
+state_store_iter_scan_key_counts	counter	table_id,type	Total number of keys read by iterator		src/storage/src/monitor/hummock_state_store_metrics.rs
+state_store_iter_slow_fetch_meta_cache_unhits	gauge		Number of SST meta cache unhit during a iterator meta fetch which is slow (costs >5 seconds)		src/storage/src/monitor/hummock_state_store_metrics.rs
+state_store_mem_table_spill_counts	counter	table_id	Total number of mem table spill occurs for one table		src/storage/src/monitor/hummock_state_store_metrics.rs
+state_store_meta_cache_size	gauge		the size of cache for meta file cache		src/storage/src/monitor/hummock_state_store_metrics.rs
+state_store_meta_cache_usage_ratio	gauge		the ratio of meta cache to it's pre-allocated memory		src/storage/src/monitor/hummock_state_store_metrics.rs
+state_store_old_value_size	gauge	table_id	The size of old value		src/storage/src/monitor/hummock_state_store_metrics.rs
+state_store_per_table_imm_count	gauge	table_id	Total imm count per table		src/storage/src/monitor/hummock_state_store_metrics.rs
+state_store_per_table_imm_size	gauge	table_id,fragment_id	Total imm size per table		src/storage/src/monitor/hummock_state_store_metrics.rs
+state_store_prefetch_memory_size	gauge		the size of prefetch memory usage		src/storage/src/monitor/hummock_state_store_metrics.rs
+state_store_read_req_bloom_filter_positive_counts	counter	table_id,type	Total number of read request with at least one SST bloom filter check returns positive		src/storage/src/monitor/hummock_state_store_metrics.rs
+state_store_read_req_check_bloom_filter_counts	counter	table_id,type	Total number of read request that checks bloom filter with a prefix hint		src/storage/src/monitor/hummock_state_store_metrics.rs
+state_store_read_req_positive_but_non_exist_counts	counter	table_id,type	Total number of read request on non-existent key/prefix with at least one SST bloom filter check returns positive		src/storage/src/monitor/hummock_state_store_metrics.rs
+state_store_remote_read_time_per_task	histogram	table_id	Total time of operations which read from remote storage when enable prefetch		src/storage/src/monitor/hummock_state_store_metrics.rs
+state_store_safe_version_hit	counter		The total count of a safe version that can be retrieved successfully		src/storage/src/monitor/hummock_state_store_metrics.rs
+state_store_safe_version_miss	counter		The total count of a safe version that cannot be retrieved		src/storage/src/monitor/hummock_state_store_metrics.rs
+state_store_spill_task_counts	counter	uploader_stage	Total number of started spill tasks		src/storage/src/monitor/hummock_state_store_metrics.rs
+state_store_spill_task_size	counter	uploader_stage	Total task of started spill tasks		src/storage/src/monitor/hummock_state_store_metrics.rs
+state_store_sst_store_block_request_counts	counter	table_id,type	Total number of sst block requests that have been issued to sst store		src/storage/src/monitor/hummock_state_store_metrics.rs
+state_store_uploader_imm_size	gauge		Total size of imms tracked by uploader		src/storage/src/monitor/hummock_state_store_metrics.rs
+state_store_uploader_per_table_imm_count	gauge	table_id	Total uploader-tracked imm count per table		src/storage/src/monitor/hummock_state_store_metrics.rs
+state_store_uploader_per_table_imm_size	gauge	table_id	Total uploader-tracked imm size per table		src/storage/src/monitor/hummock_state_store_metrics.rs
+state_store_uploader_syncing_epoch_count	gauge		Total number of syncing epoch		src/storage/src/monitor/hummock_state_store_metrics.rs
+state_store_uploader_upload_task_latency	histogram		Latency of uploader uploading tasks		src/storage/src/monitor/hummock_state_store_metrics.rs
+state_store_uploader_uploading_task_count	gauge		Total number of uploader uploading tasks		src/storage/src/monitor/hummock_state_store_metrics.rs
+state_store_uploader_uploading_task_size	gauge		Total size of uploader uploading tasks		src/storage/src/monitor/hummock_state_store_metrics.rs
+state_store_uploader_wait_poll_latency	histogram		Latency of upload uploading task being polled after finish		src/storage/src/monitor/hummock_state_store_metrics.rs
+state_store_uploading_memory_usage_ratio	gauge		the ratio of uploading SSTs memory usage to it's pre-allocated memory		src/storage/src/monitor/hummock_state_store_metrics.rs
+state_store_vector_data_cache_size	gauge		the size of cache for vector data file cache		src/storage/src/monitor/hummock_state_store_metrics.rs
+state_store_vector_data_cache_usage_ratio	gauge		the ratio of vector data cache to it's pre-allocated memory		src/storage/src/monitor/hummock_state_store_metrics.rs
+state_store_vector_hnsw_graph_level_node_count	gauge	table_id,level	Number of nodes in each level of hnsw graph		src/storage/src/monitor/hummock_state_store_metrics.rs
+state_store_vector_index_file_count	gauge	table_id	Number of vector file		src/storage/src/monitor/hummock_state_store_metrics.rs
+state_store_vector_index_file_size	gauge	table_id,type	total size of vector index file		src/storage/src/monitor/hummock_state_store_metrics.rs
+state_store_vector_meta_cache_size	gauge		the size of cache for vector meta file cache		src/storage/src/monitor/hummock_state_store_metrics.rs
+state_store_vector_meta_cache_usage_ratio	gauge		the ratio of vector meta cache to it's pre-allocated memory		src/storage/src/monitor/hummock_state_store_metrics.rs
+state_store_vector_object_request_counts	counter	table_id,type,mode	Metrics about vector object requests that have been issued		src/storage/src/monitor/hummock_state_store_metrics.rs
+state_store_vector_request_stats	histogram	table_id,type,mode,top_n,ef	Metrics about vector requests		src/storage/src/monitor/hummock_state_store_metrics.rs
+state_store_vnode_pruning_counts	counter	table_id,operation,result	Total number of SST pruning operations by vnode key range hints		src/storage/src/monitor/hummock_state_store_metrics.rs
+state_store_write_batch_duration	histogram	table_id	Total time of batched write that have been issued to state store. With shared buffer on, this is the latency writing to the shared buffer		src/storage/src/monitor/hummock_state_store_metrics.rs
+state_store_write_batch_size	histogram	table_id	Total size of batched write that have been issued to state store		src/storage/src/monitor/hummock_state_store_metrics.rs
+state_store_write_batch_tuple_counts	counter	table_id	Total number of batched write kv pairs requests that have been issued to state store		src/storage/src/monitor/hummock_state_store_metrics.rs
+uploading_memory_size	gauge		the size of uploading SSTs memory usage		src/storage/src/monitor/hummock_state_store_metrics.rs
+state_store_get_duration	histogram	table_id	Total latency of get that have been issued to state store		src/storage/src/monitor/monitored_storage_metrics.rs
+state_store_get_key_size	histogram	table_id	Total key bytes of get that have been issued to state store		src/storage/src/monitor/monitored_storage_metrics.rs
+state_store_get_value_size	histogram	table_id	Total value bytes that have been requested from remote storage		src/storage/src/monitor/monitored_storage_metrics.rs
+state_store_iter_counts	counter	table_id,iter_type	Total number of iter that have been issued to state store		src/storage/src/monitor/monitored_storage_metrics.rs
+state_store_iter_in_progress_counts	gauge	table_id,iter_type	Total number of existing iter		src/storage/src/monitor/monitored_storage_metrics.rs
+state_store_iter_init_duration	histogram	table_id,iter_type	Histogram of the time spent on iterator initialization.		src/storage/src/monitor/monitored_storage_metrics.rs
+state_store_iter_item	histogram	table_id,iter_type	Total bytes gotten from state store scan(), for calculating read throughput		src/storage/src/monitor/monitored_storage_metrics.rs
+state_store_iter_log_op_type_counts	counter	table_id,op_type	Counter of each op type in iter_log		src/storage/src/monitor/monitored_storage_metrics.rs
+state_store_iter_scan_duration	histogram	table_id,iter_type	Histogram of the time spent on iterator scanning.		src/storage/src/monitor/monitored_storage_metrics.rs
+state_store_iter_size	histogram	table_id,iter_type	Total bytes gotten from state store scan(), for calculating read throughput		src/storage/src/monitor/monitored_storage_metrics.rs
+state_store_sync_duration	histogram		Histogram of time spent on compacting shared buffer to remote storage		src/storage/src/monitor/monitored_storage_metrics.rs
+state_store_sync_size	histogram		Total size of upload to l0 every epoch		src/storage/src/monitor/monitored_storage_metrics.rs
+state_store_vector_nearest_duration	histogram	table_id,top_n,ef_search	Total latency of vector nearest that have been issued to state store		src/storage/src/monitor/monitored_storage_metrics.rs
+crossdb_last_consumed_min_epoch	gauge	table_id,actor_id,fragment_id	Last consumed min epoch for cross-database changelog stream scan		src/stream/src/executor/monitor/streaming_stats.rs
+gap_fill_generated_rows_count	counter	actor_id,fragment_id	Total number of rows generated by gap fill executor		src/stream/src/executor/monitor/streaming_stats.rs
+jemalloc_active_bytes	gauge		The active memory jemalloc, got from jemalloc_ctl		src/stream/src/executor/monitor/streaming_stats.rs
+jemalloc_allocated_bytes	gauge		The allocated memory jemalloc, got from jemalloc_ctl		src/stream/src/executor/monitor/streaming_stats.rs
+jemalloc_metadata_bytes	gauge		The active memory jemalloc, got from jemalloc_ctl		src/stream/src/executor/monitor/streaming_stats.rs
+jemalloc_resident_bytes	gauge		The active memory jemalloc, got from jemalloc_ctl		src/stream/src/executor/monitor/streaming_stats.rs
+jvm_active_bytes	gauge		The active jvm memory		src/stream/src/executor/monitor/streaming_stats.rs
+jvm_allocated_bytes	gauge		The allocated jvm memory		src/stream/src/executor/monitor/streaming_stats.rs
+kv_log_store_buffer_memory_bytes	gauge	actor_id,connector,sink_id,sink_name	Estimated heap bytes used by kv log store buffer (unconsumed + consumed but not truncated)		src/stream/src/executor/monitor/streaming_stats.rs
+kv_log_store_buffer_unconsumed_epoch_count	gauge	actor_id,connector,sink_id,sink_name	Number of Unconsumed Epoch in buffer		src/stream/src/executor/monitor/streaming_stats.rs
+kv_log_store_buffer_unconsumed_item_count	gauge	actor_id,connector,sink_id,sink_name	Number of Unconsumed Item in buffer		src/stream/src/executor/monitor/streaming_stats.rs
+kv_log_store_buffer_unconsumed_min_epoch	gauge	actor_id,connector,sink_id,sink_name	Number of Unconsumed Epoch in buffer		src/stream/src/executor/monitor/streaming_stats.rs
+kv_log_store_buffer_unconsumed_row_count	gauge	actor_id,connector,sink_id,sink_name	Number of Unconsumed Row in buffer		src/stream/src/executor/monitor/streaming_stats.rs
+kv_log_store_rewind_count	counter	actor_id,connector,sink_id,sink_name	Kv log store rewind rate		src/stream/src/executor/monitor/streaming_stats.rs
+kv_log_store_rewind_delay	histogram	actor_id,connector,sink_id,sink_name	Kv log store rewind delay		src/stream/src/executor/monitor/streaming_stats.rs
+kv_log_store_storage_read_count	counter	actor_id,connector,sink_id,sink_name,read_type	Write row count throughput of kv log store		src/stream/src/executor/monitor/streaming_stats.rs
+kv_log_store_storage_read_size	counter	actor_id,connector,sink_id,sink_name,read_type	Write size throughput of kv log store		src/stream/src/executor/monitor/streaming_stats.rs
+kv_log_store_storage_write_count	counter	actor_id,connector,sink_id,sink_name	Write row count throughput of kv log store		src/stream/src/executor/monitor/streaming_stats.rs
+kv_log_store_storage_write_size	counter	actor_id,connector,sink_id,sink_name	Write size throughput of kv log store		src/stream/src/executor/monitor/streaming_stats.rs
+lru_eviction_policy	gauge		Current LRU eviction policy		src/stream/src/executor/monitor/streaming_stats.rs
+lru_latest_sequence	gauge		Current LRU global sequence		src/stream/src/executor/monitor/streaming_stats.rs
+lru_runtime_loop_count	counter		The counts of the eviction loop in LRU manager per second		src/stream/src/executor/monitor/streaming_stats.rs
+lru_watermark_sequence	gauge		Current LRU watermark sequence		src/stream/src/executor/monitor/streaming_stats.rs
+state_table_get_count	counter	actor_id,fragment_id,table_id	Total number of state table get operations		src/stream/src/executor/monitor/streaming_stats.rs
+state_table_get_vnode_pruned_count	counter	actor_id,fragment_id,table_id	Total number of state table get operations pruned by vnode statistics		src/stream/src/executor/monitor/streaming_stats.rs
+state_table_iter_count	counter	actor_id,fragment_id,table_id	Total number of state table iter operations		src/stream/src/executor/monitor/streaming_stats.rs
+state_table_iter_vnode_pruned_count	counter	actor_id,fragment_id,table_id	Total number of state table iter operations pruned by vnode statistics		src/stream/src/executor/monitor/streaming_stats.rs
+stream_actor_count	gauge	fragment_id	Total number of actors (parallelism)		src/stream/src/executor/monitor/streaming_stats.rs
+stream_actor_current_epoch	gauge	actor_id,fragment_id	Current epoch of actor		src/stream/src/executor/monitor/streaming_stats.rs
+stream_actor_idle_cnt	counter	actor_id,fragment_id	tokio's metrics		src/stream/src/executor/monitor/streaming_stats.rs
+stream_actor_idle_duration	counter	actor_id,fragment_id	tokio's metrics		src/stream/src/executor/monitor/streaming_stats.rs
+stream_actor_in_record_cnt	counter	actor_id,fragment_id,upstream_fragment_id	Total number of rows actor received		src/stream/src/executor/monitor/streaming_stats.rs
+stream_actor_input_buffer_blocking_duration_ns	counter	actor_id,fragment_id,upstream_fragment_id	Total blocking duration (ns) of input buffer		src/stream/src/executor/monitor/streaming_stats.rs
+stream_actor_out_record_cnt	counter	actor_id,fragment_id	Total number of rows actor sent		src/stream/src/executor/monitor/streaming_stats.rs
+stream_actor_output_buffer_blocking_duration_ns	counter	actor_id,fragment_id,downstream_fragment_id	Total blocking duration (ns) of output buffer		src/stream/src/executor/monitor/streaming_stats.rs
+stream_actor_poll_cnt	counter	actor_id,fragment_id	tokio's metrics		src/stream/src/executor/monitor/streaming_stats.rs
+stream_actor_poll_duration	counter	actor_id,fragment_id	tokio's metrics		src/stream/src/executor/monitor/streaming_stats.rs
+stream_actor_scheduled_cnt	counter	actor_id,fragment_id	tokio's metrics		src/stream/src/executor/monitor/streaming_stats.rs
+stream_actor_scheduled_duration	counter	actor_id,fragment_id	tokio's metrics		src/stream/src/executor/monitor/streaming_stats.rs
+stream_agg_cached_entry_count	gauge	table_id,actor_id,fragment_id	Number of cached keys in streaming aggregation operators		src/stream/src/executor/monitor/streaming_stats.rs
+stream_agg_chunk_lookup_miss_count	counter	table_id,actor_id,fragment_id	Aggregation executor chunk-level lookup miss duration		src/stream/src/executor/monitor/streaming_stats.rs
+stream_agg_chunk_lookup_total_count	counter	table_id,actor_id,fragment_id	Aggregation executor chunk-level lookup total operation		src/stream/src/executor/monitor/streaming_stats.rs
+stream_agg_dirty_groups_count	gauge	table_id,actor_id,fragment_id	Total dirty group counts in aggregation executor		src/stream/src/executor/monitor/streaming_stats.rs
+stream_agg_dirty_groups_heap_size	gauge	table_id,actor_id,fragment_id	Total dirty group heap size in aggregation executor		src/stream/src/executor/monitor/streaming_stats.rs
+stream_agg_distinct_cache_miss_count	counter	table_id,actor_id,fragment_id	Aggregation executor dinsinct miss duration		src/stream/src/executor/monitor/streaming_stats.rs
+stream_agg_distinct_cached_entry_count	gauge	table_id,actor_id,fragment_id	Total entry counts in distinct aggregation executor cache		src/stream/src/executor/monitor/streaming_stats.rs
+stream_agg_distinct_total_cache_count	counter	table_id,actor_id,fragment_id	Aggregation executor distinct total operation		src/stream/src/executor/monitor/streaming_stats.rs
+stream_agg_lookup_miss_count	counter	table_id,actor_id,fragment_id	Aggregation executor lookup miss duration		src/stream/src/executor/monitor/streaming_stats.rs
+stream_agg_lookup_total_count	counter	table_id,actor_id,fragment_id	Aggregation executor lookup total operation		src/stream/src/executor/monitor/streaming_stats.rs
+stream_agg_state_cache_lookup_count	counter	table_id,actor_id,fragment_id	Aggregation executor state cache lookup count		src/stream/src/executor/monitor/streaming_stats.rs
+stream_agg_state_cache_miss_count	counter	table_id,actor_id,fragment_id	Aggregation executor state cache miss count		src/stream/src/executor/monitor/streaming_stats.rs
+stream_backfill_snapshot_read_row_count	counter	table_id,actor_id	Total number of rows that have been read from the backfill snapshot		src/stream/src/executor/monitor/streaming_stats.rs
+stream_backfill_upstream_output_row_count	counter	table_id,actor_id	Total number of rows that have been output from the backfill upstream		src/stream/src/executor/monitor/streaming_stats.rs
+stream_barrier_align_duration_ns	counter	actor_id,fragment_id,wait_side,executor	Duration of join align barrier		src/stream/src/executor/monitor/streaming_stats.rs
+stream_barrier_batch_size	histogram		barrier_batch_size		src/stream/src/executor/monitor/streaming_stats.rs
+stream_barrier_inflight_duration_seconds	histogram		barrier_inflight_latency		src/stream/src/executor/monitor/streaming_stats.rs
+stream_barrier_manager_progress	counter		The number of actors that have processed the earliest in-flight barriers		src/stream/src/executor/monitor/streaming_stats.rs
+stream_barrier_sync_storage_duration_seconds	histogram		barrier_sync_latency		src/stream/src/executor/monitor/streaming_stats.rs
+stream_cdc_backfill_snapshot_read_row_count	counter	table_id,actor_id	Total number of rows that have been read from the cdc_backfill snapshot		src/stream/src/executor/monitor/streaming_stats.rs
+stream_cdc_backfill_upstream_output_row_count	counter	table_id,actor_id	Total number of rows that have been output from the cdc_backfill upstream		src/stream/src/executor/monitor/streaming_stats.rs
+stream_exchange_frag_recv_size	counter	up_fragment_id,down_fragment_id	Total size of messages that have been received from upstream Fragment		src/stream/src/executor/monitor/streaming_stats.rs
+stream_executor_row_count	counter	actor_id,fragment_id,executor_identity	Total number of rows that have been output from each executor		src/stream/src/executor/monitor/streaming_stats.rs
+stream_fragment_channel_buffered_bytes	gauge	fragment_id	Estimated buffered bytes for actor channels by fragment		src/stream/src/executor/monitor/streaming_stats.rs
+stream_group_top_n_appendonly_cache_miss_count	counter	table_id,actor_id,fragment_id	Group top n appendonly executor cache miss count		src/stream/src/executor/monitor/streaming_stats.rs
+stream_group_top_n_appendonly_cached_entry_count	gauge	table_id,actor_id,fragment_id	Total entry counts in group top n appendonly executor cache		src/stream/src/executor/monitor/streaming_stats.rs
+stream_group_top_n_appendonly_total_query_cache_count	counter	table_id,actor_id,fragment_id	Group top n appendonly executor total cache count		src/stream/src/executor/monitor/streaming_stats.rs
+stream_group_top_n_cache_miss_count	counter	table_id,actor_id,fragment_id	Group top n executor cache miss count		src/stream/src/executor/monitor/streaming_stats.rs
+stream_group_top_n_cached_entry_count	gauge	table_id,actor_id,fragment_id	Total entry counts in group top n executor cache		src/stream/src/executor/monitor/streaming_stats.rs
+stream_group_top_n_total_query_cache_count	counter	table_id,actor_id,fragment_id	Group top n executor query cache total count		src/stream/src/executor/monitor/streaming_stats.rs
+stream_join_actor_input_waiting_duration_ns	counter	actor_id,fragment_id	Total waiting duration (ns) of input buffer of join actor		src/stream/src/executor/monitor/streaming_stats.rs
+stream_join_cached_entry_count	gauge	actor_id,fragment_id,side	Number of cached entries in streaming join operators		src/stream/src/executor/monitor/streaming_stats.rs
+stream_join_insert_cache_miss_count	counter	side,join_table_id,actor_id,fragment_id	Join executor cache miss when insert operation		src/stream/src/executor/monitor/streaming_stats.rs
+stream_join_lookup_miss_count	counter	side,join_table_id,actor_id,fragment_id	Join executor lookup miss duration		src/stream/src/executor/monitor/streaming_stats.rs
+stream_join_lookup_total_count	counter	side,join_table_id,actor_id,fragment_id	Join executor lookup total operation		src/stream/src/executor/monitor/streaming_stats.rs
+stream_join_match_duration_ns	counter	actor_id,fragment_id,side	Matching duration for each side		src/stream/src/executor/monitor/streaming_stats.rs
+stream_join_matched_join_keys	histogram	actor_id,fragment_id,table_id	The number of keys matched in the opposite side		src/stream/src/executor/monitor/streaming_stats.rs
+stream_lookup_cache_miss_count	counter	table_id,actor_id,fragment_id	Lookup executor cache miss count		src/stream/src/executor/monitor/streaming_stats.rs
+stream_lookup_cached_entry_count	gauge	table_id,actor_id,fragment_id	Total entry counts in lookup executor cache		src/stream/src/executor/monitor/streaming_stats.rs
+stream_lookup_total_query_cache_count	counter	table_id,actor_id,fragment_id	Lookup executor query cache total count		src/stream/src/executor/monitor/streaming_stats.rs
+stream_materialize_cache_hit_count	counter	actor_id,table_id,fragment_id	Materialize executor cache hit count		src/stream/src/executor/monitor/streaming_stats.rs
+stream_materialize_cache_total_count	counter	actor_id,table_id,fragment_id	Materialize executor cache total operation		src/stream/src/executor/monitor/streaming_stats.rs
+stream_materialize_data_exist_count	counter	actor_id,table_id,fragment_id	Materialize executor data exist count		src/stream/src/executor/monitor/streaming_stats.rs
+stream_memory_usage	gauge	actor_id,table_id,desc	Memory usage for stream executors		src/stream/src/executor/monitor/streaming_stats.rs
+stream_merge_barrier_align_duration_ns	counter	actor_id,fragment_id	Total merge barrier alignment duration (ns)		src/stream/src/executor/monitor/streaming_stats.rs
+stream_mview_current_epoch	gauge	actor_id,table_id,fragment_id	The current epoch of the materialized executor		src/stream/src/executor/monitor/streaming_stats.rs
+stream_mview_input_row_count	counter	actor_id,table_id,fragment_id	Total number of rows streamed into materialize executors		src/stream/src/executor/monitor/streaming_stats.rs
+stream_mysql_cdc_state_binlog_file_seq	gauge	source_id	Current binlog file sequence number stored in MySQL CDC state table		src/stream/src/executor/monitor/streaming_stats.rs
+stream_mysql_cdc_state_binlog_position	gauge	source_id	Current binlog position stored in MySQL CDC state table		src/stream/src/executor/monitor/streaming_stats.rs
+stream_over_window_accessed_entry_count	counter	table_id,actor_id,fragment_id	Over window accessed entry count		src/stream/src/executor/monitor/streaming_stats.rs
+stream_over_window_cache_lookup_count	counter	table_id,actor_id,fragment_id	Over window executor cache lookup count		src/stream/src/executor/monitor/streaming_stats.rs
+stream_over_window_cache_miss_count	counter	table_id,actor_id,fragment_id	Over window executor cache miss count		src/stream/src/executor/monitor/streaming_stats.rs
+stream_over_window_cached_entry_count	gauge	table_id,actor_id,fragment_id	Total entry (partition) count in over window executor cache		src/stream/src/executor/monitor/streaming_stats.rs
+stream_over_window_compute_count	counter	table_id,actor_id,fragment_id	Over window compute count		src/stream/src/executor/monitor/streaming_stats.rs
+stream_over_window_range_cache_entry_count	gauge	table_id,actor_id,fragment_id	Over window partition range cache entry count		src/stream/src/executor/monitor/streaming_stats.rs
+stream_over_window_range_cache_left_miss_count	counter	table_id,actor_id,fragment_id	Over window partition range cache left miss count		src/stream/src/executor/monitor/streaming_stats.rs
+stream_over_window_range_cache_lookup_count	counter	table_id,actor_id,fragment_id	Over window partition range cache lookup count		src/stream/src/executor/monitor/streaming_stats.rs
+stream_over_window_range_cache_right_miss_count	counter	table_id,actor_id,fragment_id	Over window partition range cache right miss count		src/stream/src/executor/monitor/streaming_stats.rs
+stream_over_window_same_output_count	counter	table_id,actor_id,fragment_id	Over window same output count		src/stream/src/executor/monitor/streaming_stats.rs
+stream_pg_cdc_jni_commit_offset_lsn	gauge	source_id	LSN value when JNI commit offset is called for PostgreSQL CDC		src/stream/src/executor/monitor/streaming_stats.rs
+stream_pg_cdc_state_table_lsn	gauge	source_id	Current LSN value stored in PostgreSQL CDC state table		src/stream/src/executor/monitor/streaming_stats.rs
+stream_sink_chunk_buffer_size	gauge	sink_id,actor_id,fragment_id	Total size of chunks buffered in a barrier		src/stream/src/executor/monitor/streaming_stats.rs
+stream_sink_input_bytes	counter	sink_id,actor_id,fragment_id	Total size of chunks streamed into sink executors		src/stream/src/executor/monitor/streaming_stats.rs
+stream_sink_input_row_count	counter	sink_id,actor_id,fragment_id	Total number of rows streamed into sink executors		src/stream/src/executor/monitor/streaming_stats.rs
+stream_snapshot_backfill_consume_snapshot_row_count	counter	table_id,actor_id,stage	Total number of rows that have been output from snapshot backfill		src/stream/src/executor/monitor/streaming_stats.rs
+stream_source_backfill_rows_counts	counter	source_id,source_name,actor_id,fragment_id	Total number of rows that have been backfilled for source		src/stream/src/executor/monitor/streaming_stats.rs
+stream_source_output_rows_counts	counter	source_id,source_name,actor_id,fragment_id	Total number of rows that have been output from source		src/stream/src/executor/monitor/streaming_stats.rs
+stream_source_split_change_event_count	counter	source_id,source_name,actor_id,fragment_id	Total number of split change events that have been operated by source		src/stream/src/executor/monitor/streaming_stats.rs
+stream_sqlserver_cdc_jni_commit_offset_lsn	gauge	source_id	LSN value when JNI commit offset is called for SQL Server CDC		src/stream/src/executor/monitor/streaming_stats.rs
+stream_sqlserver_cdc_state_change_lsn	gauge	source_id	Current change_lsn value stored in SQL Server CDC state table		src/stream/src/executor/monitor/streaming_stats.rs
+stream_sqlserver_cdc_state_commit_lsn	gauge	source_id	Current commit_lsn value stored in SQL Server CDC state table		src/stream/src/executor/monitor/streaming_stats.rs
+stream_temporal_join_cache_miss_count	counter	table_id,actor_id,fragment_id	Temporal join executor cache miss count		src/stream/src/executor/monitor/streaming_stats.rs
+stream_temporal_join_cached_entry_count	gauge	table_id,actor_id,fragment_id	Total entry count in temporal join executor cache		src/stream/src/executor/monitor/streaming_stats.rs
+stream_temporal_join_total_query_cache_count	counter	table_id,actor_id,fragment_id	Temporal join executor query cache total count		src/stream/src/executor/monitor/streaming_stats.rs
+sync_kv_log_store_buffer_memory_bytes	gauge	actor_id,target,fragment_id,relation	Estimated heap bytes used by synced kv log store buffer (unconsumed + consumed but not truncated)		src/stream/src/executor/monitor/streaming_stats.rs
+sync_kv_log_store_buffer_unconsumed_epoch_count	gauge	actor_id,target,fragment_id,relation	Number of Unconsumed Epoch in buffer		src/stream/src/executor/monitor/streaming_stats.rs
+sync_kv_log_store_buffer_unconsumed_item_count	gauge	actor_id,target,fragment_id,relation	Number of Unconsumed Item in buffer		src/stream/src/executor/monitor/streaming_stats.rs
+sync_kv_log_store_buffer_unconsumed_min_epoch	gauge	actor_id,target,fragment_id,relation	Number of Unconsumed Epoch in buffer		src/stream/src/executor/monitor/streaming_stats.rs
+sync_kv_log_store_buffer_unconsumed_row_count	gauge	actor_id,target,fragment_id,relation	Number of Unconsumed Row in buffer		src/stream/src/executor/monitor/streaming_stats.rs
+sync_kv_log_store_read_count	counter	type,actor_id,target,fragment_id,relation	read row count throughput of sync_kv log store		src/stream/src/executor/monitor/streaming_stats.rs
+sync_kv_log_store_read_size	counter	type,actor_id,target,fragment_id,relation	read size throughput of sync_kv log store		src/stream/src/executor/monitor/streaming_stats.rs
+sync_kv_log_store_state	counter	state,actor_id,target,fragment_id,relation	clean/unclean state transition for sync_kv log store		src/stream/src/executor/monitor/streaming_stats.rs
+sync_kv_log_store_storage_write_count	counter	actor_id,target,fragment_id,relation	Write row count throughput of sync_kv log store		src/stream/src/executor/monitor/streaming_stats.rs
+sync_kv_log_store_storage_write_size	counter	actor_id,target,fragment_id,relation	Write size throughput of sync_kv log store		src/stream/src/executor/monitor/streaming_stats.rs
+sync_kv_log_store_wait_next_poll_ns	counter	actor_id,target,fragment_id,relation	Total duration (ns) of waiting for next poll		src/stream/src/executor/monitor/streaming_stats.rs
+sync_kv_log_store_write_pause_duration_ns	counter	actor_id,target,fragment_id,relation	Duration (ns) of sync_kv log store write pause		src/stream/src/executor/monitor/streaming_stats.rs

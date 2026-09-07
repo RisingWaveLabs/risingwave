@@ -38,6 +38,7 @@ set -e
 
 echo "--- testing pulsar sink"
 sqllogictest -p 4566 -d dev './e2e_test/sink/pulsar_sink.slt'
+sqllogictest -p 4566 -d dev './e2e_test/sink/pulsar_sink_roundrobin.slt'
 
 sleep 1
 

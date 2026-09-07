@@ -23,6 +23,22 @@ use risingwave_pb::catalog::function::{Kind, ScalarFunction, TableFunction};
 use super::*;
 use crate::{Binder, bind_data_type};
 
+/// Non-SQL UDFs exchange data via Arrow, which does not support VARIANT yet.
+pub(crate) fn reject_variant_in_udf_signature(
+    return_type: &risingwave_common::types::DataType,
+    arg_types: &[risingwave_common::types::DataType],
+    kind: &str,
+) -> Result<()> {
+    if return_type.contains_variant() || arg_types.iter().any(|t| t.contains_variant()) {
+        return Err(ErrorCode::NotSupported(
+            format!("VARIANT type in {kind} signature"),
+            "VARIANT is not supported in UDFs yet".to_owned(),
+        )
+        .into());
+    }
+    Ok(())
+}
+
 pub async fn handle_create_function(
     handler_args: HandlerArgs,
     or_replace: bool,
@@ -117,6 +133,8 @@ pub async fn handle_create_function(
         arg_names.push(arg.name.map_or("".to_owned(), |n| n.real_value()));
         arg_types.push(bind_data_type(&arg.data_type)?);
     }
+
+    reject_variant_in_udf_signature(&return_type, &arg_types, "function")?;
 
     // resolve database and schema id
     let session = &handler_args.session;

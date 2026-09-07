@@ -1,0 +1,31 @@
+name: Documentation issue tracker tests
+
+on:
+  pull_request:
+    paths:
+      - ".github/scripts/doc_issue_tracker.py"
+      - ".github/scripts/test_doc_issue_tracker.py"
+      - ".github/workflows/auto-create-doc-issue-by-pr.yml"
+      - ".github/workflows/cherry-pick-since-release-branch.yml"
+      - ".github/workflows/doc-issue-tracker-tests.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/scripts/doc_issue_tracker.py"
+      - ".github/scripts/test_doc_issue_tracker.py"
+      - ".github/workflows/auto-create-doc-issue-by-pr.yml"
+      - ".github/workflows/cherry-pick-since-release-branch.yml"
+      - ".github/workflows/doc-issue-tracker-tests.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Run documentation issue tracker tests
+        run: python3 .github/scripts/test_doc_issue_tracker.py

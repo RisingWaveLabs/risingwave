@@ -29,3 +29,35 @@ $$;
 
 include ./test.slt.part
 include ./drop.slt.part
+
+# struct return type
+statement ok
+create aggregate sum_cnt(value int) returns struct<sum int, cnt int> language javascript as $$
+    export function create_state() {
+        return {sum: 0, cnt: 0};
+    }
+    export function accumulate(state, value) {
+        if (value == null) {
+            return state;
+        }
+        state.sum += value;
+        state.cnt += 1;
+        return state;
+    }
+    export function retract(state, value) {
+        if (value == null) {
+            return state;
+        }
+        state.sum -= value;
+        state.cnt -= 1;
+        return state;
+    }
+    export function finish(state) {
+        if (state.cnt == 0) {
+            return null;
+        }
+        return {sum: state.sum, cnt: state.cnt};
+    }
+$$;
+
+include ./struct.slt.part

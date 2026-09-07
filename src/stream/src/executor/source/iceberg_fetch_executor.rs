@@ -28,8 +28,10 @@ use risingwave_common::config::StreamingConfig;
 use risingwave_common::hash::VnodeBitmapExt;
 use risingwave_common::id::SourceId;
 use risingwave_common::types::{JsonbVal, ScalarRef, Serial, ToOwnedDatum};
-use risingwave_connector::source::iceberg::metrics::GLOBAL_ICEBERG_SCAN_METRICS;
-use risingwave_connector::source::iceberg::{IcebergScanOpts, scan_task_to_chunk_with_deletes};
+use risingwave_connector::source::iceberg::{
+    GLOBAL_ICEBERG_SCAN_METRICS, IcebergFileScanMetrics, IcebergScanMetricsLabels, IcebergScanOpts,
+    PersistedFileScanTask, scan_task_to_chunk_with_deletes,
+};
 use risingwave_connector::source::reader::desc::SourceDesc;
 use risingwave_connector::source::{SourceContext, SourceCtrlOpts};
 use risingwave_pb::common::ThrottleType;
@@ -61,6 +63,9 @@ pub struct IcebergFetchExecutor<S: StateStore> {
 
     /// Configuration for streaming operations, including Iceberg-specific settings
     streaming_config: Arc<StreamingConfig>,
+
+    scan_metrics: Option<IcebergScanMetricsLabels>,
+    file_scan_metrics: Option<IcebergFileScanMetrics>,
 }
 
 /// Fetched data from 1 [`FileScanTask`], along with states for checkpointing.
@@ -79,205 +84,6 @@ pub(crate) struct ChunksWithState {
     pub last_read_pos: Datum,
 }
 
-pub(super) use state::PersistedFileScanTask;
-mod state {
-    use std::sync::Arc;
-
-    use anyhow::Context;
-    use iceberg::expr::BoundPredicate;
-    use iceberg::scan::FileScanTask;
-    use iceberg::spec::{DataContentType, DataFileFormat, SchemaRef};
-    use risingwave_common::types::{JsonbRef, JsonbVal, ScalarRef};
-    use serde::{Deserialize, Serialize};
-
-    use crate::executor::StreamExecutorResult;
-
-    fn default_case_sensitive() -> bool {
-        true
-    }
-    /// This corresponds to the actually persisted `FileScanTask` in the state table.
-    ///
-    /// We introduce this in case the definition of [`FileScanTask`] changes in the iceberg-rs crate.
-    /// Currently, they have the same definition.
-    ///
-    /// We can handle possible compatibility issues in [`Self::from_task`] and [`Self::to_task`].
-    /// A version id needs to be introduced then.
-    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-    pub struct PersistedFileScanTask {
-        /// The start offset of the file to scan.
-        pub start: u64,
-        /// The length of the file to scan.
-        pub length: u64,
-        /// The number of records in the file to scan.
-        ///
-        /// This is an optional field, and only available if we are
-        /// reading the entire data file.
-        pub record_count: Option<u64>,
-
-        /// The data file path corresponding to the task.
-        pub data_file_path: String,
-
-        /// The data file referenced by a deletion vector.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        pub referenced_data_file: Option<String>,
-
-        /// The content type of the file to scan.
-        pub data_file_content: DataContentType,
-
-        /// The format of the file to scan.
-        pub data_file_format: DataFileFormat,
-
-        /// The schema of the file to scan.
-        pub schema: SchemaRef,
-        /// The field ids to project.
-        pub project_field_ids: Vec<i32>,
-        /// The predicate to filter.
-        #[serde(skip_serializing_if = "Option::is_none")]
-        pub predicate: Option<BoundPredicate>,
-
-        /// The list of delete files that may need to be applied to this data file
-        pub deletes: Vec<PersistedFileScanTask>,
-        /// sequence number
-        pub sequence_number: i64,
-        /// equality ids
-        pub equality_ids: Option<Vec<i32>>,
-
-        pub file_size_in_bytes: u64,
-
-        #[serde(default = "default_case_sensitive")]
-        pub case_sensitive: bool,
-    }
-
-    impl PersistedFileScanTask {
-        /// First decodes the json to the struct, then converts the struct to a [`FileScanTask`].
-        pub fn decode(jsonb_ref: JsonbRef<'_>) -> StreamExecutorResult<FileScanTask> {
-            let persisted_task: Self =
-                serde_json::from_value(jsonb_ref.to_owned_scalar().take())
-                    .with_context(|| format!("invalid state: {:?}", jsonb_ref))?;
-            Ok(Self::to_task(persisted_task))
-        }
-
-        /// First converts the [`FileScanTask`] to a persisted one, then encodes the persisted one to a jsonb value.
-        pub fn encode(task: FileScanTask) -> JsonbVal {
-            let persisted_task = Self::from_task(task);
-            serde_json::to_value(persisted_task).unwrap().into()
-        }
-
-        /// Converts a persisted task to a [`FileScanTask`].
-        fn to_task(
-            Self {
-                start,
-                length,
-                record_count,
-                data_file_path,
-                referenced_data_file,
-                data_file_content,
-                data_file_format,
-                schema,
-                project_field_ids,
-                predicate,
-                deletes,
-                sequence_number,
-                equality_ids,
-                file_size_in_bytes,
-                case_sensitive,
-            }: Self,
-        ) -> FileScanTask {
-            FileScanTask {
-                start,
-                length,
-                record_count,
-                data_file_path,
-                referenced_data_file,
-                data_file_content,
-                data_file_format,
-                schema,
-                project_field_ids,
-                predicate,
-                deletes: deletes
-                    .into_iter()
-                    .map(|task| Arc::new(PersistedFileScanTask::to_task(task)))
-                    .collect(),
-                sequence_number,
-                equality_ids,
-                file_size_in_bytes,
-                partition: None,
-                partition_spec: None,
-                name_mapping: None,
-                case_sensitive,
-            }
-        }
-
-        /// Changes a [`FileScanTask`] to a persisted one.
-        fn from_task(
-            FileScanTask {
-                start,
-                length,
-                record_count,
-                data_file_path,
-                referenced_data_file,
-                data_file_content,
-                data_file_format,
-                schema,
-                project_field_ids,
-                predicate,
-                deletes,
-                sequence_number,
-                equality_ids,
-                file_size_in_bytes,
-                case_sensitive,
-                ..
-            }: FileScanTask,
-        ) -> Self {
-            Self {
-                start,
-                length,
-                record_count,
-                data_file_path,
-                referenced_data_file,
-                data_file_content,
-                data_file_format,
-                schema,
-                project_field_ids,
-                predicate,
-                deletes: deletes
-                    .into_iter()
-                    .map(PersistedFileScanTask::from_task_ref)
-                    .collect(),
-                sequence_number,
-                equality_ids,
-                file_size_in_bytes,
-                case_sensitive,
-            }
-        }
-
-        fn from_task_ref(task: Arc<FileScanTask>) -> Self {
-            Self {
-                start: task.start,
-                length: task.length,
-                record_count: task.record_count,
-                data_file_path: task.data_file_path.clone(),
-                referenced_data_file: task.referenced_data_file.clone(),
-                data_file_content: task.data_file_content,
-                data_file_format: task.data_file_format,
-                schema: task.schema.clone(),
-                project_field_ids: task.project_field_ids.clone(),
-                predicate: task.predicate.clone(),
-                deletes: task
-                    .deletes
-                    .iter()
-                    .cloned()
-                    .map(PersistedFileScanTask::from_task_ref)
-                    .collect(),
-                sequence_number: task.sequence_number,
-                equality_ids: task.equality_ids.clone(),
-                file_size_in_bytes: task.file_size_in_bytes,
-                case_sensitive: task.case_sensitive,
-            }
-        }
-    }
-}
-
 impl<S: StateStore> IcebergFetchExecutor<S> {
     pub fn new(
         actor_ctx: ActorContextRef,
@@ -292,6 +98,8 @@ impl<S: StateStore> IcebergFetchExecutor<S> {
             upstream: Some(upstream),
             rate_limit_rps,
             streaming_config,
+            scan_metrics: None,
+            file_scan_metrics: None,
         }
     }
 
@@ -305,6 +113,7 @@ impl<S: StateStore> IcebergFetchExecutor<S> {
         stream: &mut StreamReaderWithPause<BIASED, ChunksWithState>,
         rate_limit_rps: Option<u32>,
         streaming_config: Arc<StreamingConfig>,
+        file_scan_metrics: IcebergFileScanMetrics,
     ) -> StreamExecutorResult<()> {
         let mut batch =
             Vec::with_capacity(streaming_config.developer.iceberg_fetch_batch_size as usize);
@@ -345,6 +154,7 @@ impl<S: StateStore> IcebergFetchExecutor<S> {
                 batch,
                 rate_limit_rps,
                 streaming_config,
+                file_scan_metrics,
             )
             .map_err(StreamExecutorError::connector_error);
             stream.replace_data_stream(batch_reader);
@@ -361,6 +171,7 @@ impl<S: StateStore> IcebergFetchExecutor<S> {
         batch: Vec<FileScanTask>,
         _rate_limit_rps: Option<u32>,
         streaming_config: Arc<StreamingConfig>,
+        file_scan_metrics: IcebergFileScanMetrics,
     ) {
         let file_path_idx = source_desc
             .columns
@@ -380,8 +191,6 @@ impl<S: StateStore> IcebergFetchExecutor<S> {
             _ => unreachable!(),
         };
         let table = properties.load_table().await?;
-        let metrics = Arc::new(GLOBAL_ICEBERG_SCAN_METRICS.clone());
-
         for task in batch {
             // Capture the file path upfront from the task so we can use it even when the
             // scan produces no chunks (empty data file or fully equality-deleted file).
@@ -395,10 +204,13 @@ impl<S: StateStore> IcebergFetchExecutor<S> {
                     chunk_size: streaming_config.developer.chunk_size,
                     need_seq_num: true, /* Although this column is unnecessary, we still keep it for potential usage in the future */
                     need_file_path_and_pos: true,
+                    // Iceberg V2 position/equality deletes are exposed as separate delete-file
+                    // tasks for table-engine reads. V3 deletion vectors should be applied by
+                    // iceberg-rs while scanning the data file.
                     handle_delete_files: table.metadata().format_version()
                         >= iceberg::spec::FormatVersion::V3,
                 },
-                Some(metrics.clone()),
+                Some(file_scan_metrics.clone()),
             ) {
                 let chunk = chunk?;
                 // Skip zero-cardinality chunks: a RecordBatch with 0 visible rows after
@@ -507,7 +319,6 @@ impl<S: StateStore> IcebergFetchExecutor<S> {
         state_store_handler.init_epoch(first_epoch).await?;
 
         // Extract table name from iceberg properties for metrics labeling.
-        let iceberg_metrics = &GLOBAL_ICEBERG_SCAN_METRICS;
         let iceberg_table_name = {
             match &source_desc.source.config {
                 risingwave_connector::source::ConnectorProperties::Iceberg(props) => {
@@ -518,11 +329,21 @@ impl<S: StateStore> IcebergFetchExecutor<S> {
         };
         let source_id_str = core.source_id.to_string();
         let source_name_str = core.source_name.clone();
-        let metrics_labels = [
-            source_id_str.as_str(),
-            source_name_str.as_str(),
-            iceberg_table_name.as_str(),
-        ];
+        let scan_metrics = self
+            .scan_metrics
+            .insert(IcebergScanMetricsLabels::new(
+                source_id_str,
+                source_name_str,
+                iceberg_table_name.clone(),
+            ))
+            .clone();
+        let file_scan_metrics = self
+            .file_scan_metrics
+            .insert(IcebergFileScanMetrics::new(
+                &GLOBAL_ICEBERG_SCAN_METRICS,
+                &iceberg_table_name,
+            ))
+            .clone();
 
         let mut splits_on_fetch: usize = 0;
         let mut stream = StreamReaderWithPause::<true, ChunksWithState>::new(
@@ -546,31 +367,18 @@ impl<S: StateStore> IcebergFetchExecutor<S> {
             &mut stream,
             self.rate_limit_rps,
             self.streaming_config.clone(),
+            file_scan_metrics.clone(),
         )
         .await?;
-        iceberg_metrics
-            .iceberg_source_inflight_file_count
-            .with_guarded_label_values(&metrics_labels)
-            .set(splits_on_fetch as i64);
+        scan_metrics.set_inflight_file_count(splits_on_fetch);
 
         while let Some(msg) = stream.next().await {
             match msg {
                 Err(e) => {
                     tracing::error!(error = %e.as_report(), "Fetch Error");
-                    iceberg_metrics
-                        .iceberg_source_scan_errors_total
-                        .with_guarded_label_values(&[
-                            metrics_labels[0],
-                            metrics_labels[1],
-                            metrics_labels[2],
-                            "fetch_error",
-                        ])
-                        .inc();
+                    scan_metrics.record_fetch_error();
                     splits_on_fetch = 0;
-                    iceberg_metrics
-                        .iceberg_source_inflight_file_count
-                        .with_guarded_label_values(&metrics_labels)
-                        .set(0);
+                    scan_metrics.set_inflight_file_count(0);
                 }
                 Ok(msg) => {
                     match msg {
@@ -637,12 +445,10 @@ impl<S: StateStore> IcebergFetchExecutor<S> {
                                             &mut stream,
                                             self.rate_limit_rps,
                                             self.streaming_config.clone(),
+                                            file_scan_metrics.clone(),
                                         )
                                         .await?;
-                                        iceberg_metrics
-                                            .iceberg_source_inflight_file_count
-                                            .with_guarded_label_values(&metrics_labels)
-                                            .set(splits_on_fetch as i64);
+                                        scan_metrics.set_inflight_file_count(splits_on_fetch);
                                     }
                                 }
                                 // Receiving file assignments from upstream list executor,
@@ -673,10 +479,7 @@ impl<S: StateStore> IcebergFetchExecutor<S> {
                             if true {
                                 splits_on_fetch = splits_on_fetch.saturating_sub(1);
                                 state_store_handler.delete(&data_file_path).await?;
-                                iceberg_metrics
-                                    .iceberg_source_inflight_file_count
-                                    .with_guarded_label_values(&metrics_labels)
-                                    .set(splits_on_fetch as i64);
+                                scan_metrics.set_inflight_file_count(splits_on_fetch);
                             }
 
                             for chunk in &chunks {

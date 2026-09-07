@@ -325,10 +325,6 @@ impl HummockSnapshotManager {
     ) -> Result<(), RwError> {
         let mut rx = self.version_update_notification_sender.subscribe();
         loop {
-            rx.changed()
-                .await
-                .map_err(|_| ErrorCode::InternalError("cursor notify channel is closed.".into()))?;
-            let _ = rx.borrow_and_update();
             if let Some(info) = self
                 .acquire()
                 .version()
@@ -346,7 +342,52 @@ impl HummockSnapshotManager {
                 ))
                 .into());
             }
+            rx.changed()
+                .await
+                .map_err(|_| ErrorCode::InternalError("cursor notify channel is closed.".into()))?;
+            let _ = rx.borrow_and_update();
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+    use crate::test_utils::MockFrontendMetaClient;
+
+    /// Verifies that an already-available seek epoch is observed immediately without waiting for
+    /// another version-update notification.
+    #[tokio::test]
+    async fn test_wait_table_change_log_notification_observes_existing_version() {
+        let manager = HummockSnapshotManager::new(Arc::new(MockFrontendMetaClient {}));
+        let table_id = TableId::new(1);
+        let committed_epoch = 42;
+        manager.add_table_for_test(table_id);
+        manager.update_inner(|version| {
+            let mut version = version.clone();
+            version.id += 1;
+            version.state_table_info.apply_delta(
+                &HashMap::from_iter([(
+                    table_id,
+                    StateTableInfoDelta {
+                        committed_epoch,
+                        compaction_group_id: 0.into(),
+                    },
+                )]),
+                &HashSet::new(),
+            );
+            Some(version)
+        });
+
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            manager.wait_table_change_log_notification(table_id, committed_epoch),
+        )
+        .await
+        .expect("an existing committed epoch must not wait for another notification")
+        .unwrap();
     }
 }

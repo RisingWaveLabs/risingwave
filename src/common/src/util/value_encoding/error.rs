@@ -30,6 +30,8 @@ pub enum ValueEncodingError {
     InvalidTagEncoding(u8),
     #[error("Invalid jsonb encoding")]
     InvalidJsonbEncoding,
+    #[error("Invalid variant encoding")]
+    InvalidVariantEncoding,
     #[error("Invalid struct encoding: {0}")]
     InvalidStructEncoding(
         #[source]

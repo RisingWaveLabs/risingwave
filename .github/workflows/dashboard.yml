@@ -1,4 +1,8 @@
 name: Dashboard
+
+permissions:
+  contents: write
+
 on:
   push:
     branches: [main]
@@ -12,9 +16,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.14.0
       - uses: actions/setup-node@v4
         with:
           node-version: 20
+          cache: pnpm
+          cache-dependency-path: dashboard/pnpm-lock.yaml
       - uses: arduino/setup-protoc@v3
         with:
           version: "25.x"
@@ -22,11 +31,11 @@ jobs:
       - name: build
         working-directory: ./dashboard
         run: |
-          echo "::group::npm install"
-          npm install
+          echo "::group::pnpm install"
+          pnpm install --frozen-lockfile
           echo "::endgroup::"
-          npm run lint
-          npm run build
+          pnpm run lint
+          pnpm run build
       - name: Deploy
         uses: s0/git-publish-subdir-action@develop
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'

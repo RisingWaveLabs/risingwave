@@ -36,6 +36,7 @@ mod stream_chunk_iter;
 pub mod stream_record;
 pub mod struct_array;
 mod utf8_array;
+mod variant_array;
 mod vector_array;
 
 use std::convert::From;
@@ -64,6 +65,7 @@ pub use stream_chunk::{Op, StreamChunk, StreamChunkTestExt};
 pub use stream_chunk_builder::StreamChunkBuilder;
 pub use struct_array::{StructArray, StructArrayBuilder, StructRef, StructValue};
 pub use utf8_array::*;
+pub use variant_array::{VariantArray, VariantArrayBuilder};
 pub use vector_array::{
     Finite32, VECTOR_AS_LIST_TYPE, VECTOR_DISTANCE_TYPE, VECTOR_ITEM_TYPE, VectorArray,
     VectorArrayBuilder, VectorDistanceType, VectorItemType, VectorRef, VectorVal,
@@ -371,6 +373,12 @@ impl From<Utf8Array> for ArrayImpl {
 impl From<JsonbArray> for ArrayImpl {
     fn from(arr: JsonbArray) -> Self {
         Self::Jsonb(arr)
+    }
+}
+
+impl From<VariantArray> for ArrayImpl {
+    fn from(arr: VariantArray) -> Self {
+        Self::Variant(arr)
     }
 }
 

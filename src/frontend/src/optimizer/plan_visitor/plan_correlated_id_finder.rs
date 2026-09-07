@@ -106,7 +106,7 @@ impl LogicalPlanVisitor for PlanCorrelatedIdFinder {
 
     fn visit_logical_table_function(&mut self, plan: &LogicalTableFunction) {
         let mut finder = ExprCorrelatedIdFinder::default();
-        plan.table_function
+        plan.table_function()
             .args
             .iter()
             .for_each(|expr| finder.visit_expr(expr));

@@ -363,6 +363,10 @@ pub struct RedisConfig {
 
     pub port: u16,
     pub address: String,
+
+    pub image: String,
+    pub user_managed: bool,
+    pub persist_data: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -693,7 +697,7 @@ impl ServiceConfig {
             Self::Kafka(c) => c.user_managed,
             Self::Pubsub(c) => c.user_managed,
             Self::Pulsar(c) => c.user_managed,
-            Self::Redis(_c) => false,
+            Self::Redis(c) => c.user_managed,
             Self::Opendal(_c) => false,
             Self::MySql(c) => c.user_managed,
             Self::Postgres(c) => c.user_managed,

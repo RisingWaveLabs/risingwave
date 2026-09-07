@@ -28,6 +28,7 @@ def run_test_case(test_file: str, args: dict) -> TestResult:
     start_time = datetime.now()
     error = None
     success = True
+    drop_sqls = None
 
     try:
         with open(test_file, "rb") as f:
@@ -55,8 +56,6 @@ def run_test_case(test_file: str, args: dict) -> TestResult:
                 compare_sql(args, cmp_sqls)
             if verify_slt:
                 execute_slt(args, verify_slt)
-            if drop_sqls:
-                drop_table(args, drop_sqls)
     except KeyboardInterrupt:
         log(f"test case {test_file} interrupted by user", level=LogLevel.ERROR)
         error = "Interrupted by user"
@@ -70,6 +69,16 @@ def run_test_case(test_file: str, args: dict) -> TestResult:
         success = False
         raise e
     finally:
+        # Clean up even when the case failed: a leftover table keeps the shared
+        # namespace non-empty and fails every later case's DROP SCHEMA.
+        if drop_sqls:
+            try:
+                drop_table(args, drop_sqls)
+            except Exception as e:
+                # drop_table already logged the cause; don't mask an earlier failure.
+                if success:
+                    error = e
+                    success = False
         duration = datetime.now() - start_time
         return TestResult(test_file, success, duration, error)
 

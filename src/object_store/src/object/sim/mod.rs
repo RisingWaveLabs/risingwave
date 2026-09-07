@@ -24,7 +24,7 @@ pub use rpc_server::SimServer;
 mod service;
 
 use std::net::SocketAddr;
-use std::ops::{Range, RangeBounds};
+use std::ops::RangeBounds;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
@@ -180,7 +180,7 @@ impl ObjectStore for SimObjectStore {
     async fn streaming_read(
         &self,
         path: &str,
-        range: Range<usize>,
+        range: impl ObjectRangeBounds,
     ) -> ObjectResult<ObjectDataStream> {
         let path = path.to_string();
         let resp = self

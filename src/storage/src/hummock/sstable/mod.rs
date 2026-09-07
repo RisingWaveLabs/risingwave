@@ -512,18 +512,22 @@ impl SstableMeta {
 #[derive(Default)]
 pub struct SstableIteratorReadOptions {
     pub cache_policy: CachePolicy,
-    pub must_iterated_end_user_key: Option<Bound<UserKey<KeyPayloadType>>>,
+    /// The only hard upper bound of this scan. It limits the iterator's block window.
+    pub scan_end_user_key: Option<Bound<UserKey<KeyPayloadType>>>,
+    /// Whether to prefetch blocks within the already-bounded scan window.
+    pub prefetch: bool,
     pub max_preload_retry_times: usize,
-    pub prefetch_for_large_query: bool,
 }
 
 impl SstableIteratorReadOptions {
+    /// Builds options with prefetch disabled. Range scans enable it explicitly after setting the
+    /// scan bound, while point gets retain the default to avoid creating a prefetch stream.
     pub fn from_read_options(read_options: &ReadOptions) -> Self {
         Self {
             cache_policy: read_options.cache_policy,
-            must_iterated_end_user_key: None,
+            scan_end_user_key: None,
+            prefetch: false,
             max_preload_retry_times: 0,
-            prefetch_for_large_query: read_options.prefetch_options.for_large_query,
         }
     }
 }
@@ -536,6 +540,19 @@ mod tests {
         default_builder_opt_for_test, iterator_test_key_of,
     };
     use crate::hummock::test_utils::gen_test_sstable_data;
+    use crate::store::PrefetchOptions;
+
+    #[test]
+    fn test_iterator_read_options_do_not_enable_prefetch_for_point_get() {
+        let read_options = ReadOptions {
+            prefetch_options: PrefetchOptions::prefetch_for_large_range_scan(),
+            ..Default::default()
+        };
+
+        let iterator_options = SstableIteratorReadOptions::from_read_options(&read_options);
+        assert!(!iterator_options.prefetch);
+        assert!(iterator_options.scan_end_user_key.is_none());
+    }
 
     #[test]
     fn test_sstable_meta_enc_dec() {

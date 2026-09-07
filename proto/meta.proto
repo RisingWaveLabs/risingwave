@@ -27,7 +27,8 @@ service TelemetryInfoService {
 
 message HeartbeatRequest {
   uint32 node_id = 1;
-  common.WorkerNode.Resource resource = 2;
+  reserved 2;
+  reserved "resource";
 }
 
 message HeartbeatResponse {
@@ -637,6 +638,7 @@ message MetaSnapshot {
   repeated FragmentWorkerSlotMapping streaming_worker_slot_mappings = 21;
   repeated FragmentWorkerSlotMapping serving_worker_slot_mappings = 22;
   repeated ObjectDependency object_dependencies = 26;
+  TableRefillRuntimeConfig table_refill_runtime_config = 27;
 
   SnapshotVersion version = 13;
 }
@@ -698,6 +700,7 @@ message SubscribeResponse {
     FragmentWorkerSlotMappings serving_worker_slot_mappings = 28;
     catalog.Secret secret = 29;
     common.ClusterResource cluster_resource = 31;
+    TableRefillRuntimeConfig table_refill_runtime_config = 32;
   }
   reserved 12;
   reserved "parallel_unit_mapping";
@@ -705,6 +708,47 @@ message SubscribeResponse {
   reserved "serving_parallel_unit_mappings";
   reserved 30;
   reserved "compute_node_total_cpu_count";
+}
+
+message TableRefillRuntimeConfig {
+  TableCacheRefillPolicies table_cache_refill_policies = 1;
+  ServingTableVnodeMappings serving_table_vnode_mappings = 2;
+  uint64 version = 3;
+}
+
+message ServingTableVnodeMappings {
+  repeated ServingTableVnodeMapping mappings = 1;
+  message ServingTableVnodeMapping {
+    uint32 table_id = 1;
+    common.Buffer bitmap = 2;
+  }
+}
+
+message TableCacheRefillPolicies {
+  // Contains explicit result-table overrides only.
+  repeated TableCacheRefillPolicy table_policies = 1;
+  // Contains explicit internal-table overrides only.
+  repeated TableCacheRefillPolicy internal_table_policies = 2;
+
+  message TableCacheRefillPolicy {
+    uint32 table_id = 1;
+    CacheRefillPolicy policy = 2;
+
+    enum CacheRefillPolicy {
+      /// Unspecified policy, use global default configuration.
+      UNSPECIFIED = 0;
+      /// Enable normal cache refill for the table.
+      ENABLED = 1;
+      /// Disable cache refill for the table.
+      DISABLED = 2;
+      /// Enable cache refill optimized for streaming workloads for this table.
+      STREAMING = 3;
+      /// Enable cache refill optimized for serving workloads for this table.
+      SERVING = 4;
+      /// Enable cache refill optimized for both streaming and serving workloads for this table.
+      BOTH = 5;
+    }
+  }
 }
 
 service NotificationService {
@@ -859,9 +903,17 @@ message SetSystemParamResponse {
   optional SystemParams params = 1;
 }
 
+message ClearFileCacheRequest {
+  bool clear_meta_cache = 1;
+  bool clear_data_cache = 2;
+}
+
+message ClearFileCacheResponse {}
+
 service SystemParamsService {
   rpc GetSystemParams(GetSystemParamsRequest) returns (GetSystemParamsResponse);
   rpc SetSystemParam(SetSystemParamRequest) returns (SetSystemParamResponse);
+  rpc ClearFileCache(ClearFileCacheRequest) returns (ClearFileCacheResponse);
 }
 
 message GetSessionParamsRequest {}

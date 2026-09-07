@@ -45,7 +45,7 @@ impl StreamExchange {
         assert_matches!(
             dist,
             Distribution::HashShard(_) | Distribution::Single | Distribution::Broadcast,
-            "exchange can not be used to enforce such distribution"
+            "exchange cannot be used to enforce this distribution"
         );
 
         // For non-append-only distributed stream, check that distribution key is a subset of stream key

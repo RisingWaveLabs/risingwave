@@ -112,7 +112,7 @@ format plain encode protobuf (
   schema.registry = 'http://schemaregistry:8082',
   message = 'test.package.MessageH.MessageI');
 
-statement error message test.package.Message not defined in proto
+statement error message `test.package.Message` is not defined in the Protobuf schema
 create sink sink_invalid_message from into_kafka with (
   connector = 'kafka',
   topic = 'test-rw-sink-append-only-protobuf-csr-a',
@@ -216,7 +216,7 @@ format plain encode protobuf (
   schema.location = 'file:///risingwave/src/connector/codec/tests/test_data/all-types.pb',
   message = 'all_types.AllTypes');
 
-statement error s3 URL not supported yet
+statement error `s3://` schema locations are not supported yet
 create sink sink_err from into_kafka with (
   connector = 'kafka',
   topic = 'test-rw-sink-append-only-protobuf',

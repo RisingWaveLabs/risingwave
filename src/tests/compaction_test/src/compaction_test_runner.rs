@@ -26,7 +26,7 @@ use clap::Parser;
 use foyer::Hint;
 use risingwave_common::catalog::TableOption;
 use risingwave_common::config::{
-    MetaConfig, NoOverride, extract_storage_memory_config, load_config,
+    MetaConfig, NoOverride, Role, extract_storage_memory_config, load_config,
 };
 use risingwave_common::util::addr::HostAddr;
 use risingwave_common::util::iter_util::ZipEqFast;
@@ -714,6 +714,7 @@ pub async fn create_hummock_store_with_metrics(
 
     let state_store_impl = StateStoreImpl::new(
         &opts.state_store,
+        Role::None,
         storage_opts,
         Arc::new(MonitoredHummockMetaClient::new(
             meta_client.clone(),

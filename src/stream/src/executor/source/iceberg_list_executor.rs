@@ -14,24 +14,24 @@
 
 use std::sync::Arc;
 
-use anyhow::{Context, anyhow};
+use anyhow::anyhow;
 use either::Either;
 use futures_async_stream::try_stream;
-use iceberg::scan::FileScanTask;
-use iceberg::spec::DataContentType;
 use parking_lot::Mutex;
 use risingwave_common::array::Op;
 use risingwave_common::catalog::ColumnCatalog;
 use risingwave_common::config::StreamingConfig;
 use risingwave_common::system_param::local_manager::SystemParamsReaderRef;
 use risingwave_connector::source::ConnectorProperties;
-use risingwave_connector::source::iceberg::IcebergProperties;
-use risingwave_connector::source::iceberg::metrics::GLOBAL_ICEBERG_SCAN_METRICS;
+use risingwave_connector::source::iceberg::{
+    IcebergIncrementalScan, IcebergScanMetricsLabels, IcebergScanPlanner, IcebergScanProjection,
+    PersistedFileScanTask,
+};
 use risingwave_connector::source::reader::desc::SourceDescBuilder;
 use thiserror_ext::AsReport;
 use tokio::sync::mpsc::UnboundedReceiver;
 
-use super::{PersistedFileScanTask, StreamSourceCore, barrier_to_message_stream};
+use super::{StreamSourceCore, barrier_to_message_stream};
 use crate::executor::prelude::*;
 use crate::executor::stream_reader::StreamReaderWithPause;
 
@@ -114,24 +114,27 @@ impl<S: StateStore> IcebergListExecutor<S> {
             unreachable!()
         };
 
-        // Get consistent column names for schema stability across snapshots
-        let downstream_columns = self.downstream_columns.map(|columns| {
-            columns
-                .iter()
-                .filter_map(|col| {
-                    if col.is_hidden() {
-                        None
-                    } else {
-                        Some(col.name().to_owned())
-                    }
-                })
-                .collect::<Vec<_>>()
-        });
+        let scan_projection =
+            IcebergScanProjection::from_downstream_columns(self.downstream_columns.as_deref());
 
-        tracing::debug!("downstream_columns: {:?}", downstream_columns);
+        tracing::debug!("scan_projection: {:?}", scan_projection);
 
         yield Message::Barrier(first_barrier);
         let barrier_stream = barrier_to_message_stream(barrier_receiver).boxed();
+
+        let source_id_str = self.stream_source_core.source_id.to_string();
+        let source_name_str = self.stream_source_core.source_name.clone();
+        let table_name = iceberg_properties.table.table_name().to_owned();
+        let scan_metrics = IcebergScanMetricsLabels::new(
+            source_id_str.clone(),
+            source_name_str.clone(),
+            table_name,
+        );
+        let scan_planner = IcebergScanPlanner::new(
+            (*iceberg_properties).clone(),
+            scan_projection,
+            Some(scan_metrics.clone()),
+        );
 
         let state_table = self.stream_source_core.split_state_store.state_table_mut();
         state_table.init_epoch(first_epoch).await?;
@@ -143,39 +146,23 @@ impl<S: StateStore> IcebergListExecutor<S> {
         if last_snapshot.is_none() {
             // do a regular scan, then switch to incremental scan
             // TODO: we may support starting from a specific snapshot/timestamp later
-            let table = iceberg_properties.load_table().await?;
-            // If current_snapshot is None (empty table), we go to incremental scan directly.
-            if let Some(start_snapshot) = table.metadata().current_snapshot() {
-                last_snapshot = Some(start_snapshot.snapshot_id());
-                let snapshot_scan_builder = table.scan().snapshot_id(start_snapshot.snapshot_id());
-
-                let snapshot_scan = if let Some(ref downstream_columns) = downstream_columns {
-                    snapshot_scan_builder.select(downstream_columns)
-                } else {
-                    // for backward compatibility
-                    snapshot_scan_builder.select_all()
-                }
-                .build()
-                .context("failed to build iceberg scan")?;
-
+            // If the current snapshot is None (empty table), go to incremental scan directly.
+            if let Some(snapshot_plan) = scan_planner.plan_current_snapshot().await? {
+                last_snapshot = Some(snapshot_plan.snapshot_id);
                 let mut chunk_builder = StreamChunkBuilder::new(
                     self.streaming_config.developer.chunk_size,
                     vec![DataType::Varchar, DataType::Jsonb],
                 );
                 #[for_await]
-                for scan_task in snapshot_scan
-                    .plan_files()
-                    .await
-                    .context("failed to plan iceberg files")?
-                {
-                    let scan_task = scan_task.context("failed to get scan task")?;
+                for scan_task in snapshot_plan.tasks {
+                    let scan_task = scan_task?;
+                    let data_file_path = scan_task.data_file_path.clone();
+                    let persisted_task = PersistedFileScanTask::encode(scan_task)?;
                     if let Some(chunk) = chunk_builder.append_row(
                         Op::Insert,
                         &[
-                            Some(ScalarImpl::Utf8(scan_task.data_file_path().into())),
-                            Some(ScalarImpl::Jsonb(
-                                serde_json::to_value(scan_task).unwrap().into(),
-                            )),
+                            Some(ScalarImpl::Utf8(data_file_path.into())),
+                            Some(ScalarImpl::Jsonb(persisted_task)),
                         ],
                     ) {
                         yield Message::Chunk(chunk);
@@ -187,28 +174,22 @@ impl<S: StateStore> IcebergListExecutor<S> {
             }
         }
 
-        let source_id_str = self.stream_source_core.source_id.to_string();
-        let source_name_str = self.stream_source_core.source_name.clone();
-        let list_table_name = iceberg_properties.table.table_name().to_owned();
-        let list_metrics = &GLOBAL_ICEBERG_SCAN_METRICS;
-
         let last_snapshot = Arc::new(Mutex::new(last_snapshot));
         let build_incremental_stream = || {
             incremental_scan_stream(
-                (*iceberg_properties).clone(),
+                scan_planner.clone(),
                 last_snapshot.clone(),
                 self.streaming_config.developer.iceberg_list_interval_sec,
-                downstream_columns.clone(),
-                source_id_str.clone(),
-                source_name_str.clone(),
             )
             .map(|res| match res {
                 Ok(scan_task) => {
+                    let data_file_path = scan_task.data_file_path.clone();
+                    let persisted_task = PersistedFileScanTask::encode(scan_task)?;
                     let row = (
                         Op::Insert,
                         OwnedRow::new(vec![
-                            Some(ScalarImpl::Utf8(scan_task.data_file_path().into())),
-                            Some(ScalarImpl::Jsonb(PersistedFileScanTask::encode(scan_task))),
+                            Some(ScalarImpl::Utf8(data_file_path.into())),
+                            Some(ScalarImpl::Jsonb(persisted_task)),
                         ]),
                     );
                     Ok(StreamChunk::from_rows(
@@ -232,15 +213,7 @@ impl<S: StateStore> IcebergListExecutor<S> {
                         error = %e.as_report(),
                         "incremental iceberg list stream errored, rebuilding"
                     );
-                    list_metrics
-                        .iceberg_source_scan_errors_total
-                        .with_guarded_label_values(&[
-                            source_id_str.as_str(),
-                            source_name_str.as_str(),
-                            list_table_name.as_str(),
-                            "list_error",
-                        ])
-                        .inc();
+                    scan_metrics.record_scan_error("list_error");
                     stream.replace_data_stream(build_incremental_stream());
                 }
                 Ok(msg) => match msg {
@@ -287,167 +260,33 @@ impl<S: StateStore> IcebergListExecutor<S> {
 }
 
 /// `last_snapshot` is EXCLUSIVE (i.e., already scanned)
-#[try_stream(boxed, ok = FileScanTask, error = StreamExecutorError)]
+#[try_stream(
+    boxed,
+    ok = iceberg::scan::FileScanTask,
+    error = StreamExecutorError
+)]
 async fn incremental_scan_stream(
-    iceberg_properties: IcebergProperties,
+    scan_planner: IcebergScanPlanner,
     last_snapshot_lock: Arc<Mutex<Option<i64>>>,
     list_interval_sec: u64,
-    downstream_columns: Option<Vec<String>>,
-    source_id: String,
-    source_name: String,
 ) {
-    let metrics = &GLOBAL_ICEBERG_SCAN_METRICS;
-    let table_name = iceberg_properties.table.table_name().to_owned();
-    let label_values = [
-        source_id.as_str(),
-        source_name.as_str(),
-        table_name.as_str(),
-    ];
-
     let mut last_snapshot: Option<i64> = *last_snapshot_lock.lock();
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(list_interval_sec)).await;
 
-        // XXX: should we use sth like table.refresh() instead of reload the table every time?
-        // iceberg-java does this, but iceberg-rust doesn't have this API now.
-        let table = iceberg_properties.load_table().await?;
-
-        let Some(current_snapshot) = table.metadata().current_snapshot() else {
-            tracing::info!("Skip incremental scan because table is empty");
-            continue;
-        };
-
-        if Some(current_snapshot.snapshot_id()) == last_snapshot {
-            // Ingestion is caught up — lag is 0.
-            metrics
-                .iceberg_source_snapshot_lag_seconds
-                .with_guarded_label_values(&label_values)
-                .set(0);
-
-            tracing::info!(
-                "Current table snapshot is already enumerated: {}, no new snapshot available",
-                current_snapshot.snapshot_id()
-            );
-            continue;
-        }
-
-        if let Some(last_snapshot_id) = last_snapshot
-            && let Some(last_ingested_snapshot) = table
-                .metadata()
-                .snapshots()
-                .find(|snapshot| snapshot.snapshot_id() == last_snapshot_id)
-        {
-            let lag_secs =
-                (current_snapshot.timestamp_ms() - last_ingested_snapshot.timestamp_ms()).max(0)
-                    / 1000;
-            metrics
-                .iceberg_source_snapshot_lag_seconds
-                .with_guarded_label_values(&label_values)
-                .set(lag_secs);
-        }
-
-        // New snapshot discovered.
-        metrics
-            .iceberg_source_snapshots_discovered_total
-            .with_guarded_label_values(&label_values)
-            .inc();
-
-        let mut incremental_scan = table.scan().to_snapshot_id(current_snapshot.snapshot_id());
-        if let Some(last_snapshot) = last_snapshot {
-            incremental_scan = incremental_scan.from_snapshot_id(last_snapshot);
-        }
-        let incremental_scan = if let Some(ref downstream_columns) = downstream_columns {
-            incremental_scan.select(downstream_columns)
-        } else {
-            // for backward compatibility
-            incremental_scan.select_all()
-        }
-        .build()
-        .context("failed to build iceberg scan")?;
-
-        let mut list_duration = std::time::Duration::default();
-        let mut active_since = std::time::Instant::now();
-        let mut data_file_count: u64 = 0;
-        let mut eq_delete_count: u64 = 0;
-        let mut pos_delete_count: u64 = 0;
-
-        #[for_await]
-        for scan_task in incremental_scan
-            .plan_files()
-            .await
-            .context("failed to plan iceberg files")?
-        {
-            let scan_task = scan_task.context("failed to get scan task")?;
-
-            // Count file types: the main task is a data file, deletes are attached.
-            data_file_count += 1;
-            for delete_task in &scan_task.deletes {
-                match delete_task.data_file_content {
-                    DataContentType::EqualityDeletes => eq_delete_count += 1,
-                    DataContentType::PositionDeletes => pos_delete_count += 1,
-                    _ => {}
+        match scan_planner.plan_incremental(last_snapshot).await? {
+            IcebergIncrementalScan::EmptyTable | IcebergIncrementalScan::UpToDate { .. } => {}
+            IcebergIncrementalScan::Planned(plan) => {
+                #[for_await]
+                for scan_task in plan.tasks {
+                    yield scan_task?;
                 }
+
+                last_snapshot = Some(plan.snapshot_id);
+                *last_snapshot_lock.lock() = last_snapshot;
+                scan_planner.record_caught_up();
             }
-
-            // Record delete files per data file.
-            metrics
-                .iceberg_source_delete_files_per_data_file
-                .with_guarded_label_values(&label_values)
-                .observe(scan_task.deletes.len() as f64);
-
-            list_duration += active_since.elapsed();
-            yield scan_task;
-            active_since = std::time::Instant::now();
         }
-
-        list_duration += active_since.elapsed();
-        metrics
-            .iceberg_source_list_duration_seconds
-            .with_guarded_label_values(&label_values)
-            .observe(list_duration.as_secs_f64());
-
-        if data_file_count > 0 {
-            metrics
-                .iceberg_source_files_discovered_total
-                .with_guarded_label_values(&[
-                    label_values[0],
-                    label_values[1],
-                    label_values[2],
-                    "data",
-                ])
-                .inc_by(data_file_count);
-        }
-        if eq_delete_count > 0 {
-            metrics
-                .iceberg_source_files_discovered_total
-                .with_guarded_label_values(&[
-                    label_values[0],
-                    label_values[1],
-                    label_values[2],
-                    "eq_delete",
-                ])
-                .inc_by(eq_delete_count);
-        }
-        if pos_delete_count > 0 {
-            metrics
-                .iceberg_source_files_discovered_total
-                .with_guarded_label_values(&[
-                    label_values[0],
-                    label_values[1],
-                    label_values[2],
-                    "pos_delete",
-                ])
-                .inc_by(pos_delete_count);
-        }
-
-        // This scan has fully ingested the latest snapshot we observed, so lag returns to 0.
-        metrics
-            .iceberg_source_snapshot_lag_seconds
-            .with_guarded_label_values(&label_values)
-            .set(0);
-
-        last_snapshot = Some(current_snapshot.snapshot_id());
-        *last_snapshot_lock.lock() = last_snapshot;
     }
 }
 

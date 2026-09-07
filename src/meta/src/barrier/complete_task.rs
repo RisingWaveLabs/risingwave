@@ -110,6 +110,7 @@ impl CompleteBarrierTask {
             //   1. pre_commit: persist pending rows under `pending_sink_state` (no iceberg I/O).
             //   2. commit_epoch: advance hummock.
             //   3. commit: drive iceberg overwrite_files for queued epochs.
+            //   4. advance_committed_epochs: advance the per-partial-graph committed epoch cursor.
             let mut iceberg_pk_index_commit_sink_ids = Vec::new();
             if !self.iceberg_pk_index_sink_metadata.is_empty() {
                 let res = context
@@ -125,6 +126,11 @@ impl CompleteBarrierTask {
                     .commit_iceberg_pk_index_sink_metadata(iceberg_pk_index_commit_sink_ids)
                     .await?;
             }
+            let epochs = self
+                .epoch_infos
+                .iter()
+                .map(|(id, info)| (*id, info.barrier_info.prev_epoch()));
+            context.advance_iceberg_pk_index_sink_committed_epochs(epochs);
 
             // Handle list finished source IDs for refreshable batch sources
             // Spawn this asynchronously to avoid deadlock during barrier collection
@@ -157,7 +163,7 @@ impl CompleteBarrierTask {
                 let (database_id, job_id) = from_partial_graph_id(partial_graph_id);
                 let command_name = info.post_collect_command.command_name().to_owned();
                 let elapsed_secs = info.elapsed_secs();
-                notifiers.extend(info.notifiers);
+                notifiers.extend(info.notifier);
                 context
                     .post_collect_command(info.post_collect_command)
                     .await?;
@@ -169,10 +175,6 @@ impl CompleteBarrierTask {
                         &info.barrier_info,
                         command_name,
                     );
-                    GLOBAL_META_METRICS
-                        .last_committed_barrier_time
-                        .with_label_values(&[database_id.to_string().as_str()])
-                        .set(info.barrier_info.curr_epoch.value().as_unix_secs() as i64);
                 }
             }
 

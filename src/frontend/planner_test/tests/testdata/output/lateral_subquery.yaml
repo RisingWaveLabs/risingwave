@@ -160,6 +160,157 @@
     └─StreamProject { exprs: [t.x, t.arr, Unnest($1), t._row_id, _rw_projected_row_id] }
       └─StreamProjectSet { select_list: [$0, $1, Unnest($1), $2] }
         └─StreamTableScan { table: t, columns: [t.x, t.arr, t._row_id], stream_scan_type: SnapshotBackfill, stream_key: [t._row_id], pk: [_row_id], dist: UpstreamHashShard(t._row_id) }
+- name: https://github.com/risingwavelabs/risingwave/issues/12238
+  sql: |
+    create table a (a1 int);
+    create table b (b1 varchar);
+    select * from a, b cross join regexp_matches(repeat(b1, a1), '.', 'g');
+  logical_plan: |-
+    LogicalProject { exprs: [a.a1, b.b1, regexp_matches] }
+    └─LogicalApply { type: Inner, on: true, correlated_id: 1 }
+      ├─LogicalScan { table: a, columns: [a.a1, a._row_id, a._rw_timestamp] }
+      └─LogicalApply { type: Inner, on: true, correlated_id: 2 }
+        ├─LogicalScan { table: b, columns: [b.b1, b._row_id, b._rw_timestamp] }
+        └─LogicalTableFunction { table_function: RegexpMatches(Repeat(CorrelatedInputRef { index: 0, correlated_id: 2 }, CorrelatedInputRef { index: 0, correlated_id: 1 }), '.':Varchar, 'g':Varchar) }
+  batch_plan: |-
+    BatchExchange { order: [], dist: Single }
+    └─BatchHashJoin { type: Inner, predicate: a.a1 IS NOT DISTINCT FROM a.a1, output: [a.a1, b.b1, RegexpMatches(Repeat($1, $0), '.':Varchar, 'g':Varchar)] }
+      ├─BatchExchange { order: [], dist: HashShard(a.a1) }
+      │ └─BatchScan { table: a, columns: [a.a1], distribution: SomeShard }
+      └─BatchExchange { order: [], dist: HashShard(a.a1) }
+        └─BatchProjectSet { select_list: [$0, $1, RegexpMatches(Repeat($1, $0), '.':Varchar, 'g':Varchar)] }
+          └─BatchNestedLoopJoin { type: Inner, predicate: true, output: all }
+            ├─BatchExchange { order: [], dist: Single }
+            │ └─BatchHashAgg { group_key: [a.a1], aggs: [] }
+            │   └─BatchExchange { order: [], dist: HashShard(a.a1) }
+            │     └─BatchScan { table: a, columns: [a.a1], distribution: SomeShard }
+            └─BatchExchange { order: [], dist: Single }
+              └─BatchScan { table: b, columns: [b.b1], distribution: SomeShard }
+- name: https://github.com/risingwavelabs/risingwave/issues/12238 nested cross join
+  sql: |
+    create table a (a1 int);
+    create table b (b1 varchar);
+    select * from a cross join (b cross join regexp_matches(repeat(b1, a1), '.', 'g'));
+  batch_plan: |-
+    BatchExchange { order: [], dist: Single }
+    └─BatchHashJoin { type: Inner, predicate: a.a1 IS NOT DISTINCT FROM a.a1, output: [a.a1, b.b1, RegexpMatches(Repeat($1, $0), '.':Varchar, 'g':Varchar)] }
+      ├─BatchExchange { order: [], dist: HashShard(a.a1) }
+      │ └─BatchScan { table: a, columns: [a.a1], distribution: SomeShard }
+      └─BatchExchange { order: [], dist: HashShard(a.a1) }
+        └─BatchProjectSet { select_list: [$0, $1, RegexpMatches(Repeat($1, $0), '.':Varchar, 'g':Varchar)] }
+          └─BatchNestedLoopJoin { type: Inner, predicate: true, output: all }
+            ├─BatchExchange { order: [], dist: Single }
+            │ └─BatchHashAgg { group_key: [a.a1], aggs: [] }
+            │   └─BatchExchange { order: [], dist: HashShard(a.a1) }
+            │     └─BatchScan { table: a, columns: [a.a1], distribution: SomeShard }
+            └─BatchExchange { order: [], dist: Single }
+              └─BatchScan { table: b, columns: [b.b1], distribution: SomeShard }
+- name: https://github.com/risingwavelabs/risingwave/issues/12238 explicit lateral subquery
+  sql: |
+    create table a (a1 int);
+    create table b (b1 varchar);
+    select * from a, b cross join lateral
+      (select regexp_matches(repeat(b1, a1), '.', 'g')) z;
+  batch_plan: |-
+    BatchExchange { order: [], dist: Single }
+    └─BatchHashJoin { type: Inner, predicate: a.a1 IS NOT DISTINCT FROM a.a1, output: [a.a1, b.b1, RegexpMatches(Repeat($1, $0), '.':Varchar, 'g':Varchar)] }
+      ├─BatchExchange { order: [], dist: HashShard(a.a1) }
+      │ └─BatchScan { table: a, columns: [a.a1], distribution: SomeShard }
+      └─BatchExchange { order: [], dist: HashShard(a.a1) }
+        └─BatchProjectSet { select_list: [$0, $1, RegexpMatches(Repeat($1, $0), '.':Varchar, 'g':Varchar)] }
+          └─BatchNestedLoopJoin { type: Inner, predicate: true, output: all }
+            ├─BatchExchange { order: [], dist: Single }
+            │ └─BatchHashAgg { group_key: [a.a1], aggs: [] }
+            │   └─BatchExchange { order: [], dist: HashShard(a.a1) }
+            │     └─BatchScan { table: a, columns: [a.a1], distribution: SomeShard }
+            └─BatchExchange { order: [], dist: Single }
+              └─BatchScan { table: b, columns: [b.b1], distribution: SomeShard }
+- name: nested lateral through a left join
+  sql: |
+    create table a (a1 int);
+    create table b (b1 varchar);
+    select * from a, b left join lateral
+      (select regexp_matches(repeat(b1, a1), '.', 'g')) z on true;
+  batch_plan: |-
+    BatchExchange { order: [], dist: Single }
+    └─BatchHashJoin { type: Inner, predicate: a.a1 IS NOT DISTINCT FROM a.a1, output: [a.a1, b.b1, RegexpMatches(Repeat($1, $0), '.':Varchar, 'g':Varchar)] }
+      ├─BatchExchange { order: [], dist: HashShard(a.a1) }
+      │ └─BatchScan { table: a, columns: [a.a1], distribution: SomeShard }
+      └─BatchExchange { order: [], dist: HashShard(a.a1) }
+        └─BatchHashJoin { type: LeftOuter, predicate: b.b1 IS NOT DISTINCT FROM b.b1 AND a.a1 IS NOT DISTINCT FROM a.a1, output: [a.a1, b.b1, RegexpMatches(Repeat($1, $0), '.':Varchar, 'g':Varchar)] }
+          ├─BatchExchange { order: [], dist: HashShard(a.a1, b.b1) }
+          │ └─BatchNestedLoopJoin { type: Inner, predicate: true, output: all }
+          │   ├─BatchExchange { order: [], dist: Single }
+          │   │ └─BatchHashAgg { group_key: [a.a1], aggs: [] }
+          │   │   └─BatchExchange { order: [], dist: HashShard(a.a1) }
+          │   │     └─BatchScan { table: a, columns: [a.a1], distribution: SomeShard }
+          │   └─BatchExchange { order: [], dist: Single }
+          │     └─BatchScan { table: b, columns: [b.b1], distribution: SomeShard }
+          └─BatchExchange { order: [], dist: HashShard(a.a1, b.b1) }
+            └─BatchProject { exprs: [a.a1, b.b1, RegexpMatches(Repeat($1, $0), '.':Varchar, 'g':Varchar)] }
+              └─BatchProjectSet { select_list: [$0, $1, RegexpMatches(Repeat($1, $0), '.':Varchar, 'g':Varchar)] }
+                └─BatchNestedLoopJoin { type: Inner, predicate: true, output: all }
+                  ├─BatchExchange { order: [], dist: Single }
+                  │ └─BatchHashAgg { group_key: [a.a1], aggs: [] }
+                  │   └─BatchExchange { order: [], dist: HashShard(a.a1) }
+                  │     └─BatchScan { table: a, columns: [a.a1], distribution: SomeShard }
+                  └─BatchExchange { order: [], dist: Single }
+                    └─BatchHashAgg { group_key: [b.b1], aggs: [] }
+                      └─BatchExchange { order: [], dist: HashShard(b.b1) }
+                        └─BatchScan { table: b, columns: [b.b1], distribution: SomeShard }
+- name: three nested lateral scopes
+  sql: |
+    create table a (a1 int);
+    create table b (b1 varchar);
+    create table c (c1 int);
+    select * from a, b cross join
+      (c cross join regexp_matches(repeat(b1, a1 + c1), '.', 'g'));
+  batch_plan: |-
+    BatchExchange { order: [], dist: Single }
+    └─BatchHashJoin { type: Inner, predicate: b.b1 IS NOT DISTINCT FROM b.b1 AND a.a1 IS NOT DISTINCT FROM a.a1, output: [a.a1, b.b1, c.c1, RegexpMatches(Repeat($1, ($0 + $2)), '.':Varchar, 'g':Varchar)] }
+      ├─BatchExchange { order: [], dist: HashShard(a.a1, b.b1) }
+      │ └─BatchNestedLoopJoin { type: Inner, predicate: true, output: all }
+      │   ├─BatchExchange { order: [], dist: Single }
+      │   │ └─BatchScan { table: a, columns: [a.a1], distribution: SomeShard }
+      │   └─BatchExchange { order: [], dist: Single }
+      │     └─BatchScan { table: b, columns: [b.b1], distribution: SomeShard }
+      └─BatchExchange { order: [], dist: HashShard(a.a1, b.b1) }
+        └─BatchProjectSet { select_list: [$0, $1, $2, RegexpMatches(Repeat($1, ($0 + $2)), '.':Varchar, 'g':Varchar)] }
+          └─BatchNestedLoopJoin { type: Inner, predicate: true, output: all }
+            ├─BatchNestedLoopJoin { type: Inner, predicate: true, output: all }
+            │ ├─BatchExchange { order: [], dist: Single }
+            │ │ └─BatchHashAgg { group_key: [a.a1], aggs: [] }
+            │ │   └─BatchExchange { order: [], dist: HashShard(a.a1) }
+            │ │     └─BatchScan { table: a, columns: [a.a1], distribution: SomeShard }
+            │ └─BatchExchange { order: [], dist: Single }
+            │   └─BatchHashAgg { group_key: [b.b1], aggs: [] }
+            │     └─BatchExchange { order: [], dist: HashShard(b.b1) }
+            │       └─BatchScan { table: b, columns: [b.b1], distribution: SomeShard }
+            └─BatchExchange { order: [], dist: Single }
+              └─BatchScan { table: c, columns: [c.c1], distribution: SomeShard }
+- name: lateral first factor in a nested join
+  sql: |
+    create table a (a1 int);
+    create table b (b1 varchar);
+    select * from a cross join (lateral (select a1) x cross join b);
+  batch_plan: |-
+    BatchNestedLoopJoin { type: Inner, predicate: true, output: all }
+    ├─BatchExchange { order: [], dist: Single }
+    │ └─BatchHashJoin { type: Inner, predicate: a.a1 IS NOT DISTINCT FROM a.a1, output: all }
+    │   ├─BatchExchange { order: [], dist: HashShard(a.a1) }
+    │   │ └─BatchScan { table: a, columns: [a.a1], distribution: SomeShard }
+    │   └─BatchHashAgg { group_key: [a.a1], aggs: [] }
+    │     └─BatchExchange { order: [], dist: HashShard(a.a1) }
+    │       └─BatchScan { table: a, columns: [a.a1], distribution: SomeShard }
+    └─BatchExchange { order: [], dist: Single }
+      └─BatchScan { table: b, columns: [b.b1], distribution: SomeShard }
+- name: nested lateral through a right join is rejected
+  sql: |
+    create table a (a1 int);
+    create table b (b1 varchar);
+    select * from a right join
+      (b cross join lateral (select a1, b1) z) on true;
+  binder_error: 'Invalid input syntax: The combining JOIN type must be INNER or LEFT for a LATERAL reference.'
 - name: https://github.com/risingwavelabs/risingwave/issues/12298
   sql: |
     create table t1(c varchar, n varchar, id varchar, d varchar);

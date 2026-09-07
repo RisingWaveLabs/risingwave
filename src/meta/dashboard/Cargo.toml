@@ -27,7 +27,6 @@ tracing-subscriber = "0.3"
 anyhow = "1"
 cargo-emit = "0.2"
 dircpy = "0.3"
-npm_rs = "1"
 
 [lints]
 workspace = true

@@ -55,15 +55,23 @@ mod private {
     pub trait Key: Eq + std::hash::Hash {}
     impl<K> Key for K where K: Eq + std::hash::Hash {}
 
-    pub trait Row: Eq + Default {}
-    impl<R> Row for R where R: Eq + Default {}
+    pub trait Row: Eq {}
+    impl<R> Row for R where R: Eq {}
+}
+
+/// The accumulated change of a key, with each side in an [`Option`] so that state
+/// transitions can take one side out in place. `(None, None)` entries are removed eagerly.
+#[derive(Debug)]
+struct Slot<R> {
+    old: Option<R>,
+    new: Option<R>,
 }
 
 /// A buffer that accumulates changes and produce compacted changes.
 #[derive(Debug)]
 pub struct ChangeBuffer<K, R> {
     // We use an `IndexMap` to preserve the original order of the changes as much as possible.
-    buffer: IndexMap<K, Record<R>>,
+    buffer: IndexMap<K, Slot<R>>,
     ib: InconsistencyBehavior,
 }
 
@@ -77,22 +85,18 @@ where
         let entry = self.buffer.entry(key);
         match entry {
             Entry::Vacant(e) => {
-                e.insert(Record::Insert { new_row });
+                e.insert(Slot {
+                    old: None,
+                    new: Some(new_row),
+                });
             }
-            Entry::Occupied(mut e) => match e.get_mut() {
-                Record::Delete { old_row } => {
-                    let old_row = std::mem::take(old_row);
-                    e.insert(Record::Update { old_row, new_row });
-                }
-                Record::Insert { new_row: dst } => {
+            Entry::Occupied(mut e) => {
+                let slot = e.get_mut();
+                if slot.new.is_some() {
                     self.ib.report("inconsistent changes: double-inserting");
-                    *dst = new_row;
                 }
-                Record::Update { new_row: dst, .. } => {
-                    self.ib.report("inconsistent changes: double-inserting");
-                    *dst = new_row;
-                }
-            },
+                slot.new = Some(new_row);
+            }
         }
     }
 
@@ -101,23 +105,25 @@ where
         let entry = self.buffer.entry(key);
         match entry {
             Entry::Vacant(e) => {
-                e.insert(Record::Delete { old_row });
+                e.insert(Slot {
+                    old: Some(old_row),
+                    new: None,
+                });
             }
-            Entry::Occupied(mut e) => match e.get_mut() {
-                Record::Insert { .. } => {
-                    // FIXME: though preserving the order well,
-                    // this is not performant compared to `swap_remove`
-                    e.shift_remove();
-                }
-                Record::Update { old_row, .. } => {
-                    let old_row = std::mem::take(old_row);
-                    e.insert(Record::Delete { old_row });
-                }
-                Record::Delete { old_row: dst } => {
+            Entry::Occupied(mut e) => {
+                let slot = e.get_mut();
+                if slot.new.take().is_some() {
+                    if slot.old.is_none() {
+                        // The previous `Insert` is fully cancelled by this deletion.
+                        // FIXME: though preserving the order well,
+                        // this is not performant compared to `swap_remove`
+                        e.shift_remove();
+                    }
+                } else {
                     self.ib.report("inconsistent changes: double-deleting");
-                    *dst = old_row;
+                    slot.old = Some(old_row);
                 }
-            },
+            }
         }
     }
 
@@ -126,20 +132,21 @@ where
         let entry = self.buffer.entry(key);
         match entry {
             Entry::Vacant(e) => {
-                e.insert(Record::Update { old_row, new_row });
+                e.insert(Slot {
+                    old: Some(old_row),
+                    new: Some(new_row),
+                });
             }
-            Entry::Occupied(mut e) => match e.get_mut() {
-                Record::Insert { .. } => {
-                    e.insert(Record::Insert { new_row });
-                }
-                Record::Update { new_row: dst, .. } => {
-                    *dst = new_row;
-                }
-                Record::Delete { .. } => {
+            Entry::Occupied(mut e) => {
+                let slot = e.get_mut();
+                if slot.new.is_some() {
+                    slot.new = Some(new_row);
+                } else {
                     self.ib.report("inconsistent changes: update after delete");
-                    e.insert(Record::Update { old_row, new_row });
+                    slot.old = Some(old_row);
+                    slot.new = Some(new_row);
                 }
-            },
+            }
         }
     }
 
@@ -180,11 +187,16 @@ where
     ///
     /// No-op updates are filtered out.
     pub fn into_records(self) -> impl Iterator<Item = Record<R>> {
-        self.buffer.into_values().filter(|record| match record {
-            Record::Insert { .. } => true,
-            Record::Delete { .. } => true,
-            Record::Update { old_row, new_row } => old_row != new_row,
-        })
+        self.buffer
+            .into_values()
+            .filter_map(|slot| match (slot.old, slot.new) {
+                (None, Some(new_row)) => Some(Record::Insert { new_row }),
+                (Some(old_row), None) => Some(Record::Delete { old_row }),
+                (Some(old_row), Some(new_row)) => {
+                    (old_row != new_row).then(|| Record::Update { old_row, new_row })
+                }
+                (None, None) => unreachable!("empty slot should have been removed"),
+            })
     }
 }
 

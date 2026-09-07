@@ -12,15 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use pretty_xmlish::{Pretty, XmlNode};
-use risingwave_common::catalog::Schema;
 use risingwave_pb::batch_plan::plan_node::NodeBody;
 
 use super::batch::prelude::*;
-use super::utils::{Distill, childless_record};
+use super::utils::impl_distill_by_unit;
 use super::{
     BatchPlanRef as PlanRef, ExprRewritable, PlanBase, PlanTreeNodeLeaf, ToBatchPb,
-    ToDistributedBatch,
+    ToDistributedBatch, generic,
 };
 use crate::error::Result;
 use crate::optimizer::plan_node::ToLocalBatch;
@@ -31,69 +29,38 @@ use crate::optimizer::property::{Distribution, Order};
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct BatchGetChannelDeltaStats {
     pub base: PlanBase<Batch>,
-    pub at_time: Option<u64>,
-    pub time_offset: Option<u64>,
+    core: generic::GetChannelDeltaStats,
 }
 
 impl PlanTreeNodeLeaf for BatchGetChannelDeltaStats {}
 impl_plan_tree_node_for_leaf! { Batch, BatchGetChannelDeltaStats }
 
 impl BatchGetChannelDeltaStats {
-    pub fn new(
-        ctx: crate::OptimizerContextRef,
-        schema: Schema,
-        at_time: Option<u64>,
-        time_offset: Option<u64>,
-    ) -> Self {
-        Self::with_dist(ctx, schema, at_time, time_offset, Distribution::Single)
+    pub fn new(core: generic::GetChannelDeltaStats) -> Self {
+        Self::with_dist(core, Distribution::Single)
     }
 
-    pub fn with_dist(
-        ctx: crate::OptimizerContextRef,
-        schema: Schema,
-        at_time: Option<u64>,
-        time_offset: Option<u64>,
-        dist: Distribution,
-    ) -> Self {
-        let base = PlanBase::new_batch(ctx, schema, dist, Order::any());
-        Self {
-            base,
-            at_time,
-            time_offset,
-        }
+    pub fn with_dist(core: generic::GetChannelDeltaStats, dist: Distribution) -> Self {
+        let base = PlanBase::new_batch_with_core(&core, dist, Order::any());
+        Self { base, core }
     }
 
     /// Get the `at_time` parameter
     pub fn at_time(&self) -> Option<u64> {
-        self.at_time
+        self.core.at_time
     }
 
     /// Get the `time_offset` parameter
     pub fn time_offset(&self) -> Option<u64> {
-        self.time_offset
+        self.core.time_offset
     }
 }
 
-impl Distill for BatchGetChannelDeltaStats {
-    fn distill<'a>(&self) -> XmlNode<'a> {
-        let fields = vec![
-            ("at_time", Pretty::debug(&self.at_time)),
-            ("time_offset", Pretty::debug(&self.time_offset)),
-        ];
-        childless_record("BatchGetChannelDeltaStats", fields)
-    }
-}
+impl_distill_by_unit!(BatchGetChannelDeltaStats, core, "BatchGetChannelDeltaStats");
 
 impl ToDistributedBatch for BatchGetChannelDeltaStats {
     fn to_distributed(&self) -> Result<PlanRef> {
-        Ok(Self::with_dist(
-            self.base.ctx(),
-            self.base.schema().clone(),
-            self.at_time,
-            self.time_offset,
-            Distribution::Single,
-        )
-        .into())
+        Ok(Self::with_dist(self.core.clone(), Distribution::Single).into())
     }
 }
 
@@ -102,37 +69,18 @@ impl ToBatchPb for BatchGetChannelDeltaStats {
         use risingwave_pb::batch_plan::GetChannelDeltaStatsNode;
 
         NodeBody::GetChannelDeltaStats(GetChannelDeltaStatsNode {
-            at_time: self.at_time,
-            time_offset: self.time_offset,
+            at_time: self.core.at_time,
+            time_offset: self.core.time_offset,
         })
     }
 }
 
 impl ToLocalBatch for BatchGetChannelDeltaStats {
     fn to_local(&self) -> Result<PlanRef> {
-        Ok(Self::with_dist(
-            self.base.ctx(),
-            self.base.schema().clone(),
-            self.at_time,
-            self.time_offset,
-            Distribution::Single,
-        )
-        .into())
+        Ok(Self::with_dist(self.core.clone(), Distribution::Single).into())
     }
 }
 
-impl ExprRewritable<Batch> for BatchGetChannelDeltaStats {
-    fn has_rewritable_expr(&self) -> bool {
-        false
-    }
+impl ExprRewritable<Batch> for BatchGetChannelDeltaStats {}
 
-    fn rewrite_exprs(&self, _r: &mut dyn crate::expr::ExprRewriter) -> PlanRef {
-        self.clone().into()
-    }
-}
-
-impl crate::optimizer::plan_node::expr_visitable::ExprVisitable for BatchGetChannelDeltaStats {
-    fn visit_exprs(&self, _v: &mut dyn crate::expr::ExprVisitor) {
-        // No expressions to visit
-    }
-}
+impl crate::optimizer::plan_node::expr_visitable::ExprVisitable for BatchGetChannelDeltaStats {}

@@ -212,19 +212,6 @@ def _(outer_panels: Panels):
                             "write to shared_buffer avg - {{table_id}} @ {{%s}} @ {{%s}}"
                             % (COMPONENT_LABEL, NODE_LABEL),
                         ),
-                        *quantile(
-                            lambda quantile, legend: panels.target(
-                                f"histogram_quantile({quantile}, sum(rate({metric('state_store_write_shared_buffer_sync_time_bucket')}[$__rate_interval])) by (le, {COMPONENT_LABEL}, {NODE_LABEL}))",
-                                f"write to object_store p{legend}"
-                                + " - {{%s}} @ {{%s}}" % (COMPONENT_LABEL, NODE_LABEL),
-                            ),
-                            [50, 99, "max"],
-                        ),
-                        panels.target(
-                            f"sum by(le, {COMPONENT_LABEL}, {NODE_LABEL})(rate({metric('state_store_write_shared_buffer_sync_time_sum')}[$__rate_interval]))  / sum by(le, {COMPONENT_LABEL}, {NODE_LABEL})(rate({metric('state_store_write_shared_buffer_sync_time_count')}[$__rate_interval])) > 0",
-                            "write to object_store - {{%s}} @ {{%s}}"
-                            % (COMPONENT_LABEL, NODE_LABEL),
-                        ),
                     ],
                 ),
                 panels.timeseries_ops(

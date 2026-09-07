@@ -97,39 +97,10 @@ impl Binder {
         // Try to find a correlated column in `upper_contexts`, starting from the innermost context.
         let mut err = ErrorCode::ItemNotFound(format!("Invalid column: {}", column_name));
 
-        for (i, lateral_context) in self.lateral_contexts.iter().rev().enumerate() {
-            if lateral_context.is_visible {
-                let context = &lateral_context.context;
-                if matches!(context.clause, Some(Clause::Insert)) {
-                    continue;
-                }
-                // input ref from lateral context `depth` starts from 1.
-                let depth = i + 1;
-                match context.get_column_binding_index(&schema_name, &table_name, &column_name) {
-                    Ok(index) => {
-                        let column = &context.columns[index];
-                        return Ok(CorrelatedInputRef::new(
-                            column.index,
-                            column.field.data_type.clone(),
-                            depth,
-                        )
-                        .into());
-                    }
-                    Err(e) => {
-                        err = e;
-                    }
-                }
-            }
-        }
-
-        for (i, (context, lateral_contexts)) in
-            self.visible_upper_subquery_contexts_rev().enumerate()
-        {
+        for (context, depth) in self.correlation_contexts() {
             if matches!(context.clause, Some(Clause::Insert)) {
                 continue;
             }
-            // `depth` starts from 1.
-            let depth = i + 1;
             match context.get_column_binding_index(&schema_name, &table_name, &column_name) {
                 Ok(index) => {
                     let column = &context.columns[index];
@@ -142,32 +113,6 @@ impl Binder {
                 }
                 Err(e) => {
                     err = e;
-                }
-            }
-
-            for (j, lateral_context) in lateral_contexts.iter().rev().enumerate() {
-                if lateral_context.is_visible {
-                    let context = &lateral_context.context;
-                    if matches!(context.clause, Some(Clause::Insert)) {
-                        continue;
-                    }
-                    // correlated input ref from lateral context `depth` starts from 1.
-                    let depth = i + j + 1;
-                    match context.get_column_binding_index(&schema_name, &table_name, &column_name)
-                    {
-                        Ok(index) => {
-                            let column = &context.columns[index];
-                            return Ok(CorrelatedInputRef::new(
-                                column.index,
-                                column.field.data_type.clone(),
-                                depth,
-                            )
-                            .into());
-                        }
-                        Err(e) => {
-                            err = e;
-                        }
-                    }
                 }
             }
         }
@@ -194,5 +139,47 @@ impl Binder {
         }
 
         Err(err.into())
+    }
+
+    /// Return visible outer column contexts in name-resolution order, paired with the semantic
+    /// correlation depth at which each context is owned.
+    ///
+    /// A non-empty lateral context represents the left input of a potential `Apply`, so it adds a
+    /// depth boundary. Empty contexts are parser/binder isolation frames and do not. An upper
+    /// query or table-function context always contributes at least one boundary, even if its local
+    /// `FROM` context is empty.
+    fn correlation_contexts(&self) -> Vec<(&crate::binder::BindContext, usize)> {
+        let mut contexts = vec![];
+        let mut depth = 1;
+
+        for lateral_context in self.lateral_contexts.iter().rev() {
+            if lateral_context.is_visible {
+                contexts.push((&lateral_context.context, depth));
+            }
+            if !lateral_context.context.columns.is_empty() {
+                depth += 1;
+            }
+        }
+
+        for (context, lateral_contexts) in self.visible_upper_subquery_contexts_rev() {
+            let entry_depth = depth;
+            contexts.push((context, depth));
+            if !context.columns.is_empty() {
+                depth += 1;
+            }
+
+            for lateral_context in lateral_contexts.iter().rev() {
+                if lateral_context.is_visible {
+                    contexts.push((&lateral_context.context, depth));
+                }
+                if !lateral_context.context.columns.is_empty() {
+                    depth += 1;
+                }
+            }
+
+            depth = depth.max(entry_depth + 1);
+        }
+
+        contexts
     }
 }

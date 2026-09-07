@@ -89,6 +89,7 @@ mod timestamptz;
 pub use timestamptz::{time_zone_err, timestamptz_interval_add_internal};
 mod to_char;
 mod to_jsonb;
+mod variant;
 mod vnode;
 pub use to_jsonb::*;
 mod encrypt;

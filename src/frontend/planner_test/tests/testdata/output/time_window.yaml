@@ -115,6 +115,29 @@
     └─StreamHopWindow { time_col: t1.created_at, slide: 1 day, size: 3 days, output: [t1.id, t1.created_at, window_start, t1._row_id] }
       └─StreamFilter { predicate: IsNotNull(t1.created_at) }
         └─StreamTableScan { table: t1, columns: [t1.id, t1.created_at, t1._row_id], stream_scan_type: SnapshotBackfill, stream_key: [t1._row_id], pk: [_row_id], dist: UpstreamHashShard(t1._row_id) }
+- name: hop window does not preserve input order across window lanes
+  sql: |
+    create table t1 (id int primary key, created_at date);
+    select id, created_at
+    from hop(t1, created_at, interval '1' day, interval '3' day)
+    order by id;
+  batch_plan: |-
+    BatchExchange { order: [t1.id ASC], dist: Single }
+    └─BatchSort { order: [t1.id ASC] }
+      └─BatchHopWindow { time_col: t1.created_at, slide: 1 day, size: 3 days, output: [t1.id, t1.created_at] }
+        └─BatchFilter { predicate: IsNotNull(t1.created_at) }
+          └─BatchScan { table: t1, columns: [t1.id, t1.created_at], distribution: UpstreamHashShard(t1.id) }
+- name: single-lane hop window preserves input order
+  sql: |
+    create table t1 (id int primary key, created_at date);
+    select id, created_at
+    from hop(t1, created_at, interval '1' day, interval '1' day)
+    order by id;
+  batch_plan: |-
+    BatchHopWindow { time_col: t1.created_at, slide: 1 day, size: 1 day, output: [t1.id, t1.created_at] }
+    └─BatchExchange { order: [t1.id ASC], dist: Single }
+      └─BatchFilter { predicate: IsNotNull(t1.created_at) }
+        └─BatchScan { table: t1, columns: [t1.id, t1.created_at], distribution: UpstreamHashShard(t1.id) }
 - sql: |
     create table t1 (id int, created_at date);
     select t_hop.id, t_hop.created_at from hop(t1, created_at, interval '1' day, interval '3' day) as t_hop;

@@ -12,8 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use risingwave_common::catalog::{ICEBERG_SINK_PREFIX, ICEBERG_SOURCE_PREFIX};
-use risingwave_pb::catalog::PbTable;
+use risingwave_common::catalog::ICEBERG_SINK_PREFIX;
 use risingwave_pb::catalog::subscription::PbSubscriptionState;
 use risingwave_pb::telemetry::PbTelemetryDatabaseObject;
 use sea_orm::{ColumnTrait, DatabaseTransaction, EntityTrait, ModelTrait, QueryFilter};
@@ -38,7 +37,6 @@ impl CatalogController {
             .await?
             .ok_or_else(|| MetaError::catalog_id_not_found(object_type.as_str(), object_id))?;
         assert_eq!(obj.obj_type, object_type);
-        let drop_database = object_type == ObjectType::Database;
         let database_id = if object_type == ObjectType::Database {
             object_id.as_database_id()
         } else {
@@ -52,7 +50,9 @@ impl CatalogController {
         }
 
         let mut removed_objects = match drop_mode {
-            DropMode::Cascade => get_referring_objects_cascade(object_id, &txn).await?,
+            DropMode::Cascade => {
+                get_referring_objects_cascade(object_id, object_type, &txn).await?
+            }
             DropMode::Restrict => match object_type {
                 ObjectType::Database => unreachable!("database always be dropped in cascade mode"),
                 ObjectType::Schema => {
@@ -60,8 +60,12 @@ impl CatalogController {
                     Default::default()
                 }
                 ObjectType::Table => {
-                    check_object_refer_for_drop(object_type, object_id, &txn).await?;
-                    let objects = get_referring_objects(object_id, &txn).await?;
+                    let objects = validate_restrict_drop_and_collect_owned_objects(
+                        object_type,
+                        object_id,
+                        &txn,
+                    )
+                    .await?;
                     for obj in objects.iter().filter(|object| {
                         object.obj_type == ObjectType::Source || object.obj_type == ObjectType::Sink
                     }) {
@@ -73,12 +77,18 @@ impl CatalogController {
                         "only index and iceberg sink could be dropped in restrict mode"
                     );
                     for obj in &objects {
-                        check_object_refer_for_drop(obj.obj_type, obj.oid, &txn).await?;
+                        validate_restrict_drop_and_collect_owned_objects(
+                            obj.obj_type,
+                            obj.oid,
+                            &txn,
+                        )
+                        .await?;
                     }
                     objects
                 }
                 object_type @ (ObjectType::Source | ObjectType::Sink) => {
-                    check_object_refer_for_drop(object_type, object_id, &txn).await?;
+                    validate_restrict_drop_and_collect_owned_objects(object_type, object_id, &txn)
+                        .await?;
                     report_drop_object(object_type, object_id, &txn).await;
                     vec![]
                 }
@@ -89,78 +99,16 @@ impl CatalogController {
                 | ObjectType::Connection
                 | ObjectType::Subscription
                 | ObjectType::Secret => {
-                    check_object_refer_for_drop(object_type, object_id, &txn).await?;
+                    validate_restrict_drop_and_collect_owned_objects(object_type, object_id, &txn)
+                        .await?;
                     vec![]
                 }
             },
         };
 
-        // check iceberg source.
-        if obj.obj_type == ObjectType::Table {
-            let table_name = Table::find_by_id(object_id.as_table_id())
-                .select_only()
-                .column(table::Column::Name)
-                .into_tuple::<String>()
-                .one(&txn)
-                .await?
-                .ok_or_else(|| MetaError::catalog_id_not_found("table", object_id))?;
-            let iceberg_source = Source::find()
-                .inner_join(Object)
-                .filter(
-                    object::Column::DatabaseId
-                        .eq(database_id)
-                        .and(object::Column::SchemaId.eq(obj.schema_id.unwrap()))
-                        .and(
-                            source::Column::Name
-                                .eq(format!("{}{}", ICEBERG_SOURCE_PREFIX, table_name)),
-                        ),
-                )
-                .into_partial_model()
-                .one(&txn)
-                .await?;
-            if let Some(iceberg_source) = iceberg_source {
-                removed_objects.push(iceberg_source);
-            }
-        }
-
         removed_objects.push(obj);
         let mut removed_object_ids: HashSet<_> =
             removed_objects.iter().map(|obj| obj.oid).collect();
-
-        // TODO: record dependency info in object_dependency table for sink into table.
-        // Special handling for 'sink into table'.
-        let incoming_sink_ids: Vec<SinkId> = Sink::find()
-            .select_only()
-            .column(sink::Column::SinkId)
-            .filter(sink::Column::TargetTable.is_in(removed_object_ids.clone()))
-            .into_tuple()
-            .all(&txn)
-            .await?;
-        if !incoming_sink_ids.is_empty() {
-            if self.env.opts.protect_drop_table_with_incoming_sink {
-                let sink_names: Vec<String> = Sink::find()
-                    .select_only()
-                    .column(sink::Column::Name)
-                    .filter(sink::Column::SinkId.is_in(incoming_sink_ids.clone()))
-                    .into_tuple()
-                    .all(&txn)
-                    .await?;
-
-                return Err(MetaError::permission_denied(format!(
-                    "Table used by incoming sinks: {:?}, please drop them manually",
-                    sink_names
-                )));
-            }
-
-            let removed_sink_objs: Vec<PartialObject> = Object::find()
-                .filter(object::Column::Oid.is_in(incoming_sink_ids))
-                .into_partial_model()
-                .all(&txn)
-                .await?;
-
-            removed_object_ids.extend(removed_sink_objs.iter().map(|obj| obj.oid));
-            removed_objects.extend(removed_sink_objs);
-        }
 
         for obj in &removed_objects {
             if obj.obj_type == ObjectType::Sink {
@@ -181,60 +129,56 @@ impl CatalogController {
             }
         }
 
-        // 1. Detect when an Iceberg table is part of the dependencies.
-        // 2. Drop database with iceberg tables in it is not supported.
-        if object_type != ObjectType::Table || drop_database {
-            for obj in &removed_objects {
-                // if the obj is iceberg engine table, bail out
-                if obj.obj_type == ObjectType::Table {
-                    let table = Table::find_by_id(obj.oid.as_table_id())
-                        .one(&txn)
-                        .await?
-                        .ok_or_else(|| MetaError::catalog_id_not_found("table", obj.oid))?;
-                    if matches!(table.engine, Some(table::Engine::Iceberg)) {
-                        return Err(MetaError::permission_denied(format!(
-                            "Found iceberg table in dependency: {}, please drop it manually",
-                            table.name,
-                        )));
-                    }
-                }
-            }
-        }
+        // Load all objects that belong to the dropped objects before deletion. Cascaded rows are
+        // still needed for notifications and resource cleanup.
+        let root_objects = Object::find()
+            .filter(object::Column::Oid.is_in(removed_object_ids.iter().copied()))
+            .all(&txn)
+            .await?;
+        let belonging_objects =
+            get_belong_objects_by_ids(&txn, removed_objects.iter().map(|obj| obj.oid)).await?;
+        removed_object_ids.extend(belonging_objects.iter().map(|obj| obj.oid));
+        let mut objects_to_remove = root_objects.clone();
+        objects_to_remove.extend(belonging_objects.iter().cloned());
+        let removed_catalog_models = load_object_models(&txn, &objects_to_remove).await?;
+        removed_objects.extend(belonging_objects.into_iter().map(|obj| PartialObject {
+            oid: obj.oid,
+            obj_type: obj.obj_type,
+            schema_id: obj.schema_id,
+            database_id: obj.database_id,
+        }));
 
         let removed_table_ids = removed_objects
             .iter()
             .filter(|obj| obj.obj_type == ObjectType::Table || obj.obj_type == ObjectType::Index)
             .map(|obj| obj.oid.as_table_id());
 
-        let removed_iceberg_table_sinks: Vec<PbSink> = Sink::find()
-            .find_also_related(Object)
-            .filter(
-                sink::Column::SinkId
-                    .is_in(removed_object_ids.clone())
-                    .and(sink::Column::Name.like(format!("{}%", ICEBERG_SINK_PREFIX))),
-            )
-            .all(&txn)
-            .await?
-            .into_iter()
-            .map(|(sink, obj)| ObjectModel(sink, obj.unwrap(), None).into())
-            .collect();
-
-        // Collect Iceberg pk-index sink ids among dropped sinks so the pk-index sink manager
-        // can tear down their per-sink commit workers. Unlike the iceberg-table
-        // cleanup above, pk-index sinks are user-created with arbitrary names, so we
-        // identify them by inspecting properties rather than by name prefix.
-        let removed_iceberg_pk_index_sink_ids: Vec<SinkId> = Sink::find()
-            .filter(sink::Column::SinkId.is_in(removed_object_ids.clone()))
-            .all(&txn)
-            .await?
-            .into_iter()
-            .filter_map(|sink| {
-                crate::manager::iceberg_pk_index_sink::is_iceberg_pk_index_sink(
-                    sink.properties.inner_ref(),
-                )
-                .then_some(sink.sink_id)
+        let removed_iceberg_table_sinks: Vec<PbSink> = removed_catalog_models
+            .iter()
+            .filter_map(|object_info| match object_info {
+                PbObjectInfo::Sink(sink) if sink.name.starts_with(ICEBERG_SINK_PREFIX) => {
+                    Some(sink.clone())
+                }
+                _ => None,
             })
             .collect();
+
+        // Iceberg sinks (and the pk-index subset) can be user-created with arbitrary
+        // names, so unlike the iceberg-table cleanup above, identify them by
+        // inspecting properties rather than by name prefix.
+        let mut removed_iceberg_sink_ids: Vec<SinkId> = Vec::new();
+        let mut removed_iceberg_pk_index_sink_ids: Vec<SinkId> = Vec::new();
+        for object_info in &removed_catalog_models {
+            if let PbObjectInfo::Sink(sink) = object_info {
+                if crate::manager::iceberg_compaction::is_iceberg_sink(&sink.properties) {
+                    removed_iceberg_sink_ids.push(sink.id);
+                }
+                if crate::manager::iceberg_pk_index_sink::is_iceberg_pk_index_sink(&sink.properties)
+                {
+                    removed_iceberg_pk_index_sink_ids.push(sink.id);
+                }
+            }
+        }
 
         let removed_streaming_job_ids: Vec<JobId> = StreamingJob::find()
             .select_only()
@@ -259,34 +203,13 @@ impl CatalogController {
                     info!("dropping creating sink job, it will be cancelled");
                 } else {
                     return Err(MetaError::permission_denied(format!(
-                        "can not drop {creating} creating streaming job, please cancel them firstly"
+                        "cannot drop {creating} streaming job(s) that are still being created; please cancel them first"
                     )));
                 }
             }
         }
 
-        let mut removed_state_table_ids: HashSet<_> = removed_table_ids.clone().collect();
-
-        if !drop_database {
-            // Add associated sources.
-            let removed_source_ids: Vec<SourceId> = Table::find()
-                .select_only()
-                .column(table::Column::OptionalAssociatedSourceId)
-                .filter(
-                    table::Column::TableId
-                        .is_in(removed_table_ids)
-                        .and(table::Column::OptionalAssociatedSourceId.is_not_null()),
-                )
-                .into_tuple()
-                .all(&txn)
-                .await?;
-            let removed_source_objs: Vec<PartialObject> = Object::find()
-                .filter(object::Column::Oid.is_in(removed_source_ids))
-                .into_partial_model()
-                .all(&txn)
-                .await?;
-            removed_objects.extend(removed_source_objs);
-        }
+        let removed_state_table_ids: HashSet<_> = removed_table_ids.clone().collect();
 
         let removed_source_ids: HashSet<_> = removed_objects
             .iter()
@@ -299,29 +222,6 @@ impl CatalogController {
             .filter(|obj| obj.obj_type == ObjectType::Secret)
             .map(|obj| obj.oid.as_secret_id())
             .collect();
-
-        if !removed_streaming_job_ids.is_empty() {
-            let removed_internal_table_objs: Vec<PartialObject> = Object::find()
-                .select_only()
-                .columns([
-                    object::Column::Oid,
-                    object::Column::ObjType,
-                    object::Column::SchemaId,
-                    object::Column::DatabaseId,
-                ])
-                .join(JoinType::InnerJoin, object::Relation::Table.def())
-                .filter(table::Column::BelongsToJobId.is_in(removed_streaming_job_ids.clone()))
-                .into_partial_model()
-                .all(&txn)
-                .await?;
-
-            removed_state_table_ids.extend(
-                removed_internal_table_objs
-                    .iter()
-                    .map(|obj| obj.oid.as_table_id()),
-            );
-            removed_objects.extend(removed_internal_table_objs);
-        }
 
         let removed_objects: HashMap<_, _> = removed_objects
             .into_iter()
@@ -368,23 +268,18 @@ impl CatalogController {
             .into_tuple()
             .all(&txn)
             .await?;
-        let dropped_tables = Table::find()
-            .find_also_related(Object)
-            .filter(
-                table::Column::TableId.is_in(
-                    removed_state_table_ids
-                        .iter()
-                        .copied()
-                        .collect::<HashSet<TableId>>(),
-                ),
-            )
-            .all(&txn)
-            .await?
+        let dropped_tables = removed_catalog_models
             .into_iter()
-            .map(|(table, obj)| PbTable::from(ObjectModel(table, obj.unwrap(), None)));
-        // delete all in to_drop_objects.
+            .filter_map(|object_info| match object_info {
+                PbObjectInfo::Table(table) if removed_state_table_ids.contains(&table.id) => {
+                    Some(table)
+                }
+                _ => None,
+            });
+        // Delete the explicitly selected objects. The self foreign key cascades to every object
+        // that belongs to them.
         let res = Object::delete_many()
-            .filter(object::Column::Oid.is_in(removed_objects.keys().cloned()))
+            .filter(object::Column::Oid.is_in(root_objects.iter().map(|obj| obj.oid)))
             .exec(&txn)
             .await?;
         if res.rows_affected == 0 {
@@ -448,6 +343,7 @@ impl CatalogController {
                 removed_fragments,
                 removed_sink_fragment_by_targets,
                 removed_iceberg_table_sinks,
+                removed_iceberg_sink_ids,
                 removed_iceberg_pk_index_sink_ids,
             },
             version,

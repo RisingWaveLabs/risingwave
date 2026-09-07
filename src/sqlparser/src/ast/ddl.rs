@@ -46,6 +46,43 @@ pub enum AlterSchemaOperation {
     SwapRenameSchema { target_schema: ObjectName },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AlterRateLimitType {
+    Source,
+    Backfill,
+    Dml,
+    Sink,
+}
+
+impl AlterRateLimitType {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AlterRateLimitType::Source => "SOURCE_RATE_LIMIT",
+            AlterRateLimitType::Backfill => "BACKFILL_RATE_LIMIT",
+            AlterRateLimitType::Dml => "DML_RATE_LIMIT",
+            AlterRateLimitType::Sink => "SINK_RATE_LIMIT",
+        }
+    }
+}
+
+impl fmt::Display for AlterRateLimitType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct AlterRateLimit {
+    pub rate_limit_type: AlterRateLimitType,
+    pub rate_limit: i32,
+}
+
+impl fmt::Display for AlterRateLimit {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "SET {} TO {}", self.rate_limit_type, self.rate_limit)
+    }
+}
+
 /// An `ALTER TABLE` (`Statement::AlterTable`) operation
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum AlterTableOperation {
@@ -126,18 +163,7 @@ pub enum AlterTableOperation {
         keys: Vec<ObjectName>,
     },
     RefreshSchema,
-    /// `SET SOURCE_RATE_LIMIT TO <rate_limit>`
-    SetSourceRateLimit {
-        rate_limit: i32,
-    },
-    /// SET BACKFILL_RATE_LIMIT TO <rate_limit>
-    SetBackfillRateLimit {
-        rate_limit: i32,
-    },
-    /// `SET DML_RATE_LIMIT TO <rate_limit>`
-    SetDmlRateLimit {
-        rate_limit: i32,
-    },
+    AlterRateLimit(AlterRateLimit),
     /// `SWAP WITH <table_name>`
     SwapRenameTable {
         target_table: ObjectName,
@@ -209,10 +235,7 @@ pub enum AlterViewOperation {
         resource_group: Option<SetVariableValue>,
         deferred: bool,
     },
-    /// `SET BACKFILL_RATE_LIMIT TO <rate_limit>`
-    SetBackfillRateLimit {
-        rate_limit: i32,
-    },
+    AlterRateLimit(AlterRateLimit),
     /// `SWAP WITH <view_name>`
     SwapRenameView {
         target_view: ObjectName,
@@ -273,12 +296,7 @@ pub enum AlterSinkOperation {
     SwapRenameSink {
         target_sink: ObjectName,
     },
-    SetSinkRateLimit {
-        rate_limit: i32,
-    },
-    SetBackfillRateLimit {
-        rate_limit: i32,
-    },
+    AlterRateLimit(AlterRateLimit),
     AlterConnectorProps {
         alter_props: Vec<SqlOption>,
     },
@@ -314,9 +332,7 @@ pub enum AlterSourceOperation {
         format_encode: FormatEncodeOptions,
     },
     RefreshSchema,
-    SetSourceRateLimit {
-        rate_limit: i32,
-    },
+    AlterRateLimit(AlterRateLimit),
     SwapRenameSource {
         target_source: ObjectName,
     },
@@ -371,7 +387,7 @@ pub enum AlterSecretOperation {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum AlterFragmentOperation {
-    AlterBackfillRateLimit { rate_limit: i32 },
+    AlterRateLimit(AlterRateLimit),
     SetParallelism { parallelism: SetVariableValue },
 }
 
@@ -521,15 +537,7 @@ impl fmt::Display for AlterTableOperation {
             AlterTableOperation::RefreshSchema => {
                 write!(f, "REFRESH SCHEMA")
             }
-            AlterTableOperation::SetSourceRateLimit { rate_limit } => {
-                write!(f, "SET SOURCE_RATE_LIMIT TO {}", rate_limit)
-            }
-            AlterTableOperation::SetBackfillRateLimit { rate_limit } => {
-                write!(f, "SET BACKFILL_RATE_LIMIT TO {}", rate_limit)
-            }
-            AlterTableOperation::SetDmlRateLimit { rate_limit } => {
-                write!(f, "SET DML_RATE_LIMIT TO {}", rate_limit)
-            }
+            AlterTableOperation::AlterRateLimit(rate_limit) => write!(f, "{rate_limit}"),
             AlterTableOperation::SwapRenameTable { target_table } => {
                 write!(f, "SWAP WITH {}", target_table)
             }
@@ -631,9 +639,7 @@ impl fmt::Display for AlterViewOperation {
                     if *deferred { " DEFERRED" } else { "" }
                 )
             }
-            AlterViewOperation::SetBackfillRateLimit { rate_limit } => {
-                write!(f, "SET BACKFILL_RATE_LIMIT TO {}", rate_limit)
-            }
+            AlterViewOperation::AlterRateLimit(rate_limit) => write!(f, "{rate_limit}"),
             AlterViewOperation::SwapRenameView { target_view } => {
                 write!(f, "SWAP WITH {}", target_view)
             }
@@ -720,12 +726,7 @@ impl fmt::Display for AlterSinkOperation {
             AlterSinkOperation::SwapRenameSink { target_sink } => {
                 write!(f, "SWAP WITH {}", target_sink)
             }
-            AlterSinkOperation::SetSinkRateLimit { rate_limit } => {
-                write!(f, "SET SINK_RATE_LIMIT TO {}", rate_limit)
-            }
-            AlterSinkOperation::SetBackfillRateLimit { rate_limit } => {
-                write!(f, "SET BACKFILL_RATE_LIMIT TO {}", rate_limit)
-            }
+            AlterSinkOperation::AlterRateLimit(rate_limit) => write!(f, "{rate_limit}"),
             AlterSinkOperation::AlterConnectorProps {
                 alter_props: changed_props,
             } => {
@@ -787,9 +788,7 @@ impl fmt::Display for AlterSourceOperation {
             AlterSourceOperation::RefreshSchema => {
                 write!(f, "REFRESH SCHEMA")
             }
-            AlterSourceOperation::SetSourceRateLimit { rate_limit } => {
-                write!(f, "SET SOURCE_RATE_LIMIT TO {}", rate_limit)
-            }
+            AlterSourceOperation::AlterRateLimit(rate_limit) => write!(f, "{rate_limit}"),
             AlterSourceOperation::SwapRenameSource { target_source } => {
                 write!(f, "SWAP WITH {}", target_source)
             }
@@ -933,9 +932,7 @@ impl fmt::Display for AlterColumnOperation {
 impl fmt::Display for AlterFragmentOperation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            AlterFragmentOperation::AlterBackfillRateLimit { rate_limit } => {
-                write!(f, "SET BACKFILL_RATE_LIMIT TO {}", rate_limit)
-            }
+            AlterFragmentOperation::AlterRateLimit(rate_limit) => write!(f, "{rate_limit}"),
             AlterFragmentOperation::SetParallelism { parallelism } => {
                 write!(f, "SET PARALLELISM TO {}", parallelism)
             }

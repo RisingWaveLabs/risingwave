@@ -24,9 +24,55 @@ use std::time::Duration;
 use anyhow::{Result, anyhow, bail};
 use iceberg::table::Table;
 use iceberg::{Catalog, TableIdent};
+use risingwave_common::util::retry::exponential_backoff;
 use thiserror_ext::AsReport;
 use tokio_retry::RetryIf;
-use tokio_retry::strategy::{ExponentialBackoff, jitter};
+use tokio_retry::strategy::jitter;
+
+#[derive(Clone, Debug)]
+pub struct CommitRetryLogContext {
+    pub iceberg_component: &'static str,
+    pub iceberg_operation: &'static str,
+    pub table: String,
+    pub branch: String,
+    pub sink_id: Option<String>,
+    pub epoch: Option<u64>,
+    pub snapshot_id: Option<i64>,
+}
+
+impl CommitRetryLogContext {
+    pub fn new(
+        iceberg_component: &'static str,
+        iceberg_operation: &'static str,
+        table: impl Into<String>,
+        branch: impl Into<String>,
+    ) -> Self {
+        Self {
+            iceberg_component,
+            iceberg_operation,
+            table: table.into(),
+            branch: branch.into(),
+            sink_id: None,
+            epoch: None,
+            snapshot_id: None,
+        }
+    }
+
+    pub fn with_sink_id(mut self, sink_id: impl ToString) -> Self {
+        self.sink_id = Some(sink_id.to_string());
+        self
+    }
+
+    pub fn with_epoch(mut self, epoch: u64) -> Self {
+        self.epoch = Some(epoch);
+        self
+    }
+
+    pub fn with_snapshot_id(mut self, snapshot_id: i64) -> Self {
+        self.snapshot_id = Some(snapshot_id);
+        self
+    }
+}
 
 /// Distinguishes retriable from non-retriable errors inside [`run_with_retry`].
 pub enum CommitError {
@@ -81,16 +127,17 @@ pub async fn run_with_retry<F, Fut, Out>(
     schema_id: i32,
     partition_spec_id: i32,
     retry_num: usize,
+    log_context: CommitRetryLogContext,
     commit_action: F,
 ) -> Result<Out>
 where
     F: Fn(Table) -> Fut + Send + Sync,
     Fut: Future<Output = Result<Out, CommitError>> + Send,
 {
-    let retry_strategy = ExponentialBackoff::from_millis(10)
-        .max_delay(Duration::from_secs(60))
-        .map(jitter)
-        .take(retry_num);
+    let retry_strategy =
+        exponential_backoff(Duration::from_millis(10), 10, Duration::from_secs(60))
+            .map(jitter)
+            .take(retry_num);
 
     RetryIf::spawn(
         retry_strategy,
@@ -109,15 +156,33 @@ where
         |err: &CommitError| match err {
             CommitError::Commit(e) => {
                 tracing::warn!(
+                    iceberg_component = log_context.iceberg_component,
+                    iceberg_operation = log_context.iceberg_operation,
+                    sink_id = log_context.sink_id.as_deref().unwrap_or("unknown"),
+                    epoch = ?log_context.epoch,
+                    snapshot_id = ?log_context.snapshot_id,
+                    table = %log_context.table,
+                    branch = %log_context.branch,
+                    schema_id,
+                    partition_spec_id,
                     error = %e.as_report(),
-                    "iceberg commit failed; will retry",
+                    "iceberg_commit_retryable_error",
                 );
                 true
             }
             CommitError::ReloadTable(e) => {
                 tracing::error!(
+                    iceberg_component = log_context.iceberg_component,
+                    iceberg_operation = log_context.iceberg_operation,
+                    sink_id = log_context.sink_id.as_deref().unwrap_or("unknown"),
+                    epoch = ?log_context.epoch,
+                    snapshot_id = ?log_context.snapshot_id,
+                    table = %log_context.table,
+                    branch = %log_context.branch,
+                    schema_id,
+                    partition_spec_id,
                     error = %e.as_report(),
-                    "iceberg reload_table failed; will not retry",
+                    "iceberg_commit_reload_table_non_retryable_error",
                 );
                 false
             }

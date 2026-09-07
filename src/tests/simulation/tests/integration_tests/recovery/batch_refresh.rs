@@ -78,7 +78,7 @@ async fn test_batch_refresh_recovery() -> Result<()> {
 
     // Step 4: Trigger recovery and verify progress survives.
     eprintln!("=== Step 4: triggering recovery during backfill...");
-    kill_cn_and_wait_recover(&cluster).await;
+    kill_cn_and_wait_recover(&mut cluster).await;
     eprintln!("=== Step 4: recovery done");
 
     let progress_after = session
@@ -127,7 +127,7 @@ async fn test_batch_refresh_recovery() -> Result<()> {
 
     // Step 9: Trigger another recovery while the batch refresh job is idle.
     eprintln!("=== Step 9: triggering recovery while idle...");
-    kill_cn_and_wait_recover(&cluster).await;
+    kill_cn_and_wait_recover(&mut cluster).await;
     eprintln!("=== Step 9: recovery done");
 
     // Step 10: Verify that the MV is still queryable after idle recovery.
@@ -177,6 +177,7 @@ async fn test_batch_refresh_periodic_update() -> Result<()> {
     session
         .run("CREATE MATERIALIZED VIEW mv_up AS SELECT * FROM t;")
         .await?;
+    wait_for_mv_count(&mut session, "mv_up", "2", "upstream materialized view").await?;
 
     // Short refresh interval so we don't need to wait long per cycle.
     session
@@ -185,9 +186,9 @@ async fn test_batch_refresh_periodic_update() -> Result<()> {
         )
         .await?;
 
-    // Initial snapshot content.
-    let mv_batch_count = session.run("SELECT COUNT(*) FROM mv_batch;").await?;
-    assert_eq!(mv_batch_count, "2");
+    // Initial snapshot content. The frontend may receive the catalog before the
+    // streaming vnode mapping, so poll the query until both are visible.
+    wait_for_batch_mv_count(&mut session, "2", "initial batch refresh").await?;
 
     // ── First cycle: upstream inserts must appear after a refresh interval. ──
     session
@@ -197,7 +198,7 @@ async fn test_batch_refresh_periodic_update() -> Result<()> {
     wait_for_batch_mv_count(&mut session, "100", "first periodic refresh").await?;
 
     // ── Recover while job is idle / between refresh cycles. ──────────────────
-    kill_cn_and_wait_recover(&cluster).await;
+    kill_cn_and_wait_recover(&mut cluster).await;
 
     // ── Second cycle: changes after recovery must still be picked up. ────────
     session
@@ -207,7 +208,7 @@ async fn test_batch_refresh_periodic_update() -> Result<()> {
     wait_for_batch_mv_count(&mut session, "200", "periodic refresh after CN recovery").await?;
 
     // ── Recover using meta + CN together, then run another cycle. ────────────
-    kill_cn_and_meta_and_wait_recover(&cluster).await;
+    kill_cn_and_meta_and_wait_recover(&mut cluster).await;
 
     session.run("DELETE FROM t WHERE v1 <= 50;").await?;
     session.flush().await?;
@@ -232,9 +233,19 @@ async fn wait_for_batch_mv_count(
     expected: &str,
     stage: &str,
 ) -> Result<()> {
+    wait_for_mv_count(session, "mv_batch", expected, stage).await
+}
+
+async fn wait_for_mv_count(
+    session: &mut risingwave_simulation::cluster::Session,
+    name: &str,
+    expected: &str,
+    stage: &str,
+) -> Result<()> {
     let mut last = String::new();
+    let query = format!("SELECT COUNT(*) FROM {name};");
     for _ in 0..30 {
-        match session.run("SELECT COUNT(*) FROM mv_batch;").await {
+        match session.run(query.clone()).await {
             Ok(c) => {
                 last = c.clone();
                 if c == expected {

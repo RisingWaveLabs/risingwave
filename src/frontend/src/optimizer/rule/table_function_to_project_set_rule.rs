@@ -81,7 +81,7 @@ impl Rule<Logical> for TableFunctionToProjectSetRule {
             )
         };
 
-        if logical_table_function.with_ordinality {
+        if logical_table_function.with_ordinality() {
             let projected_row_id = InputRef::new(0, DataType::Int64).into();
             let ordinality = FunctionCall::new(
                 ExprType::Add,

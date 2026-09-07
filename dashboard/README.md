@@ -43,8 +43,8 @@ Start a RisingWave cluster, create some tables and materialized views for testin
 Install dependencies and start the development server.
 
 ```bash
-npm i
-npm run dev
+pnpm install
+pnpm run dev
 ```
 
 The dashboard is now served at port 3000.
@@ -67,7 +67,7 @@ The dashboard built with the latest sources will be served by meta node at port 
 
 ### Generate the protos
 
-Running `npm i` will generate the proto files under `proto/gen` automatically. In case there are modifications to the protos, you can regenerate them using the command npm run gen-proto.
+Running `pnpm install` will generate the proto files under `proto/gen` automatically. In case there are modifications to the protos, you can regenerate them using the command `pnpm run gen-proto`.
 
 ### Static HTML files
 
@@ -75,7 +75,7 @@ Build static files for standalone deployment without node.js. The built files ar
 Check more details at [Static HTML Export](https://nextjs.org/docs/advanced-features/static-html-export).
 
 ```bash
-npm run build
+pnpm run build
 ```
 
 The built files are generated at `./out`.

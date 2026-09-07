@@ -19,7 +19,8 @@ use itertools::Itertools;
 use risingwave_common::config::ObjectStoreConfig;
 use risingwave_object_store::object::object_metrics::ObjectStoreMetrics;
 use risingwave_object_store::object::{
-    InMemObjectStore, MonitoredObjectStore, ObjectError, ObjectStoreImpl, ObjectStoreRef,
+    InMemObjectStore, MonitoredObjectStore, MonitoredStreamingReader, ObjectError, ObjectStoreImpl,
+    ObjectStoreRef,
 };
 use tokio::sync::RwLock;
 
@@ -41,6 +42,9 @@ pub trait MetaSnapshotStorage: 'static + Sync + Send {
 
     /// Gets a snapshot by id.
     async fn get<S: Metadata>(&self, id: MetaSnapshotId) -> BackupResult<MetaSnapshot<S>>;
+
+    /// Gets encoded snapshot bytes stream by id.
+    async fn get_bytes_stream(&self, id: MetaSnapshotId) -> BackupResult<MonitoredStreamingReader>;
 
     /// Gets local snapshot manifest.
     async fn manifest(&self) -> Arc<MetaSnapshotManifest>;
@@ -129,7 +133,8 @@ impl MetaSnapshotStorage for ObjectStoreMetaSnapshotStorage {
         remarks: Option<String>,
     ) -> BackupResult<()> {
         let path = self.get_snapshot_path(snapshot.id);
-        self.store.upload(&path, snapshot.encode()?.into()).await?;
+        let uploader = self.store.streaming_upload(&path).await?;
+        snapshot.encode_to_uploader(uploader).await?;
         self.update_manifest(|mut manifest: MetaSnapshotManifest| {
             manifest.manifest_id += 1;
             manifest.snapshot_metadata.push(MetaSnapshotMetadata::new(
@@ -146,9 +151,13 @@ impl MetaSnapshotStorage for ObjectStoreMetaSnapshotStorage {
     }
 
     async fn get<S: Metadata>(&self, id: MetaSnapshotId) -> BackupResult<MetaSnapshot<S>> {
+        let reader = self.get_bytes_stream(id).await?;
+        MetaSnapshot::decode_from_stream(reader).await
+    }
+
+    async fn get_bytes_stream(&self, id: MetaSnapshotId) -> BackupResult<MonitoredStreamingReader> {
         let path = self.get_snapshot_path(id);
-        let data = self.store.read(&path, ..).await?;
-        MetaSnapshot::decode(&data)
+        Ok(self.store.streaming_read(&path, ..).await?)
     }
 
     async fn manifest(&self) -> Arc<MetaSnapshotManifest> {
@@ -202,4 +211,67 @@ pub async fn unused() -> ObjectStoreMetaSnapshotStorage {
     )
     .await
     .unwrap()
+}
+
+#[cfg(test)]
+mod tests {
+    use risingwave_hummock_sdk::HummockVersionId;
+    use risingwave_meta_model::hummock_sequence;
+
+    use super::{MetaSnapshotStorage, unused};
+    use crate::meta_snapshot::MetaSnapshot;
+    use crate::meta_snapshot_v2::{MetadataV2, decode_hummock_sequences_from_stream};
+
+    #[tokio::test]
+    async fn test_create_v2_snapshot_with_streaming_upload() {
+        let storage = unused().await;
+        let mut metadata = MetadataV2::default();
+        metadata.hummock_version.id = HummockVersionId::new(321);
+        let snapshot = MetaSnapshot {
+            format_version: 2,
+            id: 123,
+            metadata,
+        };
+
+        storage.create(&snapshot, None).await.unwrap();
+        let decoded: MetaSnapshot<MetadataV2> = storage.get(snapshot.id).await.unwrap();
+
+        assert_eq!(snapshot.format_version, decoded.format_version);
+        assert_eq!(snapshot.id, decoded.id);
+        assert_eq!(
+            snapshot.metadata.hummock_version.id,
+            decoded.metadata.hummock_version.id
+        );
+    }
+
+    #[tokio::test]
+    async fn test_decode_hummock_sequences_with_streaming_read() {
+        let storage = unused().await;
+        let snapshot = MetaSnapshot {
+            format_version: 2,
+            id: 456,
+            metadata: MetadataV2 {
+                hummock_sequences: vec![
+                    hummock_sequence::Model {
+                        name: "meta_backup".to_owned(),
+                        seq: 42,
+                    },
+                    hummock_sequence::Model {
+                        name: "sstable_object".to_owned(),
+                        seq: 100,
+                    },
+                ],
+                ..Default::default()
+            },
+        };
+
+        storage.create(&snapshot, None).await.unwrap();
+        let decoded = decode_hummock_sequences_from_stream(
+            storage.get_bytes_stream(snapshot.id).await.unwrap(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(decoded, snapshot.metadata.hummock_sequences);
+    }
 }

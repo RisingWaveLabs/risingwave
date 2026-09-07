@@ -63,6 +63,7 @@ impl ToSql for ScalarRefImpl<'_> {
             ScalarRefImpl::Time(v) => v.to_sql(ty, out),
             ScalarRefImpl::Bytea(v) => (&**v).to_sql(ty, out),
             ScalarRefImpl::Jsonb(v) => v.to_sql(ty, out),
+            ScalarRefImpl::Variant(v) => v.to_sql(ty, out),
             ScalarRefImpl::Vector(_)
             | ScalarRefImpl::Int256(_)
             | ScalarRefImpl::Struct(_)

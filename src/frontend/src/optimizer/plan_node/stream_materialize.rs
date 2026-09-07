@@ -45,6 +45,7 @@ use crate::optimizer::plan_node::expr_visitable::ExprVisitable;
 use crate::optimizer::plan_node::utils::plan_can_use_background_ddl;
 use crate::optimizer::plan_node::{PlanBase, PlanNodeMeta};
 use crate::optimizer::property::{Cardinality, Distribution, Order, RequiredDist};
+use crate::optimizer::variant_key::variant_key_error;
 use crate::stream_fragmenter::BuildFragmentGraphState;
 
 /// Materializes a stream.
@@ -345,6 +346,18 @@ impl StreamMaterialize {
         } else {
             derive_pk(input, user_distributed_by, user_order_by, &columns)
         };
+
+        // Guards only this table's own pk (table pk, index keys, MV ORDER BY); internal state
+        // tables are covered by `reject_variant_in_internal_storage_key` in the stream fragmenter.
+        for order in &table_pk {
+            let column = &columns[order.column_index];
+            if column.data_type().contains_variant() {
+                return Err(variant_key_error(format!(
+                    "VARIANT column \"{}\" is part of the storage primary key",
+                    column.name(),
+                )));
+            }
+        }
 
         // Add TTL watermark column to stream key.
         // When a row comes in to a TTL-ed table and we cannot find it in the table, we still cannot tell

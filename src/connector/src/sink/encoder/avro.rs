@@ -601,6 +601,9 @@ fn on_field<D: MaybeData>(
             }
             _ => return no_match_err(),
         },
+        DataType::Variant => {
+            return no_match_err();
+        }
         DataType::Vector(_) => match inner {
             AvroSchema::Array(avro_arr) => {
                 maybe.on_list(&VECTOR_AS_LIST_TYPE, &avro_arr.items, refs)?
@@ -1246,7 +1249,9 @@ mod tests {
     #[test]
     fn test_encode_avro_union() {
         let t = &DataType::Timestamptz;
-        let datum = Some(ScalarImpl::Timestamptz(Timestamptz::from_micros(1500)));
+        let datum = Some(ScalarImpl::Timestamptz(
+            Timestamptz::from_micros(1500).unwrap(),
+        ));
         let opt_micros = r#"["null", {"type": "long", "logicalType": "timestamp-micros"}]"#;
         let opt_millis = r#"["null", {"type": "long", "logicalType": "timestamp-millis"}]"#;
         let both = r#"[{"type": "long", "logicalType": "timestamp-millis"}, {"type": "long", "logicalType": "timestamp-micros"}]"#;

@@ -1,0 +1,148 @@
+statement ok
+SET RW_IMPLICIT_FLUSH TO true;
+
+statement ok
+set streaming_parallelism = 1;
+
+statement ok
+set backfill_rate_limit = 1;
+
+statement ok
+set background_ddl = true;
+
+statement ok
+set sink_decouple = true;
+
+statement ok
+create table alter_creating_base(v int);
+
+statement ok
+insert into alter_creating_base select * from generate_series(1, 10000);
+
+statement ok
+flush;
+
+statement ok
+create materialized view alter_creating_mv as select * from alter_creating_base;
+
+statement count 1
+show jobs;
+
+statement ok
+alter materialized view alter_creating_mv set config (
+    streaming.developer.chunk_size = 511
+);
+
+query I
+select count(*) from rw_streaming_job_config
+where name = 'alter_creating_mv'
+  and key = 'streaming.developer.chunk_size'
+  and value = '511';
+----
+1
+
+statement ok
+alter materialized view alter_creating_mv reset config (
+    streaming.developer.chunk_size
+);
+
+query I
+select count(*) from rw_streaming_job_config
+where name = 'alter_creating_mv';
+----
+0
+
+statement ok
+drop materialized view alter_creating_mv;
+
+statement count 0 retry 10 backoff 1s
+show jobs;
+
+statement ok
+create index alter_creating_idx on alter_creating_base(v);
+
+statement count 1
+show jobs;
+
+statement ok
+alter index alter_creating_idx set config (
+    streaming.developer.chunk_size = 512
+);
+
+query I
+select count(*) from rw_streaming_job_config
+where name = 'alter_creating_idx'
+  and key = 'streaming.developer.chunk_size'
+  and value = '512';
+----
+1
+
+statement ok
+alter index alter_creating_idx reset config (
+    streaming.developer.chunk_size
+);
+
+query I
+select count(*) from rw_streaming_job_config
+where name = 'alter_creating_idx';
+----
+0
+
+statement ok
+drop index alter_creating_idx;
+
+statement count 0 retry 10 backoff 1s
+show jobs;
+
+statement ok
+create sink alter_creating_sink as select * from alter_creating_base with (
+    connector = 'blackhole'
+);
+
+statement count 1
+show jobs;
+
+statement ok
+alter sink alter_creating_sink set config (
+    streaming.developer.chunk_size = 513
+);
+
+query I
+select count(*) from rw_streaming_job_config
+where name = 'alter_creating_sink'
+  and key = 'streaming.developer.chunk_size'
+  and value = '513';
+----
+1
+
+statement ok
+alter sink alter_creating_sink reset config (
+    streaming.developer.chunk_size
+);
+
+query I
+select count(*) from rw_streaming_job_config
+where name = 'alter_creating_sink';
+----
+0
+
+statement ok
+drop sink alter_creating_sink;
+
+statement count 0 retry 10 backoff 1s
+show jobs;
+
+statement ok
+drop table alter_creating_base;
+
+statement ok
+set sink_decouple = default;
+
+statement ok
+set background_ddl = false;
+
+statement ok
+set backfill_rate_limit = default;
+
+statement ok
+set streaming_parallelism = default;

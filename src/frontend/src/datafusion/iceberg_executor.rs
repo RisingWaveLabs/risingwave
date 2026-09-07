@@ -37,8 +37,9 @@ use risingwave_common::catalog::{
     ICEBERG_FILE_PATH_COLUMN_NAME, ICEBERG_FILE_POS_COLUMN_NAME, ICEBERG_SEQUENCE_NUM_COLUMN_NAME,
 };
 use risingwave_common::util::iter_util::ZipEqFast;
-use risingwave_connector::source::iceberg::IcebergFileScanTask;
-use risingwave_connector::source::prelude::IcebergSplitEnumerator;
+use risingwave_connector::source::iceberg::{
+    IcebergFileScanTask, IcebergScanTaskBatchMode, IcebergScanTaskPlanner,
+};
 
 use super::{IcebergTableProvider, to_datafusion_error};
 
@@ -202,15 +203,12 @@ impl IcebergScan {
         });
 
         let scan_tasks = provider.task.tasks();
-        let tasks = if limit.is_some() {
-            // A scan-local limit must be enforced globally. Keep the tasks in a single partition
-            // so execution can stop after enough rows without scanning all files.
-            vec![scan_tasks.to_vec()]
-        } else if scan_tasks.len() <= batch_parallelism {
-            scan_tasks.iter().map(|task| vec![task.clone()]).collect()
-        } else {
-            IcebergSplitEnumerator::split_n_vecs(scan_tasks.to_vec(), batch_parallelism)
-        };
+        let tasks = IcebergScanTaskPlanner::plan_task_batches(
+            provider.task.clone(),
+            batch_parallelism,
+            limit.map(|limit| limit.try_into().unwrap_or(u64::MAX)),
+            IcebergScanTaskBatchMode::Compact,
+        );
         let statistics = tasks
             .iter()
             .map(|tasks| calculate_statistics(tasks.iter(), &arrow_schema))
@@ -260,7 +258,8 @@ impl IcebergScanInner {
             let stream = reader
                 .clone()
                 .read(tokio_stream::once(Ok(task.clone())).boxed())
-                .map_err(to_datafusion_error)?;
+                .map_err(to_datafusion_error)?
+                .stream();
             let mut pos_start: i64 = 0;
 
             #[for_await]

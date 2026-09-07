@@ -400,7 +400,10 @@ impl IndexSelectionRule {
             .into_iter()
             .filter(|expr| {
                 expr.as_eq_const().is_some()
-                    || expr.as_in_const_list().is_some()
+                    || expr
+                        .as_in_const_list()
+                        .or_else(|| expr.as_some_eq_const_list())
+                        .is_some()
                     || expr.as_comparison_const().is_some()
             })
             .collect();
@@ -486,7 +489,10 @@ impl IndexSelectionRule {
             let idx = {
                 if let Some((input_ref, _const_expr)) = expr.as_eq_const() {
                     Some(input_ref.index)
-                } else if let Some((input_ref, _in_const_list)) = expr.as_in_const_list() {
+                } else if let Some((input_ref, _in_const_list)) = expr
+                    .as_in_const_list()
+                    .or_else(|| expr.as_some_eq_const_list())
+                {
                     Some(input_ref.index)
                 } else if let Some((input_ref, _op, _const_expr)) = expr.as_comparison_const() {
                     Some(input_ref.index)
@@ -791,6 +797,7 @@ impl<'a> TableScanIoEstimator<'a> {
             DataType::Varchar => 20,
             DataType::Bytea => 20,
             DataType::Jsonb => 20,
+            DataType::Variant => 20,
             DataType::Struct { .. } => 20,
             DataType::List { .. } => 20,
             DataType::Map(_) => 20,
@@ -866,7 +873,9 @@ impl<'a> TableScanIoEstimator<'a> {
 
         // In
         for (i, expr) in conjunctions.iter().enumerate() {
-            if let Some((input_ref, in_const_list)) = expr.as_in_const_list()
+            if let Some((input_ref, in_const_list)) = expr
+                .as_in_const_list()
+                .or_else(|| expr.as_some_eq_const_list())
                 && input_ref.index == column_idx
             {
                 conjunctions.remove(i);

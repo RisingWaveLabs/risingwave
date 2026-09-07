@@ -232,7 +232,7 @@ async fn validate_remote_sink(param: &SinkParam, sink_name: &str) -> ConnectorRe
                 }
             },
             DataType::Vector(_) |
-            DataType::Serial | DataType::Int256 | DataType::Map(_) => Err(SinkError::Remote(anyhow!(
+            DataType::Serial | DataType::Int256 | DataType::Map(_) | DataType::Variant => Err(SinkError::Remote(anyhow!(
                             "remote sink supports Int16, Int32, Int64, Float32, Float64, Boolean, Decimal, Time, Date, Interval, Jsonb, Timestamp, Timestamptz, Bytea, List and Varchar, (Es sink support Struct) got {:?}: {:?}",
                             col.name,
                             col.data_type,
@@ -262,12 +262,12 @@ async fn validate_remote_sink(param: &SinkParam, sink_name: &str) -> ConnectorRe
 
             validate_sink_response.error.map_or_else(
                 || Ok(()), // If there is no error message, return Ok here.
-                |err| bail!("sink cannot pass validation: {}", err.error_message),
+                |err| bail!("sink validation failed: {}", err.error_message),
             )
         })
     })
     .await
-    .context("JoinHandle returns error")??;
+    .context("join handle returned an error")??;
 
     Ok(())
 }

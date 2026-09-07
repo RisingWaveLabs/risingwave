@@ -30,7 +30,7 @@ pub(crate) use batch_refresh_job::{
 pub(crate) use creating_job::CreatingStreamingJobControl;
 
 use crate::barrier::info::BarrierInfo;
-use crate::barrier::notifier::Notifier;
+use crate::barrier::notifier::NotifierStarter;
 use crate::barrier::partial_graph::{CollectedBarrier, PartialGraphManager};
 use crate::barrier::{BackfillProgress, BarrierKind, FragmentBackfillProgress, TracedEpoch};
 use crate::controller::fragment::InflightFragmentInfo;
@@ -85,19 +85,6 @@ impl IndependentCheckpointJobControl {
         }
     }
 
-    /// Returns `true` if this job is actively consuming a snapshot.
-    ///
-    /// For creating streaming jobs this is always `true` (they exist only while
-    /// backfilling). Batch refresh jobs are only snapshot-backfilling while in
-    /// `ConsumingSnapshot` or `FinishingSnapshot`; once they transition to `Idle`
-    /// they no longer pin upstream log epochs.
-    pub(crate) fn is_snapshot_backfilling(&self) -> bool {
-        match self {
-            Self::CreatingStreamingJob(_) => true,
-            Self::BatchRefresh(j) => j.is_snapshot_backfilling(),
-        }
-    }
-
     /// Collect a barrier and return whether a checkpoint should be forced in the next barrier.
     pub(crate) fn collect(&mut self, collected_barrier: CollectedBarrier<'_>) -> bool {
         match self {
@@ -113,10 +100,10 @@ impl IndependentCheckpointJobControl {
         }
     }
 
-    pub(crate) fn pinned_upstream_log_epoch(&self) -> (u64, HashSet<TableId>) {
+    pub(crate) fn pinned_upstream_tables(&self) -> HashSet<TableId> {
         match self {
-            Self::CreatingStreamingJob(j) => j.pinned_upstream_log_epoch(),
-            Self::BatchRefresh(j) => j.pinned_upstream_log_epoch(),
+            Self::CreatingStreamingJob(j) => j.pinned_upstream_tables(),
+            Self::BatchRefresh(j) => j.pinned_upstream_tables(),
         }
     }
 
@@ -147,12 +134,12 @@ impl IndependentCheckpointJobControl {
 
     pub(crate) fn drop(
         &mut self,
-        notifiers: &mut Vec<Notifier>,
+        notifier: Option<&mut NotifierStarter>,
         partial_graph_manager: &mut PartialGraphManager,
     ) -> bool {
         match self {
-            Self::CreatingStreamingJob(j) => j.drop(notifiers, partial_graph_manager),
-            Self::BatchRefresh(j) => j.drop(notifiers, partial_graph_manager),
+            Self::CreatingStreamingJob(j) => j.drop(notifier, partial_graph_manager),
+            Self::BatchRefresh(j) => j.drop(notifier, partial_graph_manager),
         }
     }
 

@@ -168,15 +168,21 @@ def _(panels: Panels):
             "Errors in the system group by type",
             [
                 panels.target(
-                    f"sum({metric('user_compute_error')}) by (error_type, executor_name, fragment_id)",
+                    f"(sum(irate({metric('user_compute_error_cnt')}[$__rate_interval])) by (error_type, executor_name, fragment_id) or "
+                    + f"sum({metric('user_compute_error_cnt')}) by (error_type, executor_name, fragment_id) * 0 + 0.05 "
+                    + f") unless on({COMPONENT_LABEL}, {NODE_LABEL}) ((absent_over_time({metric('user_compute_error_cnt')}[20s])) > 0)",
                     "{{error_type}} @ {{executor_name}} (fragment_id={{fragment_id}})",
                 ),
                 panels.target(
-                    f"sum({metric('user_source_error')}) by (error_type, source_id, source_name, fragment_id)",
+                    f"(sum(irate({metric('user_source_error_cnt')}[$__rate_interval])) by (error_type, source_id, source_name, fragment_id) or "
+                    + f"sum({metric('user_source_error_cnt')}) by (error_type, source_id, source_name, fragment_id) * 0 + 0.05 "
+                    + f") unless on({COMPONENT_LABEL}, {NODE_LABEL}) ((absent_over_time({metric('user_source_error_cnt')}[20s])) > 0)",
                     "{{error_type}} @ {{source_name}} (source_id={{source_id}} fragment_id={{fragment_id}})",
                 ),
                 panels.target(
-                    f"sum({metric('user_sink_error')}) by (error_type, sink_id, sink_name, fragment_id)",
+                    f"(sum(irate({metric('user_sink_error_cnt')}[$__rate_interval])) by (error_type, sink_id, sink_name, fragment_id) or "
+                    + f"sum({metric('user_sink_error_cnt')}) by (error_type, sink_id, sink_name, fragment_id) * 0 + 0.05 "
+                    + f") unless on({COMPONENT_LABEL}, {NODE_LABEL}) ((absent_over_time({metric('user_sink_error_cnt')}[20s])) > 0)",
                     "{{error_type}} @ {{sink_name}} (sink_id={{sink_id}} fragment_id={{fragment_id}})",
                 ),
                 panels.target(

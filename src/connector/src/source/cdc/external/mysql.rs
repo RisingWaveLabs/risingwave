@@ -28,7 +28,7 @@ use risingwave_common::catalog::{CDC_OFFSET_COLUMN_NAME, ColumnDesc, ColumnId, F
 use risingwave_common::row::OwnedRow;
 use risingwave_common::types::{DataType, Datum, Decimal, F32, ScalarImpl};
 use risingwave_common::util::iter_util::ZipEqFast;
-use sea_schema::mysql::def::{ColumnDefault, ColumnKey, ColumnType, NumericAttr};
+use sea_schema::mysql::def::{ColumnDefault, ColumnType, IndexInfo, NumericAttr};
 use sea_schema::mysql::discovery::SchemaDiscovery;
 use sea_schema::mysql::query::SchemaQueryBuilder;
 use sea_schema::sea_query::{Alias, IntoIden};
@@ -41,10 +41,11 @@ use crate::connector_common::SslMode;
 // Re-export SslMode for convenience
 pub use crate::connector_common::SslMode as MySqlSslMode;
 use crate::error::{ConnectorError, ConnectorResult};
+use crate::parser::mysql_row_to_owned_row_with_strict_pk;
 use crate::source::CdcTableSnapshotSplit;
 use crate::source::cdc::external::{
     CdcOffset, CdcOffsetParseFunc, CdcTableSnapshotSplitOption, DebeziumOffset,
-    ExternalTableConfig, ExternalTableReader, SchemaTableName, mysql_row_to_owned_row,
+    ExternalTableConfig, ExternalTableReader, SchemaTableName,
 };
 
 /// Build MySQL connection pool with proper SSL configuration.
@@ -154,10 +155,10 @@ impl MySqlExternalTable {
         let schema = Alias::new(config.database.as_str()).into_iden();
         let table = Alias::new(config.table.as_str()).into_iden();
         let columns = schema_discovery
-            .discover_columns(schema, table, &system_info)
+            .discover_columns(schema.clone(), table.clone(), &system_info)
             .await?;
+        let indexes = schema_discovery.discover_indexes(schema, table).await?;
         let mut column_descs = vec![];
-        let mut pk_names = vec![];
         for col in columns {
             let data_type = mysql_type_to_rw_type(&col.col_type)?;
             // column name in mysql is case-insensitive, convert to lowercase
@@ -186,14 +187,10 @@ impl MySqlExternalTable {
             };
 
             column_descs.push(column_desc);
-            if matches!(col.key, ColumnKey::Primary) {
-                pk_names.push(col_name);
-            }
         }
 
-        if pk_names.is_empty() {
-            return Err(anyhow!("MySQL table doesn't define the primary key").into());
-        }
+        let pk_names = primary_key_names(&indexes)
+            .ok_or_else(|| anyhow!("MySQL table doesn't define the primary key"))?;
         Ok(Self {
             column_descs,
             pk_names,
@@ -207,6 +204,20 @@ impl MySqlExternalTable {
     pub fn pk_names(&self) -> &Vec<String> {
         &self.pk_names
     }
+}
+
+fn primary_key_names(indexes: &[IndexInfo]) -> Option<Vec<String>> {
+    indexes
+        .iter()
+        .find(|index| index.name.eq_ignore_ascii_case("PRIMARY"))
+        .map(|index| {
+            index
+                .parts
+                .iter()
+                .map(|part| part.column.to_lowercase())
+                .collect()
+        })
+        .filter(|names: &Vec<_>| !names.is_empty())
 }
 
 fn derive_default_value(default: ColumnDefault, data_type: &DataType) -> ConnectorResult<Datum> {
@@ -262,15 +273,14 @@ pub fn type_name_to_mysql_type(ty_name: &str) -> Option<ColumnType> {
     // Debezium schema change message may include extra qualifiers, e.g. `BIGINT UNSIGNED`,
     // `BIGINT(20) UNSIGNED`, `INT UNSIGNED ZEROFILL`, etc.
     let ty = ty_name.trim().to_lowercase();
-    let base = ty
-        .split_whitespace()
-        .next()
-        .unwrap_or_default()
-        .split('(')
-        .next()
-        .unwrap_or_default();
-    let is_unsigned = ty.contains("unsigned");
-    let is_zero_fill = ty.contains("zerofill");
+    let tokens = ty
+        .split(|c: char| c.is_whitespace() || matches!(c, '(' | ')' | ','))
+        .filter(|token| !token.is_empty())
+        .collect_vec();
+    let base = tokens.first().copied().unwrap_or_default();
+    let second = tokens.get(1).copied();
+    let is_unsigned = tokens.contains(&"unsigned");
+    let is_zero_fill = tokens.contains(&"zerofill");
 
     let make_numeric_attr = || {
         let mut attr = NumericAttr::default();
@@ -283,20 +293,31 @@ pub fn type_name_to_mysql_type(ty_name: &str) -> Option<ColumnType> {
         attr
     };
 
+    match (base, second) {
+        ("character", Some("varying")) => return Some(ColumnType::Varchar(Default::default())),
+        ("double", Some("precision")) => return Some(ColumnType::Double(make_numeric_attr())),
+        ("long", Some("varchar")) => return Some(ColumnType::MediumText(Default::default())),
+        ("long", Some("varbinary")) => return Some(ColumnType::MediumBlob),
+        _ => {}
+    }
+
     match base {
+        "serial" => Some(ColumnType::Serial),
         "bit" => Some(ColumnType::Bit(make_numeric_attr())),
-        "tinyint" => Some(ColumnType::TinyInt(make_numeric_attr())),
-        "smallint" => Some(ColumnType::SmallInt(make_numeric_attr())),
-        "mediumint" => Some(ColumnType::MediumInt(make_numeric_attr())),
-        "int" => Some(ColumnType::Int(make_numeric_attr())),
-        "bigint" => Some(ColumnType::BigInt(make_numeric_attr())),
-        "decimal" => Some(ColumnType::Decimal(make_numeric_attr())),
-        "float" => Some(ColumnType::Float(make_numeric_attr())),
-        "double" => Some(ColumnType::Double(make_numeric_attr())),
+        "tinyint" | "int1" => Some(ColumnType::TinyInt(make_numeric_attr())),
+        "bool" | "boolean" => Some(ColumnType::Bool),
+        "smallint" | "int2" => Some(ColumnType::SmallInt(make_numeric_attr())),
+        "mediumint" | "middleint" | "int3" => Some(ColumnType::MediumInt(make_numeric_attr())),
+        "int" | "integer" | "int4" => Some(ColumnType::Int(make_numeric_attr())),
+        "bigint" | "int8" => Some(ColumnType::BigInt(make_numeric_attr())),
+        "decimal" | "dec" | "fixed" | "numeric" => Some(ColumnType::Decimal(make_numeric_attr())),
+        "float" | "float4" => Some(ColumnType::Float(make_numeric_attr())),
+        "double" | "float8" | "real" => Some(ColumnType::Double(make_numeric_attr())),
         "time" => Some(ColumnType::Time(Default::default())),
         "datetime" => Some(ColumnType::DateTime(Default::default())),
         "timestamp" => Some(ColumnType::Timestamp(Default::default())),
-        "char" => Some(ColumnType::Char(Default::default())),
+        "year" => Some(ColumnType::Year),
+        "char" | "character" => Some(ColumnType::Char(Default::default())),
         "nchar" => Some(ColumnType::NChar(Default::default())),
         "varchar" => Some(ColumnType::Varchar(Default::default())),
         "nvarchar" => Some(ColumnType::NVarchar(Default::default())),
@@ -314,7 +335,6 @@ pub fn type_name_to_mysql_type(ty_name: &str) -> Option<ColumnType> {
         "set" => Some(ColumnType::Set(Default::default())),
         "json" => Some(ColumnType::Json),
         "date" => Some(ColumnType::Date),
-        "bool" => Some(ColumnType::Bool),
         "geometry" => Some(ColumnType::Geometry(Default::default())),
         "point" => Some(ColumnType::Point(Default::default())),
         "linestring" => Some(ColumnType::LineString(Default::default())),
@@ -327,9 +347,18 @@ pub fn type_name_to_mysql_type(ty_name: &str) -> Option<ColumnType> {
     }
 }
 
+fn mysql_type_is_unsigned_bigint(col_type: &ColumnType) -> bool {
+    match col_type {
+        // MySQL SERIAL is an alias for BIGINT UNSIGNED NOT NULL AUTO_INCREMENT UNIQUE.
+        ColumnType::Serial => true,
+        ColumnType::BigInt(attr) => attr.unsigned == Some(true),
+        _ => false,
+    }
+}
+
 pub fn mysql_type_to_rw_type(col_type: &ColumnType) -> ConnectorResult<DataType> {
     let dtype = match col_type {
-        ColumnType::Serial => DataType::Int32,
+        ColumnType::Serial => DataType::Decimal,
         ColumnType::Bit(attr) => {
             if let Some(1) = attr.maximum {
                 DataType::Boolean
@@ -424,10 +453,12 @@ pub fn mysql_type_to_rw_type(col_type: &ColumnType) -> ConnectorResult<DataType>
 
 pub struct MySqlExternalTableReader {
     rw_schema: Schema,
+    pk_indices: Vec<usize>,
     field_names: String,
     pool: mysql_async::Pool,
-    upstream_mysql_pk_infos: Vec<(String, String)>, // (column_name, column_type)
+    upstream_mysql_pk_infos: Vec<(String, ColumnType)>, // (column_name, column_type)
     mysql_version: (u8, u8),
+    is_mariadb: bool,
 }
 
 impl ExternalTableReader for MySqlExternalTableReader {
@@ -435,17 +466,18 @@ impl ExternalTableReader for MySqlExternalTableReader {
         let mut conn = self.pool.get_conn().await?;
 
         // Choose SQL command based on MySQL version
-        let sql = if self.is_mysql_8_4_or_later() {
+        let sql = if !self.is_mariadb && self.is_mysql_8_4_or_later() {
             "SHOW BINARY LOG STATUS"
         } else {
             "SHOW MASTER STATUS"
         };
 
         tracing::debug!(
-            "Using SQL command: {} for MySQL version {}.{}",
+            "Using SQL command: {} for MySQL version {}.{} (is_mariadb={})",
             sql,
             self.mysql_version.0,
-            self.mysql_version.1
+            self.mysql_version.1,
+            self.is_mariadb
         );
         let mut rs = conn.query::<mysql_async::Row, _>(sql).await?;
         let row = Itertools::exactly_one(rs.iter_mut())
@@ -493,7 +525,7 @@ impl ExternalTableReader for MySqlExternalTableReader {
 
 impl MySqlExternalTableReader {
     /// Get MySQL version from the connection
-    async fn get_mysql_version(pool: &mysql_async::Pool) -> ConnectorResult<(u8, u8)> {
+    async fn get_mysql_version(pool: &mysql_async::Pool) -> ConnectorResult<(u8, u8, bool)> {
         let mut conn = pool.get_conn().await?;
         let result: Option<String> = conn.query_first("SELECT VERSION()").await?;
 
@@ -506,7 +538,8 @@ impl MySqlExternalTableReader {
                 let minor_version = parts[1]
                     .parse::<u8>()
                     .context("Failed to parse minor version")?;
-                return Ok((major_version, minor_version));
+                let is_mariadb = version_str.to_lowercase().contains("mariadb");
+                return Ok((major_version, minor_version, is_mariadb));
             }
         }
         Err(anyhow!("Failed to get MySQL version").into())
@@ -518,7 +551,11 @@ impl MySqlExternalTableReader {
         major > 8 || (major == 8 && minor >= 4)
     }
 
-    pub async fn new(config: ExternalTableConfig, rw_schema: Schema) -> ConnectorResult<Self> {
+    pub async fn new(
+        config: ExternalTableConfig,
+        rw_schema: Schema,
+        pk_indices: Vec<usize>,
+    ) -> ConnectorResult<Self> {
         let database = config.database.clone();
         let table = config.table.clone();
         let pool = build_mysql_connection_pool(
@@ -541,19 +578,23 @@ impl MySqlExternalTableReader {
         let upstream_mysql_pk_infos =
             Self::query_upstream_pk_infos(&pool, &database, &table).await?;
         // Get MySQL version
-        let mysql_version = Self::get_mysql_version(&pool).await?;
+        let (major_version, minor_version, is_mariadb) = Self::get_mysql_version(&pool).await?;
+        let mysql_version = (major_version, minor_version);
         tracing::info!(
-            "MySQL version detected: {}.{}",
+            "MySQL version detected: {}.{} (is_mariadb={})",
             mysql_version.0,
-            mysql_version.1
+            mysql_version.1,
+            is_mariadb
         );
 
         Ok(Self {
             rw_schema,
+            pk_indices,
             field_names,
             pool,
             upstream_mysql_pk_infos,
             mysql_version,
+            is_mariadb,
         })
     }
 
@@ -575,7 +616,7 @@ impl MySqlExternalTableReader {
         pool: &mysql_async::Pool,
         database: &str,
         table: &str,
-    ) -> ConnectorResult<Vec<(String, String)>> {
+    ) -> ConnectorResult<Vec<(String, ColumnType)>> {
         let mut conn = pool.get_conn().await?;
 
         // Query primary key columns and their data types
@@ -595,6 +636,8 @@ impl MySqlExternalTableReader {
         for row in &rs {
             let column_name: String = row.get(0).unwrap();
             let column_type: String = row.get(1).unwrap();
+            let column_type =
+                type_name_to_mysql_type(&column_type).unwrap_or(ColumnType::Unknown(column_type));
             column_infos.push((column_name, column_type));
         }
 
@@ -603,13 +646,34 @@ impl MySqlExternalTableReader {
         Ok(column_infos)
     }
 
-    /// Check if a column is unsigned type
-    fn is_unsigned_type(&self, column_name: &str) -> bool {
+    /// Check whether a column is `BIGINT UNSIGNED`.
+    ///
+    /// Frontend up-casts narrower unsigned integer types, and non-integer unsigned types
+    /// (`FLOAT`/`DOUBLE`/`DECIMAL UNSIGNED`) keep their own comparison semantics. Only
+    /// `BIGINT UNSIGNED` can be represented as a negative `i64` in RisingWave and needs
+    /// unsigned `u64` comparison/conversion.
+    fn needs_unsigned_i64_compare(&self, column_name: &str) -> ConnectorResult<bool> {
         self.upstream_mysql_pk_infos
             .iter()
-            .find(|(col_name, _)| col_name == column_name)
-            .map(|(_, col_type)| col_type.to_lowercase().contains("unsigned"))
-            .unwrap_or(false)
+            .find(|(col_name, _)| col_name.eq_ignore_ascii_case(column_name))
+            .map(|(_, col_type)| mysql_type_is_unsigned_bigint(col_type))
+            .ok_or_else(|| {
+                anyhow!(
+                    "primary key column `{column_name}` not found in upstream MySQL primary key info"
+                )
+                .into()
+            })
+    }
+
+    /// For each given primary key column (by name), whether it needs unsigned `i64` comparison.
+    pub(crate) fn pk_column_unsigned_i64_compare_flags(
+        &self,
+        pk_names: &[String],
+    ) -> ConnectorResult<Vec<bool>> {
+        pk_names
+            .iter()
+            .map(|name| self.needs_unsigned_i64_compare(name))
+            .collect()
     }
 
     /// Convert negative i64 to unsigned u64 based on column type
@@ -671,7 +735,7 @@ impl MySqlExternalTableReader {
                             DataType::Int32 => Value::from(value.into_int32()),
                             DataType::Int64 => {
                                 let int64_val = value.into_int64();
-                                if int64_val < 0 && self.is_unsigned_type(pk.as_str()) {
+                                if int64_val < 0 && self.needs_unsigned_i64_compare(pk.as_str())? {
                                     Value::from(self.convert_negative_to_unsigned(int64_val))
                                 } else {
                                     Value::from(int64_val)
@@ -710,7 +774,8 @@ impl MySqlExternalTableReader {
             let row_stream = rs_stream.map(|row| {
                 // convert mysql row into OwnedRow
                 let mut row = row?;
-                Ok::<_, ConnectorError>(mysql_row_to_owned_row(&mut row, &self.rw_schema))
+                mysql_row_to_owned_row_with_strict_pk(&mut row, &self.rw_schema, &self.pk_indices)
+                    .map_err(ConnectorError::from)
             });
             pin_mut!(row_stream);
             #[for_await]
@@ -723,7 +788,8 @@ impl MySqlExternalTableReader {
             let row_stream = rs_stream.map(|row| {
                 // convert mysql row into OwnedRow
                 let mut row = row?;
-                Ok::<_, ConnectorError>(mysql_row_to_owned_row(&mut row, &self.rw_schema))
+                mysql_row_to_owned_row_with_strict_pk(&mut row, &self.rw_schema, &self.pk_indices)
+                    .map_err(ConnectorError::from)
             });
             pin_mut!(row_stream);
             #[for_await]
@@ -793,12 +859,136 @@ mod tests {
     use maplit::{convert_args, hashmap};
     use risingwave_common::catalog::{ColumnDesc, ColumnId, Field, Schema};
     use risingwave_common::types::DataType;
+    use sea_schema::mysql::def::{ColumnType, IndexInfo, IndexOrder, IndexPart, IndexType};
 
+    use super::{
+        mysql_type_is_unsigned_bigint, mysql_type_to_rw_type, primary_key_names,
+        type_name_to_mysql_type,
+    };
     use crate::source::cdc::external::mysql::MySqlExternalTable;
     use crate::source::cdc::external::{
         CdcOffset, ExternalTableConfig, ExternalTableReader, MySqlExternalTableReader, MySqlOffset,
         SchemaTableName,
     };
+
+    fn parse_mysql_type_name(ty_name: &str) -> ColumnType {
+        type_name_to_mysql_type(ty_name).unwrap()
+    }
+
+    #[test]
+    fn test_primary_key_names_preserve_index_order() {
+        let indexes = vec![IndexInfo {
+            unique: true,
+            name: "PRIMARY".to_owned(),
+            parts: ["RelatedID", "TypeID", "ClientID"]
+                .into_iter()
+                .map(|column| IndexPart {
+                    column: column.to_owned(),
+                    order: IndexOrder::Ascending,
+                    sub_part: None,
+                })
+                .collect(),
+            nullable: false,
+            idx_type: IndexType::BTree,
+            comment: String::new(),
+            functional: false,
+        }];
+
+        assert_eq!(
+            primary_key_names(&indexes),
+            Some(vec![
+                "relatedid".to_owned(),
+                "typeid".to_owned(),
+                "clientid".to_owned(),
+            ])
+        );
+    }
+
+    #[test]
+    fn test_mysql_unsigned_bigint_type_detection() {
+        for ty_name in [
+            "SERIAL",
+            "BIGINT UNSIGNED",
+            "BIGINT(20) UNSIGNED",
+            "BIGINT UNSIGNED ZEROFILL",
+            "INT8 UNSIGNED",
+        ] {
+            assert!(
+                mysql_type_is_unsigned_bigint(&parse_mysql_type_name(ty_name)),
+                "{ty_name}"
+            );
+        }
+
+        for ty_name in [
+            "BIGINT",
+            "INTEGER UNSIGNED",
+            "INT4 UNSIGNED",
+            "MEDIUMINT UNSIGNED",
+            "DECIMAL UNSIGNED",
+            "FLOAT8 UNSIGNED",
+        ] {
+            assert!(
+                !mysql_type_is_unsigned_bigint(&parse_mysql_type_name(ty_name)),
+                "{ty_name}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_mysql_type_aliases() {
+        assert!(matches!(
+            parse_mysql_type_name("INTEGER UNSIGNED"),
+            ColumnType::Int(attr) if attr.unsigned == Some(true)
+        ));
+        assert!(matches!(
+            parse_mysql_type_name("INT1 UNSIGNED"),
+            ColumnType::TinyInt(attr) if attr.unsigned == Some(true)
+        ));
+        assert!(matches!(
+            parse_mysql_type_name("INT2 UNSIGNED"),
+            ColumnType::SmallInt(attr) if attr.unsigned == Some(true)
+        ));
+        assert!(matches!(
+            parse_mysql_type_name("INT3 UNSIGNED"),
+            ColumnType::MediumInt(attr) if attr.unsigned == Some(true)
+        ));
+        assert!(matches!(
+            parse_mysql_type_name("INT4 UNSIGNED"),
+            ColumnType::Int(attr) if attr.unsigned == Some(true)
+        ));
+        assert!(matches!(
+            parse_mysql_type_name("INT8 UNSIGNED"),
+            ColumnType::BigInt(attr) if attr.unsigned == Some(true)
+        ));
+        assert!(matches!(
+            parse_mysql_type_name("MIDDLEINT"),
+            ColumnType::MediumInt(_)
+        ));
+        assert!(matches!(
+            parse_mysql_type_name("NUMERIC"),
+            ColumnType::Decimal(_)
+        ));
+        assert!(matches!(
+            parse_mysql_type_name("CHARACTER VARYING(64)"),
+            ColumnType::Varchar(_)
+        ));
+        assert!(matches!(
+            parse_mysql_type_name("LONG VARBINARY"),
+            ColumnType::MediumBlob
+        ));
+    }
+
+    #[test]
+    fn test_mysql_serial_maps_as_unsigned_bigint() {
+        let col_type = parse_mysql_type_name("SERIAL");
+        assert!(mysql_type_is_unsigned_bigint(&col_type));
+
+        let serial_type = mysql_type_to_rw_type(&col_type).unwrap();
+        let unsigned_bigint_type =
+            mysql_type_to_rw_type(&parse_mysql_type_name("BIGINT UNSIGNED")).unwrap();
+        assert_eq!(serial_type, DataType::Decimal);
+        assert_eq!(serial_type, unsigned_bigint_type);
+    }
 
     #[ignore]
     #[tokio::test]
@@ -880,7 +1070,7 @@ mod tests {
         let config =
             serde_json::from_value::<ExternalTableConfig>(serde_json::to_value(props).unwrap())
                 .unwrap();
-        let reader = MySqlExternalTableReader::new(config, rw_schema)
+        let reader = MySqlExternalTableReader::new(config, rw_schema, vec![0])
             .await
             .unwrap();
         let offset = reader.current_cdc_offset().await.unwrap();

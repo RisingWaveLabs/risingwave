@@ -81,6 +81,8 @@ where
         }
     }
 
+    /// `wait_init_notification` is used to wait for the initial notification from meta
+    /// and process the buffered notifications before the initial notification if needed.
     async fn wait_init_notification(&mut self) -> Result<(), ObserverError> {
         let mut notification_vec = Vec::new();
         let init_notification = loop {
@@ -132,6 +134,14 @@ where
                         .streaming_worker_slot_mapping_version
             }
             Info::ServingWorkerSlotMappings(_) => true,
+            Info::TableRefillRuntimeConfig(_) => {
+                notification.version
+                    > info
+                        .table_refill_runtime_config
+                        .as_ref()
+                        .map(|config| config.version)
+                        .unwrap_or_default()
+            }
         });
 
         self.observer_states
@@ -246,5 +256,138 @@ impl NotificationClient for RpcNotificationClient {
             .subscribe(subscribe_type)
             .await
             .map_err(Into::into)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::VecDeque;
+
+    use risingwave_pb::meta::meta_snapshot::SnapshotVersion;
+    use risingwave_pb::meta::subscribe_response::Info;
+    use risingwave_pb::meta::{
+        MetaSnapshot, SubscribeResponse, SubscribeType, TableRefillRuntimeConfig,
+    };
+
+    use super::*;
+
+    struct TestChannel {
+        messages: VecDeque<SubscribeResponse>,
+    }
+
+    #[async_trait::async_trait]
+    impl Channel for TestChannel {
+        type Item = SubscribeResponse;
+
+        async fn message(&mut self) -> std::result::Result<Option<Self::Item>, Status> {
+            Ok(self.messages.pop_front())
+        }
+    }
+
+    struct TestClient;
+
+    #[async_trait::async_trait]
+    impl NotificationClient for TestClient {
+        type Channel = TestChannel;
+
+        async fn subscribe(
+            &self,
+            _subscribe_type: SubscribeType,
+        ) -> Result<Self::Channel, ObserverError> {
+            Ok(TestChannel {
+                messages: VecDeque::new(),
+            })
+        }
+    }
+
+    #[derive(Default)]
+    struct TestObserverState {
+        initialized: bool,
+        table_refill_runtime_config_versions: Vec<u64>,
+        database_notifications: usize,
+    }
+
+    impl ObserverState for TestObserverState {
+        fn subscribe_type() -> SubscribeType {
+            SubscribeType::Hummock
+        }
+
+        fn handle_notification(&mut self, resp: SubscribeResponse) {
+            match resp.info.unwrap() {
+                Info::TableRefillRuntimeConfig(_) => {
+                    self.table_refill_runtime_config_versions.push(resp.version)
+                }
+                Info::Database(_) => self.database_notifications += 1,
+                info => panic!("unexpected notification: {info:?}"),
+            }
+        }
+
+        fn handle_initialization_notification(&mut self, resp: SubscribeResponse) {
+            assert!(matches!(resp.info, Some(Info::Snapshot(_))));
+            self.initialized = true;
+        }
+    }
+
+    fn notification(version: u64, info: Info) -> SubscribeResponse {
+        SubscribeResponse {
+            info: Some(info),
+            version,
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn test_filter_stale_table_refill_runtime_config_before_snapshot() {
+        let snapshot = SubscribeResponse {
+            info: Some(Info::Snapshot(MetaSnapshot {
+                version: Some(SnapshotVersion {
+                    catalog_version: 1,
+                    worker_node_version: 1,
+                    streaming_worker_slot_mapping_version: 1,
+                }),
+                table_refill_runtime_config: Some(TableRefillRuntimeConfig {
+                    version: 10,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        let rx = TestChannel {
+            messages: VecDeque::from([
+                notification(
+                    9,
+                    Info::TableRefillRuntimeConfig(TableRefillRuntimeConfig {
+                        version: 9,
+                        ..Default::default()
+                    }),
+                ),
+                notification(
+                    11,
+                    Info::TableRefillRuntimeConfig(TableRefillRuntimeConfig {
+                        version: 11,
+                        ..Default::default()
+                    }),
+                ),
+                notification(1, Info::Database(Default::default())),
+                snapshot,
+            ]),
+        };
+        let mut observer_manager = ObserverManager {
+            rx,
+            client: TestClient,
+            observer_states: TestObserverState::default(),
+        };
+
+        observer_manager.wait_init_notification().await.unwrap();
+
+        assert!(observer_manager.observer_states.initialized);
+        assert_eq!(
+            observer_manager
+                .observer_states
+                .table_refill_runtime_config_versions,
+            vec![11]
+        );
+        assert_eq!(observer_manager.observer_states.database_notifications, 0);
     }
 }

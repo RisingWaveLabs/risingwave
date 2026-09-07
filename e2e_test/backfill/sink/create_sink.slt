@@ -23,7 +23,7 @@ with (
     properties.bootstrap.server='message_queue:29092',
     topic='s_kafka',
     primary_key='v1',
-    allow.auto.create.topics=true,
+    properties.allow.auto.create.topics=true,
 )
 FORMAT DEBEZIUM ENCODE JSON;
 

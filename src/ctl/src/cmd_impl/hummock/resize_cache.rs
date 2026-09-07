@@ -34,6 +34,8 @@ pub async fn resize_cache(
     context: &CtlContext,
     meta_cache_capacity: Option<u64>,
     data_cache_capacity: Option<u64>,
+    clear_meta_cache: bool,
+    clear_data_cache: bool,
 ) -> anyhow::Result<()> {
     let meta_client = context.meta_client().await?;
 
@@ -53,6 +55,8 @@ pub async fn resize_cache(
             .resize_cache(ResizeCacheRequest {
                 meta_cache_capacity: meta_cache_capacity.unwrap_or(0),
                 data_cache_capacity: data_cache_capacity.unwrap_or(0),
+                clear_meta_cache,
+                clear_data_cache,
             })
             .await
     });

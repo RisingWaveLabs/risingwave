@@ -5,7 +5,6 @@ extend = [
     { path = "src/risedevtool/lakekeeper.toml" },
     { path = "src/risedevtool/tempo.toml" },
     { path = "src/risedevtool/gcloud-pubsub.toml" },
-    { path = "src/risedevtool/redis.toml" },
     { path = "src/risedevtool/connector.toml" },
     { path = "src/risedevtool/risedev-components.toml" },
     { path = "src/risedevtool/moat.toml" },
@@ -598,7 +597,6 @@ dependencies = [
     "download-minio",
     "download-lakekeeper",
     "download-prometheus",
-    "download-redis",
     "download-moat"
 ]
 
@@ -1228,9 +1226,11 @@ script = """
 echo "Running $(tput setaf 4)cargo clippy$(tput sgr0) checks"
 set -x
 cargo clippy $@ ${RISINGWAVE_FEATURE_FLAGS}
+STATUS=$?
 set +x
 echo "If cargo clippy check failed or generates warning, you may run $(tput setaf 4)cargo clippy --workspace --all-targets --fix$(tput sgr0) to fix it. Note that clippy fix requires manual review, as not all auto fixes are guaranteed to be reasonable."
 echo "Alternately, you may run $(tput setaf 4)./risedev cf {package_names}$(tput sgr0) to fix those packages (e.g. frontend, meta)."
+exit $STATUS
 """
 
 [tasks.check-clippy-fix]
@@ -1265,13 +1265,14 @@ script = """
 
 if ! typos ; then
   echo "Hint: use 'typos -w' to fix."
+  exit 1
 fi
 """
 
 [tasks.check-license-header]
 category = "RiseDev - Check"
 description = "Check license headers by HawkEye"
-install_crate = { min_version = "6.3.0", crate_name = "hawkeye", binary = "hawkeye", test_arg = [
+install_crate = { crate_name = "hawkeye", binary = "hawkeye", test_arg = [
     "--help",
 ], install_command = "binstall" }
 command = "hawkeye"
@@ -1281,7 +1282,7 @@ env = { RUST_LOG = "info" }
 [tasks.fix-license-header]
 category = "RiseDev - Check"
 description = "Auto-fix license headers by HawkEye"
-install_crate = { min_version = "6.3.0", crate_name = "hawkeye", binary = "hawkeye", test_arg = [
+install_crate = { crate_name = "hawkeye", binary = "hawkeye", test_arg = [
     "--help",
 ], install_command = "binstall" }
 command = "hawkeye"
@@ -1535,6 +1536,7 @@ description = "This command extracts WITH options from the Rust code and maintai
 script = '''
 UPDATE_EXPECT=1 cargo test -p risingwave_connector tests::test_with_options_yaml_up_to_date
 UPDATE_EXPECT=1 cargo test -p risingwave_connector tests::test_allow_alter_on_fly_fields_rust_up_to_date
+UPDATE_EXPECT=1 cargo test -p risingwave_connector tests::test_iceberg_engine_fields_rust_up_to_date
 '''
 
 [tasks.backwards-compat-test]

@@ -341,3 +341,21 @@
     BatchExchange { order: [], dist: Single }
     └─BatchFilter { predicate: (mv_self_join.a = 1:Int32) }
       └─BatchScan { table: mv_self_join, columns: [mv_self_join.a], distribution: SomeShard }
+- id: mv_with_cte_single_reference
+  sql: |
+    create table t_cte (a int, b int, c int);
+    create materialized view mv_cte as with cte as (select a, b from t_cte where c > 0) select a, sum(b) as s from cte group by a;
+    set enable_mv_selection = true;
+    with cte as (select a, b from t_cte where c > 0) select a, sum(b) as s from cte group by a;
+  batch_plan: |-
+    BatchExchange { order: [], dist: Single }
+    └─BatchScan { table: mv_cte, columns: [mv_cte.a, mv_cte.s], distribution: UpstreamHashShard(mv_cte.a) }
+- id: mv_with_cte_multiple_references
+  sql: |
+    create table t_cte2 (a int, b int, c int);
+    create materialized view mv_cte2 as with cte as (select a, b from t_cte2 where c > 0) select c1.a, sum(c2.b) as s from cte c1 join cte c2 on c1.a = c2.a group by c1.a;
+    set enable_mv_selection = true;
+    with cte as (select a, b from t_cte2 where c > 0) select c1.a, sum(c2.b) as s from cte c1 join cte c2 on c1.a = c2.a group by c1.a;
+  batch_plan: |-
+    BatchExchange { order: [], dist: Single }
+    └─BatchScan { table: mv_cte2, columns: [mv_cte2.a, mv_cte2.s], distribution: UpstreamHashShard(mv_cte2.a) }

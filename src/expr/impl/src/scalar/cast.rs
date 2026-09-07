@@ -21,7 +21,8 @@ use risingwave_common::array::{DataChunk, ListRef, ListValue, StructRef, StructV
 use risingwave_common::cast;
 use risingwave_common::row::OwnedRow;
 use risingwave_common::types::{
-    DataType, F64, Int256, JsonbRef, MapRef, MapValue, ScalarRef as _, Serial, Timestamptz, ToText,
+    DataType, F64, Int256, JsonbRef, JsonbVal, MapRef, MapValue, ScalarRef as _, Serial,
+    Timestamptz, ToText, VariantRef, VariantVal,
 };
 use risingwave_common::util::iter_util::ZipEqFast;
 use risingwave_common::util::row_id::row_id_to_unix_millis;
@@ -39,6 +40,7 @@ use thiserror_ext::AsReport;
 #[function("cast(varchar) -> timestamp")]
 #[function("cast(varchar) -> interval")]
 #[function("cast(varchar) -> jsonb")]
+#[function("cast(varchar) -> variant")]
 pub fn str_parse<T>(elem: &str, ctx: &Context) -> Result<T>
 where
     T: FromStr,
@@ -151,6 +153,17 @@ where
     elem.into()
 }
 
+#[function("cast(jsonb) -> variant")]
+pub fn jsonb_to_variant(elem: JsonbRef<'_>) -> Result<VariantVal> {
+    VariantVal::from_jsonb(elem).map_err(|e| ExprError::Parse(e.to_report_string().into()))
+}
+
+#[function("cast(variant) -> jsonb")]
+pub fn variant_to_jsonb(elem: VariantRef<'_>) -> Result<JsonbVal> {
+    elem.to_jsonb()
+        .map_err(|e| ExprError::Parse(e.to_report_string().into()))
+}
+
 /// Extract the timestamp from row id.
 #[function("cast(serial) -> timestamptz")]
 pub fn serial_to_timestamptz(elem: Serial) -> Result<Timestamptz> {
@@ -179,6 +192,7 @@ pub fn int_to_bool(input: i32) -> bool {
 #[function("cast(interval) -> varchar")]
 #[function("cast(timestamp) -> varchar")]
 #[function("cast(jsonb) -> varchar")]
+#[function("cast(variant) -> varchar")]
 #[function("cast(bytea) -> varchar")]
 #[function("cast(anyarray) -> varchar")]
 #[function("cast(vector) -> varchar")]

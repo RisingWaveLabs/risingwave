@@ -115,8 +115,7 @@ impl<S: OpendalSinkBackend> FileSink<S> {
 
         let operator: Operator = Operator::new(builder)?
             .layer(LoggingLayer::default())
-            .layer(RetryLayer::default())
-            .finish();
+            .layer(RetryLayer::default());
 
         Ok(operator)
     }
@@ -130,6 +129,8 @@ impl UnknownFields for S3Config {
         self.unknown_fields.clone()
     }
 }
+
+crate::impl_sink_unknown_fields!(S3Config);
 
 impl OpendalSinkBackend for S3Sink {
     type Properties = S3Config;

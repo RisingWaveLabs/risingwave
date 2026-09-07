@@ -83,11 +83,7 @@ impl BatchIcebergScan {
     }
 
     pub fn iceberg_scan_type(&self) -> IcebergScanType {
-        match &self.task {
-            IcebergFileScanTask::Data(_) => IcebergScanType::DataScan,
-            IcebergFileScanTask::EqualityDelete(_) => IcebergScanType::EqualityDeleteScan,
-            IcebergFileScanTask::PositionDelete(_) => IcebergScanType::PositionDeleteScan,
-        }
+        self.task.scan_type()
     }
 
     pub fn predicate(&self) -> Option<String> {

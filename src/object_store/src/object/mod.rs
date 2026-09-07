@@ -18,11 +18,14 @@
 )]
 
 pub mod sim;
-use std::ops::{Range, RangeBounds};
+use std::io;
+use std::ops::RangeBounds;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll, ready};
 use std::time::Duration;
 
-use bytes::Bytes;
+use bytes::{Buf, Bytes};
 
 pub mod mem;
 pub use mem::*;
@@ -33,7 +36,9 @@ pub use opendal_engine::*;
 pub mod s3;
 use await_tree::{InstrumentAwait, SpanExt};
 use futures::stream::BoxStream;
-use futures::{Future, StreamExt};
+use futures::{Future, Stream, StreamExt};
+use futures_async_stream::try_stream;
+use pin_project_lite::pin_project;
 pub use risingwave_common::config::ObjectStoreConfig;
 pub use s3::*;
 
@@ -44,8 +49,10 @@ pub mod prefix;
 
 pub use error::*;
 use object_metrics::ObjectStoreMetrics;
+use risingwave_common::util::retry::exponential_backoff;
 use thiserror_ext::AsReport;
-use tokio_retry::strategy::{ExponentialBackoff, jitter};
+use tokio::io::{AsyncRead, ReadBuf};
+use tokio_retry::strategy::jitter;
 
 #[cfg(madsim)]
 use self::sim::SimObjectStore;
@@ -97,7 +104,7 @@ pub trait ObjectStore: Send + Sync {
     async fn streaming_read(
         &self,
         path: &str,
-        read_range: Range<usize>,
+        read_range: impl ObjectRangeBounds,
     ) -> ObjectResult<ObjectDataStream>;
 
     /// Obtains the object metadata.
@@ -129,10 +136,6 @@ pub trait ObjectStore: Send + Sync {
     ) -> ObjectResult<ObjectMetadataIter>;
 
     fn store_media_type(&self) -> &'static str;
-
-    fn support_streaming_upload(&self) -> bool {
-        true
-    }
 }
 
 #[cfg(not(madsim))]
@@ -313,7 +316,7 @@ impl ObjectStoreImpl {
     pub async fn streaming_read(
         &self,
         path: &str,
-        start_loc: Range<usize>,
+        start_loc: impl ObjectRangeBounds,
     ) -> ObjectResult<MonitoredStreamingReader> {
         object_store_impl_method_body!(self, streaming_read(path, start_loc).await)
     }
@@ -344,10 +347,6 @@ impl ObjectStoreImpl {
         dispatch_object_store_enum!(self, |store| store
             .inner
             .get_object_prefix(obj_id, use_new_object_prefix_strategy))
-    }
-
-    pub fn support_streaming_upload(&self) -> bool {
-        dispatch_object_store_enum!(self, |store| store.inner.support_streaming_upload())
     }
 
     pub fn media_type(&self) -> &'static str {
@@ -515,6 +514,17 @@ impl MonitoredStreamingReader {
             self.operation_size += data_len;
         }
         res
+    }
+
+    pub fn into_stream(self) -> ObjectDataStream {
+        Self::into_stream_inner(self).boxed()
+    }
+
+    #[try_stream(ok = Bytes, error = ObjectError)]
+    async fn into_stream_inner(mut self) {
+        while let Some(bytes) = self.read_bytes().await.transpose()? {
+            yield bytes;
+        }
     }
 }
 
@@ -693,7 +703,7 @@ impl<OS: ObjectStore> MonitoredObjectStore<OS> {
     async fn streaming_read(
         &self,
         path: &str,
-        range: Range<usize>,
+        range: impl ObjectRangeBounds,
     ) -> ObjectResult<MonitoredStreamingReader> {
         let operation_type = OperationType::StreamingReadInit;
         let operation_type_str = operation_type.as_str();
@@ -1055,15 +1065,125 @@ fn get_retry_strategy(
     operation_type: OperationType,
 ) -> impl Iterator<Item = Duration> + use<> {
     let attempts = get_retry_attempts_by_type(config, operation_type);
-    ExponentialBackoff::from_millis(config.retry.req_backoff_interval_ms)
-        .max_delay(Duration::from_millis(config.retry.req_backoff_max_delay_ms))
-        .factor(config.retry.req_backoff_factor)
-        .take(attempts)
-        .map(jitter)
+    exponential_backoff(
+        Duration::from_millis(config.retry.req_backoff_interval_ms),
+        config.retry.req_backoff_factor,
+        Duration::from_millis(config.retry.req_backoff_max_delay_ms),
+    )
+    .take(attempts)
+    .map(jitter)
 }
 
 pub type ObjectMetadataIter = BoxStream<'static, ObjectResult<ObjectMetadata>>;
 pub type ObjectDataStream = BoxStream<'static, ObjectResult<Bytes>>;
+
+pin_project! {
+    pub struct ObjectDataStreamReader<S> {
+        #[pin]
+        stream: S,
+        pending: Bytes,
+    }
+}
+
+impl<S> ObjectDataStreamReader<S>
+where
+    S: Stream<Item = ObjectResult<Bytes>>,
+{
+    pub fn new(stream: S) -> Self {
+        Self {
+            stream,
+            pending: Bytes::new(),
+        }
+    }
+}
+
+impl ObjectDataStreamReader<ObjectDataStream> {
+    pub fn into_bytes_stream(self) -> ObjectDataStream {
+        Self::into_bytes_stream_inner(self).boxed()
+    }
+
+    #[try_stream(ok = Bytes, error = ObjectError)]
+    async fn into_bytes_stream_inner(mut self) {
+        if self.pending.has_remaining() {
+            yield std::mem::take(&mut self.pending);
+        }
+        while let Some(bytes) = self.stream.next().await.transpose()? {
+            yield bytes;
+        }
+    }
+}
+
+impl<S> AsyncRead for ObjectDataStreamReader<S>
+where
+    S: Stream<Item = ObjectResult<Bytes>>,
+{
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        if buf.remaining() == 0 {
+            return Poll::Ready(Ok(()));
+        }
+
+        let mut this = self.project();
+        loop {
+            if this.pending.has_remaining() {
+                let len = this.pending.remaining().min(buf.remaining());
+                buf.put_slice(&this.pending[..len]);
+                this.pending.advance(len);
+                return Poll::Ready(Ok(()));
+            }
+
+            match ready!(this.stream.as_mut().poll_next(cx)) {
+                Some(Ok(bytes)) => {
+                    *this.pending = bytes;
+                }
+                Some(Err(err)) => return Poll::Ready(Err(io::Error::other(err))),
+                None => return Poll::Ready(Ok(())),
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use futures::stream;
+    use tokio::io::AsyncReadExt;
+
+    use super::{Bytes, ObjectDataStreamReader, ObjectError};
+
+    #[tokio::test]
+    async fn test_object_data_stream_reader_reads_across_chunks() {
+        let stream = stream::iter([
+            Ok(Bytes::from_static(b"ab")),
+            Ok(Bytes::from_static(b"cdef")),
+            Ok(Bytes::from_static(b"g")),
+        ]);
+        let mut reader = ObjectDataStreamReader::new(stream);
+
+        let mut first = [0; 3];
+        reader.read_exact(&mut first).await.unwrap();
+        assert_eq!(&first, b"abc");
+
+        let mut rest = vec![];
+        reader.read_to_end(&mut rest).await.unwrap();
+        assert_eq!(&rest, b"defg");
+    }
+
+    #[tokio::test]
+    async fn test_object_data_stream_reader_returns_stream_error() {
+        let stream = stream::iter([
+            Ok(Bytes::from_static(b"ab")),
+            Err(ObjectError::internal("injected stream error")),
+        ]);
+        let mut reader = ObjectDataStreamReader::new(stream);
+
+        let mut output = vec![];
+        let err = reader.read_to_end(&mut output).await.unwrap_err();
+        assert!(err.to_string().contains("injected stream error"));
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 enum OperationType {

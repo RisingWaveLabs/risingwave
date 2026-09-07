@@ -16,6 +16,7 @@ use std::collections::BTreeMap;
 
 use anyhow::anyhow;
 use google_cloud_gax::conn::Environment;
+use google_cloud_gax::grpc::Status;
 use google_cloud_googleapis::pubsub::v1::PubsubMessage;
 use google_cloud_pubsub::apiv1;
 use google_cloud_pubsub::client::google_cloud_auth::credentials::CredentialsFile;
@@ -27,7 +28,6 @@ use risingwave_common::array::StreamChunk;
 use risingwave_common::catalog::Schema;
 use serde::Deserialize;
 use serde_with::serde_as;
-use google_cloud_gax::grpc::Status;
 use with_options::WithOptions;
 
 use super::catalog::SinkFormatDesc;
@@ -97,7 +97,12 @@ pub struct GooglePubSubConfig {
     /// `pubsub.publisher` [role](https://cloud.google.com/pubsub/docs/access-control#roles)
     #[serde(rename = "pubsub.credentials")]
     pub credentials: Option<String>,
+
+    #[serde(flatten)]
+    pub unknown_fields: std::collections::HashMap<String, String>,
 }
+
+crate::impl_sink_unknown_fields!(GooglePubSubConfig);
 
 impl EnforceSecret for GooglePubSubConfig {
     const ENFORCE_SECRET_PROPERTIES: phf::Set<&'static str> = phf::phf_set! {
@@ -138,6 +143,8 @@ impl Sink for GooglePubSubSink {
     type LogSinker = AsyncTruncateLogSinkerOf<GooglePubSubSinkWriter>;
 
     const SINK_NAME: &'static str = PUBSUB_SINK;
+
+    crate::impl_validate_sink_unknown_fields!();
 
     async fn validate(&self) -> Result<()> {
         if !self.is_append_only {

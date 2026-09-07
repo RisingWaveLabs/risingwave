@@ -85,9 +85,4 @@ impl Execute for WrapperExecutor {
         let info = Arc::new(self.input.info().clone());
         Self::wrap(info, self.actor_ctx, self.input.execute()).boxed()
     }
-
-    fn execute_with_epoch(self: Box<Self>, epoch: u64) -> BoxedMessageStream {
-        let info = Arc::new(self.input.info().clone());
-        Self::wrap(info, self.actor_ctx, self.input.execute_with_epoch(epoch)).boxed()
-    }
 }

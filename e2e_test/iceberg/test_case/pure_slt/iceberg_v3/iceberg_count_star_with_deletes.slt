@@ -1,0 +1,113 @@
+statement ok
+create secret count_star_secret with (
+  backend = 'meta'
+) as 'hummockadmin';
+
+statement ok
+create connection count_star_conn
+with (
+    type = 'iceberg',
+    warehouse.path = 's3://hummock001/iceberg_count_star_deletes',
+    s3.access.key = secret count_star_secret,
+    s3.secret.key = secret count_star_secret,
+    s3.endpoint = 'http://127.0.0.1:9301',
+    s3.region = 'us-west-2',
+    hosted_catalog = true
+);
+
+statement ok
+set iceberg_engine_connection = 'public.count_star_conn';
+
+# ---- Case 1: deletion vectors (V3 pk-index) -- the case that folds ----
+
+statement ok
+create table t_count_star_dv(id int primary key, v int)
+with(
+    commit_checkpoint_interval = 1,
+    format_version = 3,
+    enable_pk_index = 'true'
+) engine = iceberg;
+
+statement ok
+insert into t_count_star_dv select i, i from generate_series(1, 10) as t(i);
+
+statement ok
+flush;
+
+# No delete files yet: the metadata fast path (sum of data-file record_count) is correct.
+query I retry 6 backoff 1s
+select count(*) from t_count_star_dv;
+----
+10
+
+statement ok
+delete from t_count_star_dv where id % 2 = 0;
+
+statement ok
+flush;
+
+# The 5 deleted rows must NOT be counted. Before the fix this returned 10 (the pre-delete
+# data-file record_count).
+query I retry 6 backoff 1s
+select count(*) from t_count_star_dv;
+----
+5
+
+# count(*) must agree with count(id), a predicated count, and an actual row scan.
+query I
+select count(id) from t_count_star_dv;
+----
+5
+
+query I
+select count(*) from t_count_star_dv where id > 0;
+----
+5
+
+query I
+select count(*) from (select id from t_count_star_dv order by id) x;
+----
+5
+
+statement ok
+drop table t_count_star_dv;
+
+# ---- Case 2 (sanity): equality deletes read via anti-join, never folded ----
+
+statement ok
+create table t_count_star_eq(id int primary key, v int)
+with(
+    commit_checkpoint_interval = 1,
+    format_version = 3
+) engine = iceberg;
+
+statement ok
+insert into t_count_star_eq select i, i from generate_series(1, 10) as t(i);
+
+statement ok
+flush;
+
+statement ok
+delete from t_count_star_eq where id % 2 = 0;
+
+statement ok
+flush;
+
+query I retry 6 backoff 1s
+select count(*) from t_count_star_eq;
+----
+5
+
+query I
+select count(id) from t_count_star_eq;
+----
+5
+
+statement ok
+drop table t_count_star_eq;
+
+statement ok
+drop connection count_star_conn;
+
+statement ok
+drop secret count_star_secret;

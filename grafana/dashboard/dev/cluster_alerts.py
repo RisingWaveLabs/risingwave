@@ -2,12 +2,33 @@ from ..common import *
 from . import section
 
 cross_db_last_consumed_min_epoch = (
-    f"max({metric('crossdb_last_consumed_min_epoch', table_id_filter_enabled=True)} != 0) by (table_id, actor_id, fragment_id)"
+    f"min({metric('crossdb_last_consumed_min_epoch', node_filter_enabled=False, table_id_filter_enabled=True)} != 0) by (table_id)"
 )
 cross_db_log_expiry_headroom = (
     f"({epoch_to_unix_millis(cross_db_last_consumed_min_epoch)} / 1000"
-    f" + on(table_id) group_left max({metric('streaming_table_change_log_retention_seconds', node_filter_enabled=False, table_id_filter_enabled=True)} != 0) by (table_id)"
-    f" - time())"
+    f" - (time() - max({metric('streaming_table_change_log_retention_seconds', node_filter_enabled=False, table_id_filter_enabled=True)}) by (table_id)))"
+)
+mysql_cdc_binlog_file_seq_min = metric(
+    "mysql_cdc_binlog_file_seq_min", node_filter_enabled=False
+)
+mysql_cdc_binlog_file_seq_max = metric(
+    "mysql_cdc_binlog_file_seq_max", node_filter_enabled=False
+)
+stream_mysql_cdc_state_binlog_file_seq = metric(
+    "stream_mysql_cdc_state_binlog_file_seq", node_filter_enabled=False
+)
+mysql_cdc_binlog_file_lag = (
+    f"clamp_min({mysql_cdc_binlog_file_seq_max} - on(source_id) "
+    f"{stream_mysql_cdc_state_binlog_file_seq}, 0)"
+)
+mysql_cdc_binlog_retention_risk_margin = (
+    f"(({mysql_cdc_binlog_file_seq_max} + "
+    f"{mysql_cdc_binlog_file_seq_min}) / 2 - on(source_id) "
+    f"{stream_mysql_cdc_state_binlog_file_seq})"
+)
+mysql_cdc_binlog_retention_risk = (
+    f"{alert_when(mysql_cdc_binlog_file_lag)} and "
+    f"{alert_threshold(mysql_cdc_binlog_retention_risk_margin, 0)}"
 )
 
 @section
@@ -33,8 +54,9 @@ def _(outer_panels: Panels):
     - Join Amplification: If the join amplification is high, it means the join is not able to process the data in time.
 - Cross-DB Log Retention Expiring: a cross-database MV changelog consumer's last consumed changelog epoch will expire within 12 hours.
 - PG CDC WAL Lag Too High: the PostgreSQL CDC WAL lag (upstream_max_lsn - state_table_lsn) exceeds 20 GiB. Check `Streaming CDC` > `PostgreSQL CDC State Table WAL Lag` and verify replication slot health.
+- MySQL CDC Binlog File Lag Too High: the MySQL CDC checkpoint is at least 20 files behind the upstream newest file, or it is behind the newest file and has entered the older half of the retained binlog range. Check `Streaming CDC` > `MySQL CDC Binlog File Lag` and `MySQL CDC Binlog Retention Risk Margin`.
 """,
-                    height=9,
+                    height=10,
                 ),
                 panels.timeseries_count(
                     "Streaming Alert Signals",
@@ -57,7 +79,7 @@ def _(outer_panels: Panels):
                                 43200,
                                 "<",
                             ),
-                            "Cross-DB Log Retention Expiring table {{table_id}} actor {{actor_id}} fragment {{fragment_id}}",
+                            "Cross-DB Log Retention Expiring table {{table_id}}",
                         ),
                         panels.target(
                             alert_threshold(
@@ -65,6 +87,11 @@ def _(outer_panels: Panels):
                                 20 * 1024 * 1024 * 1024,
                             ),
                             "PG CDC WAL Lag Too High slot {{slot_name}} source {{source_id}}",
+                        ),
+                        panels.target(
+                            f"{alert_threshold(mysql_cdc_binlog_file_lag, 20)} or "
+                            f"({mysql_cdc_binlog_retention_risk})",
+                            "MySQL CDC Binlog File Lag Too High source {{source_id}} {{hostname}}:{{port}}",
                         ),
                     ],
                     ["last"],
@@ -103,13 +130,16 @@ def _(outer_panels: Panels):
                             ),
                             "CPU Saturation (k8s limit) - {{namespace}}/{{pod}}",
                         ),
+                        # kube-state-metrics may be scraped by multiple sources (HA replicas, BYOC
+                        # federation). Join timestamp<->reason within each source first (full label
+                        # set keeps sources apart), then `max by` dedups across sources.
                         panels.target(
                             alert_when(
-                                "changes(("
-                                + 'kube_pod_container_status_last_terminated_timestamp{cluster=~"$cluster",namespace=~"$namespace",pod=~"$pod"} '
-                                + "* on (namespace,pod,container) group_left (reason) "
+                                "changes((max by (cluster,namespace,pod,container,reason) ("
+                                + 'kube_pod_container_status_last_terminated_timestamp{cluster=~"$cluster",namespace=~"$namespace",pod=~"$pod"}'
+                                + " * ignoring(reason) group_left(reason) "
                                 + 'kube_pod_container_status_last_terminated_reason{cluster=~"$cluster",namespace=~"$namespace",pod=~"$pod",reason!~"Completed"}'
-                                + ")[$__rate_interval:])"
+                                + "))[$__rate_interval:])"
                             ),
                             "[{{reason}}] {{container}} {{pod}}",
                         ),

@@ -104,6 +104,25 @@
     BatchExchange { order: [], dist: Single }
     └─BatchScan { table: idx1, columns: [idx1.a, idx1.b, idx1.c], scan_ranges: [idx1.a = Int32(1), idx1.a = Int32(2), idx1.a = Int32(3)], distribution: UpstreamHashShard(idx1.a) }
 - sql: |
+    create table t1 (a int primary key, b numeric, c bigint);
+    select * from t1 where a = some('{1}')
+  batch_plan: |-
+    BatchExchange { order: [], dist: Single }
+    └─BatchScan { table: t1, columns: [t1.a, t1.b, t1.c], scan_ranges: [t1.a = Int32(1)], distribution: UpstreamHashShard(t1.a) }
+- sql: |
+    create table t1 (a int primary key, b numeric, c bigint);
+    select * from t1 where a = some(array[1::bigint])
+  batch_plan: |-
+    BatchExchange { order: [], dist: Single }
+    └─BatchScan { table: t1, columns: [t1.a, t1.b, t1.c], scan_ranges: [t1.a = Int32(1)], distribution: UpstreamHashShard(t1.a) }
+- sql: |
+    create table t1 (a int, b numeric, c bigint);
+    create index idx1 on t1(a, b) include(c);
+    select * from t1 where a = some('{1,2,3}')
+  batch_plan: |-
+    BatchExchange { order: [], dist: Single }
+    └─BatchScan { table: idx1, columns: [idx1.a, idx1.b, idx1.c], scan_ranges: [idx1.a = Int32(1), idx1.a = Int32(2), idx1.a = Int32(3)], distribution: UpstreamHashShard(idx1.a) }
+- sql: |
     create table t1 (a int, b numeric, c bigint);
     create index idx1 on t1(a, b) include(c);
     select * from t1 where a between 1 and 8
@@ -651,6 +670,22 @@
     └─BatchLookupJoin { type: Inner, predicate: d.t1._row_id IS NOT DISTINCT FROM t1._row_id AND (t1.d > 9:Int32), output: [], lookup table: t1 }
       └─BatchExchange { order: [], dist: Single }
         └─BatchScan { table: d, columns: [d.t1._row_id], scan_ranges: [d.a = Int32(1)], distribution: SomeShard }
+- name: covering index with residual predicate outside the index
+  sql: |
+    create materialized view mc as select 1 as id, 'a' as val, 'x' as tag;
+    create index mc_idx on mc (id) include (val);
+    select 1 from mc where id = 1 and tag = 'x';
+  batch_plan: |-
+    BatchExchange { order: [], dist: Single }
+    └─BatchProject { exprs: [1:Int32] }
+      └─BatchLookupJoin { type: Inner, predicate: mc_idx.mc._row_id IS NOT DISTINCT FROM mc._row_id AND (mc.tag = 'x':Varchar), output: [], lookup table: mc }
+        └─BatchExchange { order: [], dist: Single }
+          └─BatchScan { table: mc_idx, columns: [mc_idx.mc._row_id], scan_ranges: [mc_idx.id = Int32(1)], distribution: SomeShard }
+  batch_local_plan: |-
+    BatchProject { exprs: [1:Int32] }
+    └─BatchLookupJoin { type: Inner, predicate: mc_idx.mc._row_id IS NOT DISTINCT FROM mc._row_id AND (mc.tag = 'x':Varchar), output: [], lookup table: mc }
+      └─BatchExchange { order: [], dist: Single }
+        └─BatchScan { table: mc_idx, columns: [mc_idx.mc._row_id], scan_ranges: [mc_idx.id = Int32(1)], distribution: SomeShard }
 - name: create index to include all columns by default
   sql: |
     create table t1 (a int, b numeric, c bigint);
@@ -752,6 +787,16 @@
     BatchExchange { order: [], dist: Single }
     └─BatchFilter { predicate: (test_table.name >= 'test_table':Varchar) AND (test_table.name < 'test_tablf':Varchar) AND Like(test_table.name, 'test\_table_2':Varchar) }
       └─BatchScan { table: test_table, columns: [test_table.name], distribution: SomeShard }
+- name: restrict rewrite LIKE with ESCAPE as a binary expression
+  sql: |
+    create table some_trades(id varchar);
+    select * from some_trades
+    where id like '%\_%' escape '\'
+      and id not like 'DROPFEED%';
+  batch_plan: |-
+    BatchExchange { order: [], dist: Single }
+    └─BatchFilter { predicate: Like(some_trades.id, '%\_%':Varchar, '\':Varchar) AND (Not((some_trades.id >= 'DROPFEED':Varchar)) OR Not((some_trades.id < 'DROPFEEE':Varchar))) }
+      └─BatchScan { table: some_trades, columns: [some_trades.id], distribution: SomeShard }
 - sql: |
     create table t1 (k1 int primary key, v1 int);
     create table t2 (k2 int primary key, v2 int);

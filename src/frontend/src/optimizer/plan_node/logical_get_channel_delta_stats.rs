@@ -12,22 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use pretty_xmlish::{Pretty, XmlNode};
 use risingwave_common::bail_not_implemented;
 use risingwave_common::catalog::Schema;
 
-use super::generic::GenericPlanRef;
-use super::utils::{Distill, childless_record};
+use super::utils::impl_distill_by_unit;
 use super::{
     ColPrunable, ExprRewritable, Logical, LogicalFilter, LogicalPlanRef as PlanRef, PlanBase,
-    PredicatePushdown, ToBatch, ToStream,
+    PredicatePushdown, ToBatch, ToStream, generic,
 };
 use crate::error::Result;
 use crate::optimizer::plan_node::{
     ColumnPruningContext, LogicalProject, PredicatePushdownContext, RewriteStreamContext,
     ToStreamContext,
 };
-use crate::optimizer::property::FunctionalDependencySet;
 use crate::utils::{ColIndexMapping, Condition};
 
 /// `LogicalGetChannelDeltaStats` represents a plan node that retrieves channel statistics
@@ -35,8 +32,7 @@ use crate::utils::{ColIndexMapping, Condition};
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct LogicalGetChannelDeltaStats {
     pub base: PlanBase<Logical>,
-    pub at_time: Option<u64>,
-    pub time_offset: Option<u64>,
+    core: generic::GetChannelDeltaStats,
 }
 
 impl LogicalGetChannelDeltaStats {
@@ -47,53 +43,32 @@ impl LogicalGetChannelDeltaStats {
         at_time: Option<u64>,
         time_offset: Option<u64>,
     ) -> Self {
-        let functional_dependency = FunctionalDependencySet::new(schema.len());
-        let base = PlanBase::new_logical(ctx, schema, None, functional_dependency);
-        Self {
-            base,
-            at_time,
-            time_offset,
-        }
+        let core = generic::GetChannelDeltaStats::new(ctx, schema, at_time, time_offset);
+        let base = PlanBase::new_logical_with_core(&core);
+        Self { base, core }
     }
 
     /// Get the `at_time` parameter
     pub fn at_time(&self) -> Option<u64> {
-        self.at_time
+        self.core.at_time
     }
 
     /// Get the `time_offset` parameter
     pub fn time_offset(&self) -> Option<u64> {
-        self.time_offset
+        self.core.time_offset
     }
 }
 
 impl_plan_tree_node_for_leaf! { Logical, LogicalGetChannelDeltaStats }
+impl_distill_by_unit!(
+    LogicalGetChannelDeltaStats,
+    core,
+    "LogicalGetChannelDeltaStats"
+);
 
-impl Distill for LogicalGetChannelDeltaStats {
-    fn distill<'a>(&self) -> XmlNode<'a> {
-        let fields = vec![
-            ("at_time", Pretty::debug(&self.at_time)),
-            ("time_offset", Pretty::debug(&self.time_offset)),
-        ];
-        childless_record("LogicalGetChannelDeltaStats", fields)
-    }
-}
+impl ExprRewritable<Logical> for LogicalGetChannelDeltaStats {}
 
-impl ExprRewritable<Logical> for LogicalGetChannelDeltaStats {
-    fn has_rewritable_expr(&self) -> bool {
-        false
-    }
-
-    fn rewrite_exprs(&self, _r: &mut dyn crate::expr::ExprRewriter) -> PlanRef {
-        self.clone().into()
-    }
-}
-
-impl crate::optimizer::plan_node::expr_visitable::ExprVisitable for LogicalGetChannelDeltaStats {
-    fn visit_exprs(&self, _v: &mut dyn crate::expr::ExprVisitor) {
-        // No expressions to visit
-    }
-}
+impl crate::optimizer::plan_node::expr_visitable::ExprVisitable for LogicalGetChannelDeltaStats {}
 
 impl ColPrunable for LogicalGetChannelDeltaStats {
     fn prune_col(&self, required_cols: &[usize], _ctx: &mut ColumnPruningContext) -> PlanRef {
@@ -114,13 +89,7 @@ impl PredicatePushdown for LogicalGetChannelDeltaStats {
 impl ToBatch for LogicalGetChannelDeltaStats {
     fn to_batch(&self) -> Result<crate::optimizer::plan_node::BatchPlanRef> {
         use crate::optimizer::plan_node::BatchGetChannelDeltaStats;
-        Ok(BatchGetChannelDeltaStats::new(
-            self.base.ctx(),
-            self.base.schema().clone(),
-            self.at_time,
-            self.time_offset,
-        )
-        .into())
+        Ok(BatchGetChannelDeltaStats::new(self.core.clone()).into())
     }
 }
 

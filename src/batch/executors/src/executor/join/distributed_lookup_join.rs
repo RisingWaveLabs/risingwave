@@ -178,7 +178,11 @@ impl BoxedExecutorBuilder for DistributedLookupJoinExecutorBuilder {
             .map(ColumnId::from)
             .collect();
 
-        // Lookup Join always contains distribution key, so we don't need vnode bitmap
+        // Use a full vnode bitmap so that the lookup can be performed on any worker.
+        // For a lookup table with hash distribution, the lookup keys always contain the
+        // distribution key; for a lookup table with singleton distribution, all lookups
+        // are gathered into a single task. In both cases the lookup is correct regardless
+        // of which worker the task is scheduled to.
         let vnodes = Some(Bitmap::ones(table_desc.vnode_count()).into());
 
         dispatch_state_store!(source.context().state_store(), state_store, {

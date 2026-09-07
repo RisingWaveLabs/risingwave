@@ -26,3 +26,31 @@ $$;
 
 include ./test.slt.part
 include ./drop.slt.part
+
+# struct return type
+statement ok
+create aggregate sum_cnt(value int) returns struct<sum int, cnt int> language python as $$
+class SumCnt:
+    def __init__(self, sum, cnt):
+        self.sum = sum
+        self.cnt = cnt
+def create_state():
+    return (0, 0)
+def accumulate(state, value):
+    if value is None:
+        return state
+    (s, c) = state
+    return (s + value, c + 1)
+def retract(state, value):
+    if value is None:
+        return state
+    (s, c) = state
+    return (s - value, c - 1)
+def finish(state):
+    (s, c) = state
+    if c == 0:
+        return None
+    return SumCnt(s, c)
+$$;
+
+include ./struct.slt.part

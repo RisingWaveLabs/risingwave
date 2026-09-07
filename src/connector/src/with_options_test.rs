@@ -100,6 +100,13 @@ pub fn generate_allow_alter_on_fly_fields_combined() -> String {
     generate_rust_allow_alter_on_fly_fields_code_separate(source_info, sink_info, connection_info)
 }
 
+pub fn generate_iceberg_engine_fields() -> String {
+    let fields = extract_iceberg_engine_fields_from_yaml(
+        &connector_crate_path().join("with_options_sink.yaml"),
+    );
+    generate_rust_iceberg_engine_fields_code(fields)
+}
+
 /// Collect all structs with `#[derive(WithOptions)]` in the `.rs` files in `path` (plus `common.rs`),
 /// and generate a YAML file.
 ///
@@ -159,7 +166,8 @@ fn generate_with_options_yaml_inner(path: &Path) -> BTreeMap<String, StructInfo>
                     alias,
                 } = extract_serde_properties(&field);
 
-                let allow_alter_on_fly = extract_with_option_allow_alter_on_fly(&field);
+                let allow_alter_on_fly = extract_with_option_flag(&field, "allow_alter_on_fly");
+                let iceberg_engine = extract_with_option_flag(&field, "iceberg_engine");
 
                 let field_type = field.ty;
                 let mut required = match extract_type_name(&field_type).as_str() {
@@ -198,6 +206,7 @@ fn generate_with_options_yaml_inner(path: &Path) -> BTreeMap<String, StructInfo>
                     default,
                     alias,
                     allow_alter_on_fly,
+                    iceberg_engine,
                 });
             } else {
                 panic!("Unexpected tuple struct: {}", struct_name);
@@ -236,6 +245,9 @@ struct FieldInfo {
 
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     allow_alter_on_fly: bool,
+
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    iceberg_engine: bool,
 }
 
 #[derive(Default)]
@@ -260,6 +272,8 @@ struct YamlFieldInfo {
     name: String,
     #[serde(default)]
     allow_alter_on_fly: bool,
+    #[serde(default)]
+    iceberg_engine: bool,
     #[serde(default)]
     alias: Vec<String>,
 }
@@ -438,13 +452,13 @@ fn extract_function_body(func: ItemFn) -> (String, FunctionInfo) {
     (func.sig.ident.to_string(), FunctionInfo { body })
 }
 
-fn extract_with_option_allow_alter_on_fly(field: &Field) -> bool {
+fn extract_with_option_flag(field: &Field, flag: &str) -> bool {
     field.attrs.iter().any(|attr| {
         if let Meta::List(meta_list) = &attr.meta {
             return meta_list.path.is_ident("with_option")
                 && meta_list.tokens.clone().into_iter().any(|token| {
                     if let TokenTree::Ident(ident) = token {
-                        ident == "allow_alter_on_fly"
+                        ident == flag
                     } else {
                         false
                     }
@@ -481,6 +495,59 @@ fn extract_allow_alter_on_fly_fields_from_yaml(yaml_path: &Path) -> BTreeMap<Str
     }
 
     allow_alter_on_fly_fields
+}
+
+fn extract_iceberg_engine_fields_from_yaml(yaml_path: &Path) -> Vec<String> {
+    let content = fs::read_to_string(yaml_path)
+        .unwrap_or_else(|_| panic!("Failed to read YAML file: {}", yaml_path.display()));
+
+    let yaml_data: BTreeMap<String, YamlStructInfo> = serde_yaml::from_str(&content)
+        .unwrap_or_else(|_| panic!("Failed to parse YAML file: {}", yaml_path.display()));
+
+    yaml_data
+        .get("IcebergConfig")
+        .expect("IcebergConfig must exist in sink WITH options")
+        .fields
+        .iter()
+        .filter(|field| field.iceberg_engine)
+        .flat_map(|field| std::iter::once(&field.name).chain(field.alias.iter()))
+        .cloned()
+        .collect()
+}
+
+fn generate_rust_iceberg_engine_fields_code(fields: Vec<String>) -> String {
+    let fields = fields
+        .iter()
+        .map(|field| format!("    \"{field}\","))
+        .join("\n");
+
+    format!(
+        r#"// Copyright 2026 RisingWave Labs
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// THIS FILE IS AUTO_GENERATED. DO NOT EDIT.
+// UPDATE WITH: ./risedev generate-with-options
+
+pub const ICEBERG_ENGINE_OPTION_KEYS: &[&str] = &[
+{fields}
+];
+
+pub fn is_iceberg_engine_option(key: &str) -> bool {{
+    ICEBERG_ENGINE_OPTION_KEYS.contains(&key)
+}}
+"#
+    )
 }
 
 fn generate_rust_allow_alter_on_fly_fields_code_separate(
@@ -536,9 +603,10 @@ fn generate_rust_allow_alter_on_fly_fields_code_separate(
 // `UPDATE_EXPECT=1`.
 // To update content, change source/sink/connection WITH options definitions (for example,
 // `#[with_option(allow_alter_on_fly)]` on struct fields), then run `./risedev generate-with-options`.
-// `./risedev generate-with-options` runs two UPDATE_EXPECT tests:
+// `./risedev generate-with-options` runs three UPDATE_EXPECT tests:
 // 1) refresh `with_options_{{source,sink,connection}}.yaml`;
-// 2) regenerate this file from those YAML files.
+// 2) regenerate this file from those YAML files;
+// 3) regenerate the Iceberg Engine option classifier.
 
 #![rustfmt::skip]
 

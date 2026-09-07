@@ -34,7 +34,7 @@ When opening or updating a PR:
 4. Validate every chosen label against the live GitHub label list.
 5. Drop any chosen label that does not exist remotely.
 6. Add only missing, valid, additive labels.
-7. Do not remove existing labels, especially auto-applied labels, unless explicitly instructed by a maintainer.
+7. Do not remove labels that predate the current agent operation, especially auto-applied or maintainer-applied labels, unless explicitly instructed by a maintainer. If the agent added a label during the current operation and then determines that it was a mistake, remove it immediately and report the correction.
 8. In the PR report, list labels added, labels intentionally not added, and the local/CI verification already run or requested.
 
 ## CI coverage labels
@@ -82,7 +82,23 @@ Use `type/flaky-test` only when the primary purpose is fixing flaky tests.
 
 ## User-facing and documentation labels
 
-Add `user-facing-changes` when the PR changes behavior visible to users, including SQL syntax or semantics, connector options, configuration defaults, error messages, public APIs, system catalog output, compatibility behavior, observability or operational workflows, or documented behavior.
+`user-facing-changes` triggers documentation follow-up after merge. Add it only when both of these conditions are true:
+
+1. The PR changes a supported external product interface or behavior.
+2. The change warrants release-note or product-documentation follow-up.
+
+Qualifying changes include SQL syntax or semantics, documented connector options, user-configurable defaults or semantics, client-visible API or SQL behavior, stable system catalog output, compatibility behavior, and supported operational workflows that require users to act differently.
+
+Do not add `user-facing-changes` merely because some output is technically observable. In particular, do not add it for:
+
+- Internal tracing logs, log wording changes, or internal-only diagnostics.
+- Development-only metrics, dashboards, or observability tooling.
+- Internal Rust `pub` APIs or other implementation interfaces.
+- Refactoring, recovery, scheduling, or performance work that does not change a supported user or operator workflow.
+- Comment, formatting, test-only, CI-only, or documentation wording changes that do not change product behavior.
+- Typo or wording improvements that do not change the meaning of a supported error or response.
+
+When the impact is ambiguous, do not add the label. Explain the possible user-facing impact in the final PR report and ask a maintainer to confirm whether documentation follow-up is needed. The threshold is whether documentation or release-note follow-up is appropriate, not whether a user could conceivably observe the diff.
 
 Add `breaking-change` only for real compatibility-breaking or migration-impacting changes, and explain the impact in the PR body.
 
@@ -93,5 +109,5 @@ Add `breaking-change` only for real compatibility-breaking or migration-impactin
 - Do not add `ci/pr/run-selected` to a non-draft PR.
 - Do not use `ci/pr/run-selected` as an extra-test label.
 - Do not add labels that are absent from `gh label list --repo risingwavelabs/risingwave`.
-- Do not remove auto-added labels unless explicitly instructed by a maintainer.
+- Do not remove labels that existed before the current operation unless explicitly instructed by a maintainer.
 - Do not use unrelated expensive labels just to be safe.

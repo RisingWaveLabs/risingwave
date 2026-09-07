@@ -12,16 +12,49 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 
 use risingwave_batch::task::BatchManager;
+use risingwave_common_service::GrpcCall;
 use risingwave_pb::task_service::batch_exchange_service_server::BatchExchangeService;
 use risingwave_pb::task_service::{GetDataRequest, GetDataResponse};
 use thiserror_ext::AsReport;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 
-pub type BatchDataStream = ReceiverStream<std::result::Result<GetDataResponse, Status>>;
+type BatchData = std::result::Result<GetDataResponse, Status>;
+
+pub struct BatchDataStream {
+    inner: ReceiverStream<BatchData>,
+    await_tree_root: Option<await_tree::TreeRoot>,
+}
+
+impl BatchDataStream {
+    fn new(
+        receiver: tokio::sync::mpsc::Receiver<BatchData>,
+        await_tree_root: Option<await_tree::TreeRoot>,
+    ) -> Self {
+        Self {
+            inner: ReceiverStream::new(receiver),
+            await_tree_root,
+        }
+    }
+}
+
+impl tokio_stream::Stream for BatchDataStream {
+    type Item = BatchData;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        let result = Pin::new(&mut this.inner).poll_next(cx);
+        if matches!(&result, Poll::Ready(None)) {
+            this.await_tree_root.take();
+        }
+        result
+    }
+}
 
 #[derive(Clone)]
 pub struct BatchExchangeServiceImpl {
@@ -60,6 +93,13 @@ impl BatchExchangeService for BatchExchangeServiceImpl {
             return Err(e.into());
         }
 
-        Ok(Response::new(ReceiverStream::new(rx)))
+        let await_tree_root = self.batch_mgr.await_tree_reg().map(|registry| {
+            let key = GrpcCall::new(format!(
+                "{peer_addr} - /task_service.BatchExchangeService/GetData - \
+                 {pb_task_output_id:?}"
+            ));
+            registry.register(key, "/task_service.BatchExchangeService/GetData")
+        });
+        Ok(Response::new(BatchDataStream::new(rx, await_tree_root)))
     }
 }

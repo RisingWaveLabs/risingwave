@@ -34,19 +34,20 @@
 //! meta-recovery path drops the coordinator, re-registers it (re-running `init`), and retries from the
 //! persisted `pending_sink_state` rows.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use iceberg::Catalog;
-use iceberg::spec::{DataFile, SerializedDataFile};
+use iceberg::spec::{DataFile, ManifestContentType, SerializedDataFile};
 use iceberg::table::Table;
 use iceberg::transaction::{ApplyTransactionAction, FastAppendAction, Transaction};
 use prost::Message;
 use risingwave_connector::sink::catalog::SinkId;
-use risingwave_connector::sink::iceberg::commit_retry::{self, CommitError};
+use risingwave_connector::sink::iceberg::commit_retry::{self, CommitError, CommitRetryLogContext};
 use risingwave_connector::sink::iceberg::{
-    IcebergCommitResult, IcebergConfig, IcebergPositionDeleteMergerCommitResult, commit_branch,
+    IcebergCommitResult, IcebergConfig, IcebergPositionDeleteCommitResult, commit_branch,
     resolve_partition_type,
 };
 use risingwave_meta_model::pending_sink_state::SinkState;
@@ -58,7 +59,6 @@ use serde::{Deserialize, Serialize};
 use thiserror_ext::AsReport;
 use tokio::time::timeout;
 
-use super::backfill::backfill_delete_file_partitions;
 use crate::manager::exactly_once_util::{
     clean_aborted_records, commit_and_prune_epoch, list_sink_states_ordered_by_epoch,
     persist_pre_commit_metadata,
@@ -166,7 +166,7 @@ impl IcebergPkIndexSinkCoordinator {
                 prev_epoch
             );
         }
-        let (merged, materialized_add_files) = self.backfill_delete_file_partitions(merged)?;
+        let (merged, materialized_add_files) = self.backfill_delete_file_partitions(merged).await?;
         let merged = Arc::new(merged);
 
         let snapshot_id = FastAppendAction::generate_snapshot_id(&self.table);
@@ -191,6 +191,7 @@ impl IcebergPkIndexSinkCoordinator {
             self.catalog.clone(),
             self.table.identifier().clone(),
             self.target_branch.clone(),
+            self.sink_id,
             &commit,
             self.retry_num,
         )
@@ -224,11 +225,15 @@ impl IcebergPkIndexSinkCoordinator {
         Ok(())
     }
 
+    pub fn current_snapshot_id(&self) -> Option<i64> {
+        self.table.metadata().current_snapshot_id()
+    }
+
     /// Backfills missing partition values on the delete files (partitioned tables only) from the
-    /// referenced data files. Returns the updated aggregate (with the backfilled delete files
-    /// re-serialized for persistence) and, when backfill ran, the data + delete files already
-    /// materialized as `DataFile`s so the commit can reuse them instead of deserializing again.
-    fn backfill_delete_file_partitions(
+    /// referenced data files. Each delete file's partition is resolved from this epoch's
+    /// not-yet-committed writer data files and the current committed snapshot's data files, built
+    /// fresh per pre-commit (no persistent cache).
+    async fn backfill_delete_file_partitions(
         &self,
         merged: IcebergPkIndexSinkAggResult,
     ) -> Result<(IcebergPkIndexSinkAggResult, Option<Vec<DataFile>>)> {
@@ -244,6 +249,8 @@ impl IcebergPkIndexSinkCoordinator {
 
         let schema = self.table.metadata().current_schema();
         let partition_type = partition_spec.partition_type(schema)?;
+        let format_version = self.table.metadata().format_version();
+
         let data_files = merged
             .data_files
             .clone()
@@ -255,9 +262,28 @@ impl IcebergPkIndexSinkCoordinator {
             .into_iter()
             .map(|f| f.try_into(merged.partition_spec_id, &partition_type, schema))
             .try_collect::<Vec<DataFile>>()?;
-        backfill_delete_file_partitions(&data_files, &mut delete_files)?;
 
-        let format_version = self.table.metadata().format_version();
+        if !delete_files.is_empty() {
+            let mut pending = pending_delete_files_by_referenced(&mut delete_files)?;
+            for f in &data_files {
+                if let Some(delete_file) = pending.remove(f.file_path()) {
+                    delete_file.set_partition(f.partition().clone());
+                    if pending.is_empty() {
+                        break;
+                    }
+                }
+            }
+            if !pending.is_empty() {
+                probe_committed_data_files(&self.table, &mut pending).await?;
+            }
+            if !pending.is_empty() {
+                anyhow::bail!(
+                    "backfill iceberg pk-index sink delete files failed, unresolved referenced data files: {:?}",
+                    pending.keys().collect::<Vec<_>>()
+                );
+            }
+        }
+
         let serialized_delete_files = delete_files
             .iter()
             .cloned()
@@ -272,12 +298,71 @@ impl IcebergPkIndexSinkCoordinator {
             overwrite_files: merged.overwrite_files,
         };
 
-        // `add_data_files` order in `commit_one_epoch` is data files followed by delete files.
+        // `add_data_files` order in `commit_one_epoch` is data files followed by
+        // delete files; keep that order here.
         let mut materialized_add_files = data_files;
         materialized_add_files.extend(delete_files);
-
         Ok((merged, Some(materialized_add_files)))
     }
+}
+
+pub fn pending_delete_files_by_referenced(
+    delete_files: &mut [DataFile],
+) -> Result<HashMap<String, &mut DataFile>> {
+    let mut pending: HashMap<String, &mut DataFile> = HashMap::with_capacity(delete_files.len());
+    for f in delete_files.iter_mut() {
+        let referenced = f.referenced_data_file().ok_or_else(|| {
+            anyhow::anyhow!("delete file {} missing referenced_data_file", f.file_path())
+        })?;
+        if pending.contains_key(&referenced) {
+            anyhow::bail!(
+                "duplicate referenced data file {referenced} across pk-index delete files"
+            );
+        }
+        pending.insert(referenced, f);
+    }
+    Ok(pending)
+}
+
+/// Scan the table's current-snapshot data manifests, resolving pending delete-file
+/// partitions as their referenced data files are found. Stops as soon as every pending
+/// delete file has been resolved. Data-file references not present in the snapshot are
+/// left in `pending` for the caller to report.
+async fn probe_committed_data_files(
+    table: &Table,
+    pending: &mut HashMap<String, &mut DataFile>,
+) -> Result<()> {
+    let Some(snapshot) = table.metadata().current_snapshot() else {
+        return Ok(());
+    };
+    let manifest_list = table
+        .object_cache()
+        .get_manifest_list(snapshot, &table.metadata_ref())
+        .await
+        .context("load manifest list for pk-index delete-file partition backfill")?;
+
+    for manifest_file in manifest_list.entries() {
+        if manifest_file.content != ManifestContentType::Data {
+            continue;
+        }
+        let manifest = manifest_file
+            .load_manifest(table.file_io())
+            .await
+            .context("load data manifest for pk-index delete-file partition backfill")?;
+        for entry in manifest.entries() {
+            if !entry.is_alive() {
+                continue;
+            }
+            let f = entry.data_file();
+            if let Some(delete_file) = pending.remove(f.file_path()) {
+                delete_file.set_partition(f.partition().clone());
+                if pending.is_empty() {
+                    return Ok(());
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 async fn load_catalog_and_table(
@@ -362,6 +447,7 @@ async fn commit_one_epoch(
     catalog: Arc<dyn Catalog>,
     table_ident: iceberg::TableIdent,
     target_branch: String,
+    sink_id: SinkId,
     commit: &EpochCommit,
     retry_num: usize,
 ) -> Result<Table, CommitError> {
@@ -371,10 +457,19 @@ async fn commit_one_epoch(
 
     commit_retry::run_with_retry(
         catalog.clone(),
-        table_ident,
+        table_ident.clone(),
         merged.schema_id,
         merged.partition_spec_id,
         retry_num,
+        CommitRetryLogContext::new(
+            "iceberg_v3_sink_coordinator",
+            "commit_epoch",
+            table_ident.to_string(),
+            target_branch.clone(),
+        )
+        .with_sink_id(sink_id)
+        .with_epoch(commit.epoch)
+        .with_snapshot_id(snapshot_id),
         |table| {
             let merged = merged.clone();
             let catalog = catalog.clone();
@@ -496,8 +591,8 @@ fn aggregate_reports(
                 data_files.extend(commit_result.data_files);
             }
             PbIcebergPkIndexSinkRole::PositionDeleteMerger => {
-                let commit_result = IcebergPositionDeleteMergerCommitResult::try_from(meta)
-                    .map_err(|e| {
+                let commit_result =
+                    IcebergPositionDeleteCommitResult::try_from(meta).map_err(|e| {
                         anyhow!(e).context("decode pk-index sink position-delete merger metadata")
                     })?;
                 align_report_id(

@@ -45,7 +45,9 @@ pub use gap_fill::BoundGapFill;
 pub use join::BoundJoin;
 pub use share::{BoundShare, BoundShareInput};
 pub use subquery::BoundSubquery;
-pub use table_or_source::{BoundBaseTable, BoundSource, BoundSystemTable};
+pub use table_or_source::{
+    BoundBaseTable, BoundIcebergMetadataTable, BoundSource, BoundSystemTable,
+};
 pub use watermark::BoundWatermark;
 pub use window_table_function::{BoundWindowTableFunction, WindowTableFunctionKind};
 
@@ -58,6 +60,7 @@ pub enum Relation {
     Source(Box<BoundSource>),
     BaseTable(Box<BoundBaseTable>),
     SystemTable(Box<BoundSystemTable>),
+    IcebergMetadataTable(Box<BoundIcebergMetadataTable>),
     Subquery(Box<BoundSubquery>),
     Join(Box<BoundJoin>),
     Apply(Box<BoundJoin>),
@@ -93,11 +96,26 @@ impl Relation {
     pub fn is_correlated_by_depth(&self, depth: Depth) -> bool {
         match self {
             Relation::Subquery(subquery) => subquery.query.is_correlated_by_depth(depth),
-            Relation::Join(join) | Relation::Apply(join) => {
+            Relation::Join(join) => {
                 join.cond.has_correlated_input_ref_by_depth(depth)
                     || join.left.is_correlated_by_depth(depth)
                     || join.right.is_correlated_by_depth(depth)
             }
+            // The right side of an `Apply` is bound in a scope extended by its left input. When
+            // looking for a reference owned by an enclosing `Apply`, cross that scope boundary.
+            Relation::Apply(join) => {
+                join.cond.has_correlated_input_ref_by_depth(depth)
+                    || join.left.is_correlated_by_depth(depth)
+                    || join.right.is_correlated_by_depth(depth + 1)
+            }
+            Relation::TableFunction {
+                expr: table_function,
+                with_ordinality: _,
+            } => table_function.has_correlated_input_ref_by_depth(depth + 1),
+            Relation::Share(share) => match &share.input {
+                BoundShareInput::Query(query) => query.is_correlated_by_depth(depth),
+                BoundShareInput::ChangeLog(change_log) => change_log.is_correlated_by_depth(depth),
+            },
             _ => false,
         }
     }
@@ -113,6 +131,18 @@ impl Relation {
                     || join.left.is_correlated_by_correlated_id(correlated_id)
                     || join.right.is_correlated_by_correlated_id(correlated_id)
             }
+            Relation::TableFunction {
+                expr: table_function,
+                with_ordinality: _,
+            } => table_function.has_correlated_input_ref_by_correlated_id(correlated_id),
+            Relation::Share(share) => match &share.input {
+                BoundShareInput::Query(query) => {
+                    query.is_correlated_by_correlated_id(correlated_id)
+                }
+                BoundShareInput::ChangeLog(change_log) => {
+                    change_log.is_correlated_by_correlated_id(correlated_id)
+                }
+            },
             _ => false,
         }
     }
@@ -126,7 +156,7 @@ impl Relation {
             Relation::Subquery(subquery) => subquery
                 .query
                 .collect_correlated_indices_by_depth_and_assign_id(depth, correlated_id),
-            Relation::Join(join) | Relation::Apply(join) => {
+            Relation::Join(join) => {
                 let mut correlated_indices = vec![];
                 correlated_indices.extend(
                     join.cond
@@ -139,6 +169,25 @@ impl Relation {
                 correlated_indices.extend(
                     join.right
                         .collect_correlated_indices_by_depth_and_assign_id(depth, correlated_id),
+                );
+                correlated_indices
+            }
+            Relation::Apply(join) => {
+                let mut correlated_indices = vec![];
+                correlated_indices.extend(
+                    join.cond
+                        .collect_correlated_indices_by_depth_and_assign_id(depth, correlated_id),
+                );
+                correlated_indices.extend(
+                    join.left
+                        .collect_correlated_indices_by_depth_and_assign_id(depth, correlated_id),
+                );
+                correlated_indices.extend(
+                    join.right
+                        .collect_correlated_indices_by_depth_and_assign_id(
+                            depth + 1,
+                            correlated_id,
+                        ),
                 );
                 correlated_indices
             }
@@ -587,9 +636,9 @@ impl Binder {
                 args,
                 with_ordinality,
             } => {
-                self.try_mark_lateral_as_visible();
+                let visibility = self.mark_lateral_contexts_visible();
                 let result = self.bind_table_function(name, alias.as_ref(), args, *with_ordinality);
-                self.try_mark_lateral_as_invisible();
+                self.restore_lateral_contexts_visibility(visibility);
                 result
             }
             TableFactor::Derived {
@@ -598,16 +647,13 @@ impl Binder {
                 alias,
             } => {
                 if *lateral {
-                    // If we detect a lateral, we mark the lateral context as visible.
-                    self.try_mark_lateral_as_visible();
+                    let visibility = self.mark_lateral_contexts_visible();
 
                     // Bind lateral subquery here.
-                    let bound_subquery =
-                        self.bind_subquery_relation(subquery, alias.as_ref(), true)?;
+                    let result = self.bind_subquery_relation(subquery, alias.as_ref(), true);
 
-                    // Mark the lateral context as invisible once again.
-                    self.try_mark_lateral_as_invisible();
-                    Ok(Relation::Subquery(Box::new(bound_subquery)))
+                    self.restore_lateral_contexts_visibility(visibility);
+                    result.map(|subquery| Relation::Subquery(Box::new(subquery)))
                 } else {
                     // Non-lateral subqueries to not have access to the join-tree context.
                     self.push_lateral_context();

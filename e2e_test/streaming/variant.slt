@@ -1,0 +1,88 @@
+statement ok
+SET RW_IMPLICIT_FLUSH TO true;
+
+statement ok
+create table variant_stream_t (
+    id int primary key,
+    payload variant
+);
+
+statement error VARIANT column
+create materialized view variant_bad_agg as
+select payload, count(*) from variant_stream_t group by payload;
+
+statement ok
+set rw_streaming_allow_jsonb_in_stream_key = true;
+
+statement error VARIANT column
+create materialized view variant_bad_agg_with_jsonb_opt_in as
+select payload, count(*) from variant_stream_t group by payload;
+
+statement ok
+set rw_streaming_allow_jsonb_in_stream_key = false;
+
+statement ok
+create materialized view variant_state_mv as
+select
+    id,
+    payload,
+    variant_get(payload, '$.a') as a,
+    variant_typeof(payload) as kind
+from variant_stream_t;
+
+statement ok
+insert into variant_stream_t values
+    (1, '{"a":10,"b":[1,2]}'::variant),
+    (2, to_variant('plain'::varchar));
+
+query ITT rowsort
+select id, a::varchar, kind from variant_state_mv;
+----
+1 10 object
+2 NULL string
+
+statement ok
+update variant_stream_t set payload = '{"a":20}'::variant where id = 1;
+
+query ITT rowsort
+select id, a::varchar, kind from variant_state_mv;
+----
+1 20 object
+2 NULL string
+
+statement ok
+drop materialized view variant_state_mv;
+
+statement ok
+drop table variant_stream_t;
+
+# Nested VARIANT must not reach a streaming operator's storage key.
+statement ok
+create table variant_nested_t (
+    id int primary key,
+    s struct<v variant>
+);
+
+# TopN order key contains a nested VARIANT.
+statement error VARIANT column
+create materialized view variant_bad_topn as
+select count(*) from (select * from variant_nested_t order by s limit 10);
+
+# Over window partition key contains a nested VARIANT.
+statement error VARIANT column
+create materialized view variant_bad_over_window as
+select id from (
+    select id, rank() over (partition by s order by id) as rank
+    from variant_nested_t)
+where rank <= 2;
+
+statement error should not be in the aggregation order key
+create materialized view variant_bad_agg_order as
+select array_agg(id order by s) from variant_nested_t;
+
+statement error should not be in the distinct aggregation argument
+create materialized view variant_bad_agg_distinct as
+select count(distinct s) from variant_nested_t;
+
+statement ok
+drop table variant_nested_t;

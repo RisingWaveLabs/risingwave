@@ -26,15 +26,15 @@ use mysql_async::prelude::*;
 use prost::Message;
 use risingwave_common::global_jvm::Jvm;
 use risingwave_common::id::SourceId;
+use risingwave_common::metrics::{LabelGuardedIntGauge, LabelGuardedIntGaugeVec};
 use risingwave_common::util::addr::HostAddr;
 use risingwave_jni_core::call_static_method;
 use risingwave_jni_core::jvm_runtime::execute_with_jni_env;
 use risingwave_pb::connector_service::{SourceType, ValidateSourceRequest, ValidateSourceResponse};
-use thiserror_ext::AsReport;
 use tiberius::Config;
 use tokio_postgres::types::PgLsn;
 
-use crate::connector_common::{SslMode, create_pg_client};
+use crate::connector_common::{SslMode, create_pg_client, pg_connection_config_from_properties};
 use crate::error::ConnectorResult;
 use crate::sink::sqlserver::SqlServerClient;
 use crate::source::cdc::external::mysql::build_mysql_connection_pool;
@@ -54,9 +54,23 @@ pub struct DebeziumSplitEnumerator<T: CdcSourceTypeTrait> {
     source_id: SourceId,
     worker_node_addrs: Vec<HostAddr>,
     metrics: Arc<EnumeratorMetrics>,
+    pg_cdc_upstream_max_lsn: Option<LabelGuardedIntGauge>,
+    pg_cdc_confirmed_flush_lsn: Option<LabelGuardedIntGauge>,
+    mysql_cdc_binlog_file_seq_min: Option<LabelGuardedIntGauge>,
+    mysql_cdc_binlog_file_seq_max: Option<LabelGuardedIntGauge>,
+    sqlserver_cdc_upstream_min_lsn: Option<LabelGuardedIntGauge>,
+    sqlserver_cdc_upstream_max_lsn: Option<LabelGuardedIntGauge>,
     /// Properties specified in the WITH clause by user for database connection
     properties: Arc<BTreeMap<String, String>>,
     _phantom: PhantomData<T>,
+}
+
+fn get_or_create_guarded_int_gauge<'a>(
+    metric: &'a mut Option<LabelGuardedIntGauge>,
+    metric_vec: &LabelGuardedIntGaugeVec,
+    labels: &[String],
+) -> &'a LabelGuardedIntGauge {
+    metric.get_or_insert_with(|| metric_vec.with_guarded_label_values(labels))
 }
 
 #[async_trait]
@@ -127,9 +141,7 @@ where
                 )?;
 
                 if let Some(error) = validate_source_response.error {
-                    return Err(
-                        anyhow!(error.error_message).context("source cannot pass validation")
-                    );
+                    return Err(anyhow!(error.error_message).context("source validation failed"));
                 }
 
                 Ok(())
@@ -143,6 +155,12 @@ where
             source_id,
             worker_node_addrs: server_addrs,
             metrics: context.metrics.clone(),
+            pg_cdc_upstream_max_lsn: None,
+            pg_cdc_confirmed_flush_lsn: None,
+            mysql_cdc_binlog_file_seq_min: None,
+            mysql_cdc_binlog_file_seq_max: None,
+            sqlserver_cdc_upstream_min_lsn: None,
+            sqlserver_cdc_upstream_max_lsn: None,
             properties: properties_arc,
             _phantom: PhantomData,
         })
@@ -162,22 +180,36 @@ impl<T: CdcSourceTypeTrait> DebeziumSplitEnumerator<T> {
         parse_sql_server_lsn_str(lsn).map(|v| v.min(i64::MAX as u128) as i64)
     }
 
+    fn pg_cdc_lsn_metric_labels(&self, slot_name: &str) -> Vec<String> {
+        vec![self.source_id.to_string(), slot_name.to_owned()]
+    }
+
     async fn monitor_postgres_confirmed_flush_lsn(&mut self) -> ConnectorResult<()> {
         // Query upstream LSNs and update metrics.
-        match self.query_postgres_lsns().await {
-            Ok(Some((confirmed_flush_lsn, upstream_max_lsn, slot_name))) => {
-                let labels = [&self.source_id.to_string(), &slot_name.to_owned()];
+        let lsns = self.query_postgres_lsns().await.with_context(|| {
+            format!(
+                "failed to query PostgreSQL LSNs for source {}",
+                self.source_id
+            )
+        })?;
+        match lsns {
+            Some((confirmed_flush_lsn, upstream_max_lsn, slot_name)) => {
+                let labels = self.pg_cdc_lsn_metric_labels(&slot_name);
 
-                self.metrics
-                    .pg_cdc_upstream_max_lsn
-                    .with_guarded_label_values(&labels)
-                    .set(upstream_max_lsn as i64);
+                get_or_create_guarded_int_gauge(
+                    &mut self.pg_cdc_upstream_max_lsn,
+                    &self.metrics.pg_cdc_upstream_max_lsn,
+                    &labels,
+                )
+                .set(upstream_max_lsn as i64);
 
                 if let Some(lsn) = confirmed_flush_lsn {
-                    self.metrics
-                        .pg_cdc_confirmed_flush_lsn
-                        .with_guarded_label_values(&labels)
-                        .set(lsn as i64);
+                    get_or_create_guarded_int_gauge(
+                        &mut self.pg_cdc_confirmed_flush_lsn,
+                        &self.metrics.pg_cdc_confirmed_flush_lsn,
+                        &labels,
+                    )
+                    .set(lsn as i64);
                     tracing::debug!(
                         "Updated confirmed_flush_lsn for source {} slot {}: {}",
                         self.source_id,
@@ -192,17 +224,10 @@ impl<T: CdcSourceTypeTrait> DebeziumSplitEnumerator<T> {
                     );
                 }
             }
-            Ok(None) => {
+            None => {
                 tracing::warn!(
-                    "No replication slot found when querying LSNs for source {}",
+                    "no replication slot was found while querying LSNs for source {}",
                     self.source_id
-                );
-            }
-            Err(e) => {
-                tracing::error!(
-                    "Failed to query PostgreSQL LSNs for source {}: {}",
-                    self.source_id,
-                    e.as_report()
                 );
             }
         };
@@ -210,62 +235,25 @@ impl<T: CdcSourceTypeTrait> DebeziumSplitEnumerator<T> {
     }
 
     /// Query LSNs from PostgreSQL, return (`confirmed_flush_lsn`, `upstream_max_lsn`, `slot_name`).
-    async fn query_postgres_lsns(&self) -> ConnectorResult<Option<(Option<u64>, u64, &str)>> {
-        // Extract connection parameters from CDC properties
-        let hostname = self
-            .properties
-            .get("hostname")
-            .ok_or_else(|| anyhow::anyhow!("hostname not found in CDC properties"))?;
-        let port = self
-            .properties
-            .get("port")
-            .ok_or_else(|| anyhow::anyhow!("port not found in CDC properties"))?;
-        let user = self
-            .properties
-            .get("username")
-            .ok_or_else(|| anyhow::anyhow!("username not found in CDC properties"))?;
-        let password = self
-            .properties
-            .get("password")
-            .ok_or_else(|| anyhow::anyhow!("password not found in CDC properties"))?;
-        let database = self
-            .properties
-            .get("database.name")
-            .ok_or_else(|| anyhow::anyhow!("database.name not found in CDC properties"))?;
-
-        // Get SSL mode from properties, default to Preferred if not specified
-        let ssl_mode = self
-            .properties
-            .get("ssl.mode")
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(SslMode::Preferred);
-        let ssl_root_cert = self.properties.get("database.ssl.root.cert").cloned();
+    async fn query_postgres_lsns(&self) -> ConnectorResult<Option<(Option<u64>, u64, String)>> {
+        let pg_conn = pg_connection_config_from_properties(&self.properties)?;
 
         let slot_name = self
             .properties
             .get("slot.name")
-            .ok_or_else(|| anyhow::anyhow!("slot.name not found in CDC properties"))?;
+            .ok_or_else(|| anyhow::anyhow!("missing `slot.name` in CDC properties"))?;
 
-        // Create PostgreSQL client
-        let client = create_pg_client(
-            user,
-            password,
-            hostname,
-            port,
-            database,
-            &ssl_mode,
-            &ssl_root_cert,
-            None, // No TCP keepalive for CDC enumerator
-        )
-        .await
-        .context("Failed to create PostgreSQL client")?;
+        // No TCP keepalive for CDC enumerator
+        let client = create_pg_client(&pg_conn, None)
+            .await
+            .context("failed to create the PostgreSQL client")?;
 
         let query = "SELECT confirmed_flush_lsn, pg_current_wal_lsn() \
             FROM pg_replication_slots WHERE slot_name = $1";
         let row = client
             .query_opt(query, &[&slot_name])
             .await
-            .context("PostgreSQL query LSNs error")?;
+            .context("failed to query PostgreSQL LSNs")?;
         match row {
             Some(row) => {
                 let confirmed_flush_lsn: Option<PgLsn> = row.get(0);
@@ -273,11 +261,11 @@ impl<T: CdcSourceTypeTrait> DebeziumSplitEnumerator<T> {
                 Ok(Some((
                     confirmed_flush_lsn.map(Into::into),
                     upstream_max_lsn.into(),
-                    slot_name.as_str(),
+                    slot_name.clone(),
                 )))
             }
             None => {
-                tracing::warn!("No replication slot found with name: {}", slot_name);
+                tracing::warn!("no replication slot found with name: {}", slot_name);
                 Ok(None)
             }
         }
@@ -288,25 +276,25 @@ impl<T: CdcSourceTypeTrait> DebeziumSplitEnumerator<T> {
         let hostname = self
             .properties
             .get("hostname")
-            .ok_or_else(|| anyhow!("hostname not found in CDC properties"))?;
+            .ok_or_else(|| anyhow!("missing `hostname` in CDC properties"))?;
         let port = self
             .properties
             .get("port")
-            .ok_or_else(|| anyhow!("port not found in CDC properties"))?
+            .ok_or_else(|| anyhow!("missing `port` in CDC properties"))?
             .parse::<u16>()
-            .context("failed to parse port as u16")?;
+            .context("failed to parse `port` as a u16")?;
         let username = self
             .properties
             .get("username")
-            .ok_or_else(|| anyhow!("username not found in CDC properties"))?;
+            .ok_or_else(|| anyhow!("missing `username` in CDC properties"))?;
         let password = self
             .properties
             .get("password")
-            .ok_or_else(|| anyhow!("password not found in CDC properties"))?;
+            .ok_or_else(|| anyhow!("missing `password` in CDC properties"))?;
         let database = self
             .properties
             .get("database.name")
-            .ok_or_else(|| anyhow!("database.name not found in CDC properties"))?;
+            .ok_or_else(|| anyhow!("missing `database.name` in CDC properties"))?;
 
         let mut config = Config::new();
         config.host(hostname);
@@ -367,31 +355,30 @@ impl<T: CdcSourceTypeTrait> DebeziumSplitEnumerator<T> {
     }
 
     async fn monitor_sql_server_lsns(&mut self) -> ConnectorResult<()> {
-        match self.query_sql_server_lsns().await {
-            Ok(Some((min_lsn, max_lsn))) => {
-                let source_id = self.source_id.to_string();
+        let lsns = self.query_sql_server_lsns().await.with_context(|| {
+            format!(
+                "failed to query SQL Server LSNs for source {}",
+                self.source_id
+            )
+        })?;
+        if let Some((min_lsn, max_lsn)) = lsns {
+            let labels = vec![self.source_id.to_string()];
 
-                if let Some(value) = Self::sql_server_lsn_to_i64(&min_lsn) {
-                    self.metrics
-                        .sqlserver_cdc_upstream_min_lsn
-                        .with_guarded_label_values(&[&source_id])
-                        .set(value);
-                }
-
-                if let Some(value) = Self::sql_server_lsn_to_i64(&max_lsn) {
-                    self.metrics
-                        .sqlserver_cdc_upstream_max_lsn
-                        .with_guarded_label_values(&[&source_id])
-                        .set(value);
-                }
+            if let Some(value) = Self::sql_server_lsn_to_i64(&min_lsn) {
+                get_or_create_guarded_int_gauge(
+                    &mut self.sqlserver_cdc_upstream_min_lsn,
+                    &self.metrics.sqlserver_cdc_upstream_min_lsn,
+                    &labels,
+                )
+                .set(value);
             }
-            Ok(None) => {}
-            Err(e) => {
-                tracing::error!(
-                    "Failed to query SQL Server LSNs for source {}: {}",
-                    self.source_id,
-                    e.as_report()
-                );
+            if let Some(value) = Self::sql_server_lsn_to_i64(&max_lsn) {
+                get_or_create_guarded_int_gauge(
+                    &mut self.sqlserver_cdc_upstream_max_lsn,
+                    &self.metrics.sqlserver_cdc_upstream_max_lsn,
+                    &labels,
+                )
+                .set(value);
             }
         }
 
@@ -437,60 +424,67 @@ impl DebeziumSplitEnumerator<Mysql> {
             })?;
 
         // Query binlog files and update metrics
-        match self.query_binlog_files().await {
-            Ok(binlog_files) => {
-                if let Some((oldest_file, oldest_size)) = binlog_files.first()
-                    && let Some(seq) = extract_binlog_file_seq(oldest_file)
-                {
-                    self.metrics
-                        .mysql_cdc_binlog_file_seq_min
-                        .with_guarded_label_values(&[hostname, port])
-                        .set(seq as i64);
-                    tracing::debug!(
-                        "MySQL CDC source {} ({}:{}): oldest binlog = {}, seq = {}, size = {}",
-                        self.source_id,
-                        hostname,
-                        port,
-                        oldest_file,
-                        seq,
-                        oldest_size
-                    );
-                }
-                if let Some((newest_file, newest_size)) = binlog_files.last()
-                    && let Some(seq) = extract_binlog_file_seq(newest_file)
-                {
-                    self.metrics
-                        .mysql_cdc_binlog_file_seq_max
-                        .with_guarded_label_values(&[hostname, port])
-                        .set(seq as i64);
-                    tracing::debug!(
-                        "MySQL CDC source {} ({}:{}): newest binlog = {}, seq = {}, size = {}",
-                        self.source_id,
-                        hostname,
-                        port,
-                        newest_file,
-                        seq,
-                        newest_size
-                    );
-                }
-                tracing::debug!(
-                    "MySQL CDC source {} ({}:{}): total {} binlog files",
-                    self.source_id,
-                    hostname,
-                    port,
-                    binlog_files.len()
-                );
-            }
-            Err(e) => {
-                tracing::error!(
-                    "Failed to query binlog files for MySQL CDC source {} ({}:{}): {}",
-                    self.source_id,
-                    hostname,
-                    port,
-                    e.as_report()
-                );
-            }
+        let binlog_files = self.query_binlog_files().await.with_context(|| {
+            format!(
+                "failed to query binlog files for MySQL CDC source {} ({}:{})",
+                self.source_id, hostname, port
+            )
+        })?;
+        if let Some((oldest_file, oldest_size)) = binlog_files.first()
+            && let Some(seq) = extract_binlog_file_seq(oldest_file)
+        {
+            let labels = vec![
+                self.source_id.to_string(),
+                hostname.to_owned(),
+                port.to_owned(),
+            ];
+            get_or_create_guarded_int_gauge(
+                &mut self.mysql_cdc_binlog_file_seq_min,
+                &self.metrics.mysql_cdc_binlog_file_seq_min,
+                &labels,
+            )
+            .set(seq as i64);
+            tracing::debug!(
+                "MySQL CDC source {} ({}:{}): oldest binlog = {}, seq = {}, size = {}",
+                self.source_id,
+                hostname,
+                port,
+                oldest_file,
+                seq,
+                oldest_size
+            );
         }
+        if let Some((newest_file, newest_size)) = binlog_files.last()
+            && let Some(seq) = extract_binlog_file_seq(newest_file)
+        {
+            let labels = vec![
+                self.source_id.to_string(),
+                hostname.to_owned(),
+                port.to_owned(),
+            ];
+            get_or_create_guarded_int_gauge(
+                &mut self.mysql_cdc_binlog_file_seq_max,
+                &self.metrics.mysql_cdc_binlog_file_seq_max,
+                &labels,
+            )
+            .set(seq as i64);
+            tracing::debug!(
+                "MySQL CDC source {} ({}:{}): newest binlog = {}, seq = {}, size = {}",
+                self.source_id,
+                hostname,
+                port,
+                newest_file,
+                seq,
+                newest_size
+            );
+        }
+        tracing::debug!(
+            "MySQL CDC source {} ({}:{}): total {} binlog files",
+            self.source_id,
+            hostname,
+            port,
+            binlog_files.len()
+        );
         Ok(())
     }
 
@@ -500,25 +494,25 @@ impl DebeziumSplitEnumerator<Mysql> {
         let hostname = self
             .properties
             .get("hostname")
-            .ok_or_else(|| anyhow::anyhow!("hostname not found in CDC properties"))?;
+            .ok_or_else(|| anyhow::anyhow!("missing `hostname` in CDC properties"))?;
         let port = self
             .properties
             .get("port")
-            .ok_or_else(|| anyhow::anyhow!("port not found in CDC properties"))?
+            .ok_or_else(|| anyhow::anyhow!("missing `port` in CDC properties"))?
             .parse::<u16>()
-            .context("failed to parse port as u16")?;
+            .context("failed to parse `port` as a u16")?;
         let username = self
             .properties
             .get("username")
-            .ok_or_else(|| anyhow::anyhow!("username not found in CDC properties"))?;
+            .ok_or_else(|| anyhow::anyhow!("missing `username` in CDC properties"))?;
         let password = self
             .properties
             .get("password")
-            .ok_or_else(|| anyhow::anyhow!("password not found in CDC properties"))?;
+            .ok_or_else(|| anyhow::anyhow!("missing `password` in CDC properties"))?;
         let database = self
             .properties
             .get("database.name")
-            .ok_or_else(|| anyhow::anyhow!("database.name not found in CDC properties"))?;
+            .ok_or_else(|| anyhow::anyhow!("missing `database.name` in CDC properties"))?;
 
         // Get SSL mode configuration (default to Disabled if not specified)
         let ssl_mode = self
@@ -533,7 +527,7 @@ impl DebeziumSplitEnumerator<Mysql> {
         let mut conn = pool
             .get_conn()
             .await
-            .context("Failed to connect to MySQL")?;
+            .context("failed to connect to MySQL")?;
 
         // Query binlog files using SHOW BINARY LOGS.
         // MySQL 8.0+ may return 3 columns (Log_name, File_size, Encrypted), while some variants
@@ -542,20 +536,20 @@ impl DebeziumSplitEnumerator<Mysql> {
         let rows: Vec<Row> = conn
             .query("SHOW BINARY LOGS")
             .await
-            .context("Failed to execute SHOW BINARY LOGS")?;
+            .context("failed to execute `SHOW BINARY LOGS`")?;
         let query_result = rows
             .into_iter()
             .map(|mut row| -> ConnectorResult<(String, u64)> {
                 let log_name = row
                     .take_opt::<String, _>(0)
                     .transpose()
-                    .context("SHOW BINARY LOGS: failed to decode Log_name")?
-                    .ok_or_else(|| anyhow!("SHOW BINARY LOGS: missing Log_name column"))?;
+                    .context("`SHOW BINARY LOGS`: failed to decode `Log_name`")?
+                    .ok_or_else(|| anyhow!("`SHOW BINARY LOGS`: missing `Log_name` column"))?;
                 let file_size = row
                     .take_opt::<u64, _>(1)
                     .transpose()
-                    .context("SHOW BINARY LOGS: failed to decode File_size")?
-                    .ok_or_else(|| anyhow!("SHOW BINARY LOGS: missing File_size column"))?;
+                    .context("`SHOW BINARY LOGS`: failed to decode `File_size`")?
+                    .ok_or_else(|| anyhow!("`SHOW BINARY LOGS`: missing `File_size` column"))?;
                 Ok((log_name, file_size))
             })
             .collect::<ConnectorResult<Vec<_>>>()?;
@@ -657,5 +651,29 @@ impl ListCdcSplits for DebeziumSplitEnumerator<SqlServer> {
 impl CdcMonitor for DebeziumSplitEnumerator<SqlServer> {
     async fn monitor_cdc(&mut self) -> ConnectorResult<()> {
         self.monitor_sql_server_lsns().await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use prometheus::core::Collector;
+    use risingwave_common::metrics::LabelGuardedIntGaugeVec;
+
+    use super::get_or_create_guarded_int_gauge;
+
+    #[test]
+    fn cached_guarded_metric_survives_repeated_collections() {
+        let metric_vec = LabelGuardedIntGaugeVec::test_int_gauge_vec::<2>();
+        let labels = vec!["source_id".to_owned(), "slot_name".to_owned()];
+        let mut metric = None;
+
+        get_or_create_guarded_int_gauge(&mut metric, &metric_vec, &labels).set(1);
+
+        assert_eq!(1, metric_vec.collect().pop().unwrap().get_metric().len());
+        assert_eq!(1, metric_vec.collect().pop().unwrap().get_metric().len());
+
+        drop(metric);
+        assert_eq!(1, metric_vec.collect().pop().unwrap().get_metric().len());
+        assert_eq!(0, metric_vec.collect().pop().unwrap().get_metric().len());
     }
 }

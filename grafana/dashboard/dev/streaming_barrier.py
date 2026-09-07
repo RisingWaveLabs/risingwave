@@ -14,38 +14,20 @@ def _(outer_panels: Panels):
                     height=2.2,
                 ),
                 panels.timeseries_latency(
-                    "Barrier Send Latency",
-                    "The duration between the time point when the scheduled barrier needs to be sent and the time point when "
-                    "the barrier gets actually sent to all the compute nodes. Developers can thus detect any internal "
-                    "congestion.",
-                    quantile(
-                        lambda quantile, legend: panels.target(
-                            f"histogram_quantile({quantile}, sum(rate({metric('meta_barrier_send_duration_seconds_bucket')}[$__rate_interval])) by (le, database_id))",
-                            f"barrier_send_latency_p{legend}" + " {{database_id}}",
-                        ),
-                        [50, 90, 99, 999, "max"],
-                    )
-                    + [
-                        panels.target(
-                            f"rate({metric('meta_barrier_send_duration_seconds_sum')}[$__rate_interval]) / rate({metric('meta_barrier_send_duration_seconds_count')}[$__rate_interval]) > 0",
-                            "barrier_send_latency_avg {{database_id}}",
-                        ),
-                    ],
-                ),
-                panels.timeseries_latency(
                     "Barrier In-Flight Latency",
                     "",
                     quantile(
                         lambda quantile, legend: panels.target(
-                            f"histogram_quantile({quantile}, sum(rate({metric('stream_barrier_inflight_duration_seconds_bucket')}[$__rate_interval])) by (le))",
-                            f"barrier_inflight_latency_p{legend}",
+                            f"histogram_quantile({quantile}, sum(rate({metric('stream_barrier_inflight_duration_seconds_bucket')}[$__rate_interval])) by (le, partial_graph))",
+                            f"barrier_inflight_latency_p{legend}"
+                            + " {{partial_graph}}",
                         ),
                         [50, 90, 99, 999, "max"],
                     )
                     + [
                         panels.target(
-                            f"max(sum by(le, {NODE_LABEL})(rate({metric('stream_barrier_inflight_duration_seconds_sum')}[$__rate_interval]))  / sum by(le, {NODE_LABEL})(rate({metric('stream_barrier_inflight_duration_seconds_count')}[$__rate_interval]))) > 0",
-                            "barrier_inflight_latency_avg",
+                            f"max by (partial_graph) (sum by (partial_graph, {NODE_LABEL}) (rate({metric('stream_barrier_inflight_duration_seconds_sum')}[$__rate_interval])) / sum by (partial_graph, {NODE_LABEL}) (rate({metric('stream_barrier_inflight_duration_seconds_count')}[$__rate_interval]))) > 0",
+                            "barrier_inflight_latency_avg {{partial_graph}}",
                         ),
                     ],
                 ),
@@ -54,16 +36,17 @@ def _(outer_panels: Panels):
                     "",
                     quantile(
                         lambda quantile, legend: panels.target(
-                            f"histogram_quantile({quantile}, sum(rate({metric('stream_barrier_sync_storage_duration_seconds_bucket')}[$__rate_interval])) by (le, {NODE_LABEL}))",
+                            f"histogram_quantile({quantile}, sum(rate({metric('stream_barrier_sync_storage_duration_seconds_bucket')}[$__rate_interval])) by (le, partial_graph, {NODE_LABEL}))",
                             f"barrier_sync_latency_p{legend}"
-                            + " - {{%s}}" % NODE_LABEL,
+                            + " {{partial_graph}} - {{%s}}" % NODE_LABEL,
                         ),
                         [50, 90, 99, 999, "max"],
                     )
                     + [
                         panels.target(
-                            f"sum by(le, {NODE_LABEL})(rate({metric('stream_barrier_sync_storage_duration_seconds_sum')}[$__rate_interval]))  / sum by(le, {NODE_LABEL})(rate({metric('stream_barrier_sync_storage_duration_seconds_count')}[$__rate_interval])) > 0",
-                            "barrier_sync_latency_avg - {{%s}}" % NODE_LABEL,
+                            f"sum by(partial_graph, {NODE_LABEL})(rate({metric('stream_barrier_sync_storage_duration_seconds_sum')}[$__rate_interval])) / sum by(partial_graph, {NODE_LABEL})(rate({metric('stream_barrier_sync_storage_duration_seconds_count')}[$__rate_interval])) > 0",
+                            "barrier_sync_latency_avg {{partial_graph}} - {{%s}}"
+                            % NODE_LABEL,
                         ),
                     ],
                 ),
@@ -83,17 +66,12 @@ def _(outer_panels: Panels):
                             "barrier_wait_commit_avg",
                         ),
                     ]
+                    # Retain this query for compatibility with pre-v3.0 clusters, where the metric
+                    # is still produced.
                     + quantile(
                         lambda quantile, legend: panels.target(
                             f"histogram_quantile({quantile}, sum(rate({metric('meta_snapshot_backfill_barrier_wait_commit_duration_seconds_bucket')}[$__rate_interval])) by (le, table_id))",
                             f"snapshot_backfill_barrier_wait_commit_latency_p{legend} table_id[{{{{table_id}}}}]",
-                        ),
-                        [50, 90, 99, 999, "max"],
-                    )
-                    + quantile(
-                        lambda quantile, legend: panels.target(
-                            f"histogram_quantile({quantile}, sum(rate({metric('meta_snapshot_backfill_upstream_wait_progress_latency_bucket')}[$__rate_interval])) by (le, table_id))",
-                            f"snapshot_backfill_upstream_wait_progress_latency_p{legend} table_id[{{{{table_id}}}}]",
                         ),
                         [50, 90, 99, 999, "max"],
                     ),
@@ -105,7 +83,7 @@ def _(outer_panels: Panels):
                     [
                         panels.target(
                             f"rate({metric('stream_barrier_manager_progress')}[$__rate_interval])",
-                            "{{%s}}" % NODE_LABEL,
+                            "{{partial_graph}} - {{%s}}" % NODE_LABEL,
                         ),
                     ],
                 ),

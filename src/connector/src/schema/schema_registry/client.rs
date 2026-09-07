@@ -20,11 +20,12 @@ use std::time::Duration;
 use futures::future::select_all;
 use itertools::Itertools;
 use reqwest::{Method, Url};
+use risingwave_common::util::retry::exponential_backoff;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use thiserror_ext::AsReport as _;
 use tokio_retry::Retry;
-use tokio_retry::strategy::{ExponentialBackoff, jitter};
+use tokio_retry::strategy::jitter;
 
 use super::util::*;
 use crate::connector_common::ConfluentSchemaRegistryConnection;
@@ -170,7 +171,10 @@ impl Client {
             .collect_vec();
         if valid_urls.is_empty() {
             return Err(SchemaRegistryClientError::InvalidOption(
-                invalid_option_error!("non-base: {}", url.iter().join(" ")),
+                invalid_option_error!(
+                    "the following schema registry URLs are not valid base URLs: {}",
+                    url.iter().join(" ")
+                ),
             ));
         } else {
             tracing::debug!(
@@ -224,11 +228,13 @@ impl Client {
         });
         tracing::debug!("retry config: {:?}", self.retry_config);
 
-        let retry_strategy = ExponentialBackoff::from_millis(self.retry_config.backoff_duration_ms)
-            .factor(self.retry_config.backoff_factor)
-            .max_delay(Duration::from_secs(self.retry_config.max_delay_sec as u64))
-            .take(self.retry_config.retries_max)
-            .map(jitter);
+        let retry_strategy = exponential_backoff(
+            Duration::from_millis(self.retry_config.backoff_duration_ms),
+            self.retry_config.backoff_factor,
+            Duration::from_secs(self.retry_config.max_delay_sec as u64),
+        )
+        .take(self.retry_config.retries_max)
+        .map(jitter);
 
         for url in &self.url {
             let url_clone = url.clone();
@@ -341,31 +347,5 @@ impl Client {
         let origin_subject = subjects.remove(0);
 
         Ok((origin_subject, subjects))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    #[ignore]
-    async fn test_get_subject() {
-        let url = Url::parse("http://localhost:8081").unwrap();
-        let client = Client::new(
-            vec![url],
-            &SchemaRegistryConfig {
-                username: None,
-                password: None,
-                ca_pem_path: None,
-                retry_config: SchemaRegistryRetryConfig::default(),
-            },
-        )
-        .unwrap();
-        let subject = client
-            .get_subject_and_references("proto_c_bin-value")
-            .await
-            .unwrap();
-        println!("{:?}", subject);
     }
 }

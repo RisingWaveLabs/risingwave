@@ -33,7 +33,7 @@ statement ok
 create sink s_simple_1 into m_simple as select v1, v2 from t_simple;
 
 statement ok
-drop table m_simple;
+drop table m_simple cascade;
 
 statement ok
 drop table t_simple;

@@ -60,16 +60,14 @@ pub async fn validate_ssts(task: ValidationTask, sstable_store: SstableStoreRef)
             }
         };
 
-        // TODO: to use `prefetch: false` after `prefetch` be supported by
-        // SstableIteratorReadOptions
         let mut iter = SstableIterator::new(
             holder,
             sstable_store.clone(),
             Arc::new(SstableIteratorReadOptions {
                 cache_policy: CachePolicy::NotFill,
-                must_iterated_end_user_key: None,
+                scan_end_user_key: None,
+                prefetch: false,
                 max_preload_retry_times: 0,
-                prefetch_for_large_query: false,
             }),
             &sstable_info,
         );

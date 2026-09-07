@@ -1,17 +1,17 @@
 # Corner-case auto schema change tests for PG CDC.
 #
 # Focus: columns whose type is an *array of a user-defined type* (here
-# `mood_enum[]`). These are special because Debezium's schema-change event marks
-# them neither as enum (`enumValues`) nor as composite (`jdbcType == STRUCT`),
-# and their `_`-prefixed type name is not in the builtin whitelist. Without
-# dedicated handling, any schema change on such a table fails with
-# `unsupported data type _mood_enum`.
+# `mood_enum[]` and `corner_money[]`). These are special because Debezium's
+# schema-change event marks them neither as enum (`enumValues`) nor as composite
+# (`jdbcType == STRUCT`), and their `_`-prefixed type name is not in the builtin
+# whitelist. Without dedicated handling, any schema change on such a table fails
+# with `unsupported data type _mood_enum` or `unsupported data type _corner_money`.
 #
 # Two scenarios are covered:
-#  1. Existing column: an `mood_enum[]` column present before the schema change
-#     must NOT break an unrelated `ADD COLUMN`.
-#  2. New column: an `mood_enum[]` column added by the schema change itself must
-#     be derived as `varchar[]`.
+#  1. Existing columns: `mood_enum[]` and `corner_money[]` columns present before
+#     the schema change must NOT break an unrelated `ADD COLUMN`.
+#  2. New columns: `mood_enum[]` and `corner_money[]` columns added by the schema
+#     change itself must be derived as `varchar[]`.
 
 control substitution on
 
@@ -25,20 +25,26 @@ psql -c "
     FROM pg_replication_slots
     WHERE slot_name = 'corner_schema_change_slot';
     DROP TABLE IF EXISTS corner_enum_arr;
+    DROP TYPE IF EXISTS corner_money;
     DROP TYPE IF EXISTS mood_enum;
 "
 
 system ok
 psql -c "
     CREATE TYPE mood_enum AS ENUM ('happy', 'sad', 'neutral');
+    CREATE TYPE corner_money AS (
+        currency text,
+        amount numeric
+    );
     CREATE TABLE corner_enum_arr (
         id int PRIMARY KEY,
         tags mood_enum[] NOT NULL,
+        prices corner_money[] NOT NULL,
         note varchar
     );
-    INSERT INTO corner_enum_arr (id, tags, note) VALUES
-        (1, ARRAY['happy', 'sad']::mood_enum[], 'backfill_1'),
-        (2, ARRAY['neutral']::mood_enum[], 'backfill_2');
+    INSERT INTO corner_enum_arr (id, tags, prices, note) VALUES
+        (1, ARRAY['happy', 'sad']::mood_enum[], ARRAY[ROW('USD', 1)::corner_money]::corner_money[], 'backfill_1'),
+        (2, ARRAY['neutral']::mood_enum[], ARRAY[ROW('EUR', 2)::corner_money]::corner_money[], 'backfill_2');
 "
 
 statement ok
@@ -51,41 +57,43 @@ create source s with (
   database.name = '${PGDATABASE:postgres}',
   schema.name = 'public',
   slot.name = 'corner_schema_change_slot',
-  auto.schema.change = 'true'
+  auto.schema.change = 'true',
+  debezium.include.unknown.datatypes = 'true'
 );
 
-# The existing `mood_enum[]` column is derived as `varchar[]`.
+# The existing `mood_enum[]` and `corner_money[]` columns are derived as `varchar[]`.
 statement ok
 create table corner_enum_arr (*) from s table 'public.corner_enum_arr';
 
-query ITT retry 6 backoff 1s
-select id, tags, note from corner_enum_arr order by id;
+query ITTT retry 6 backoff 1s
+select id, tags, prices, note from corner_enum_arr order by id;
 ----
-1 {happy,sad} backfill_1
-2 {neutral} backfill_2
+1 {happy,sad} {"(USD,1)"} backfill_1
+2 {neutral} {"(EUR,2)"} backfill_2
 
 # Scenario 1: an unrelated `ADD COLUMN` must succeed even though the table
-# already has an `mood_enum[]` column (the original bug failed here).
+# already has user-defined array columns (the original bug failed here).
 system ok
 psql -c "
     ALTER TABLE corner_enum_arr ADD COLUMN extra int DEFAULT NULL;
-    INSERT INTO corner_enum_arr (id, tags, note, extra) VALUES
-        (3, ARRAY['neutral', 'happy']::mood_enum[], 'after_alter_1', 7);
+    INSERT INTO corner_enum_arr (id, tags, prices, note, extra) VALUES
+        (3, ARRAY['neutral', 'happy']::mood_enum[], ARRAY[ROW('GBP', 3)::corner_money]::corner_money[], 'after_alter_1', 7);
 "
 
-query ITTI retry 6 backoff 1s
-select id, tags, note, extra from corner_enum_arr order by id;
+query ITTTI retry 6 backoff 1s
+select id, tags, prices, note, extra from corner_enum_arr order by id;
 ----
-1 {happy,sad} backfill_1 NULL
-2 {neutral} backfill_2 NULL
-3 {neutral,happy} after_alter_1 7
+1 {happy,sad} {"(USD,1)"} backfill_1 NULL
+2 {neutral} {"(EUR,2)"} backfill_2 NULL
+3 {neutral,happy} {"(GBP,3)"} after_alter_1 7
 
-# The existing array-of-enum column stays `varchar[]` after the schema change.
+# The existing array-of-user-defined-type columns stay `varchar[]` after the schema change.
 query TTTT retry 6 backoff 1s
 describe corner_enum_arr;
 ----
 id integer false NULL
 tags character varying[] false NULL
+prices character varying[] false NULL
 note character varying false NULL
 extra integer false NULL
 _rw_timestamp timestamp with time zone true NULL
@@ -93,30 +101,33 @@ primary key id NULL NULL
 distribution key id NULL NULL
 table description corner_enum_arr NULL NULL
 
-# Scenario 2: a newly added `mood_enum[]` column is derived as `varchar[]`.
+# Scenario 2: newly added user-defined array columns are derived as `varchar[]`.
 system ok
 psql -c "
     ALTER TABLE corner_enum_arr ADD COLUMN moods mood_enum[] DEFAULT NULL;
-    INSERT INTO corner_enum_arr (id, tags, note, extra, moods) VALUES
-        (4, ARRAY['happy']::mood_enum[], 'after_alter_2', 8, ARRAY['sad', 'neutral']::mood_enum[]);
+    ALTER TABLE corner_enum_arr ADD COLUMN discounts corner_money[] DEFAULT NULL;
+    INSERT INTO corner_enum_arr (id, tags, prices, note, extra, moods, discounts) VALUES
+        (4, ARRAY['happy']::mood_enum[], ARRAY[ROW('JPY', 4)::corner_money]::corner_money[], 'after_alter_2', 8, ARRAY['sad', 'neutral']::mood_enum[], ARRAY[ROW('AUD', 5)::corner_money]::corner_money[]);
 "
 
-query ITTIT retry 6 backoff 1s
-select id, tags, note, extra, moods from corner_enum_arr order by id;
+query ITTTITT retry 6 backoff 1s
+select id, tags, prices, note, extra, moods, discounts from corner_enum_arr order by id;
 ----
-1 {happy,sad} backfill_1 NULL NULL
-2 {neutral} backfill_2 NULL NULL
-3 {neutral,happy} after_alter_1 7 NULL
-4 {happy} after_alter_2 8 {sad,neutral}
+1 {happy,sad} {"(USD,1)"} backfill_1 NULL NULL NULL
+2 {neutral} {"(EUR,2)"} backfill_2 NULL NULL NULL
+3 {neutral,happy} {"(GBP,3)"} after_alter_1 7 NULL NULL
+4 {happy} {"(JPY,4)"} after_alter_2 8 {sad,neutral} {"(AUD,5)"}
 
 query TTTT retry 6 backoff 1s
 describe corner_enum_arr;
 ----
 id integer false NULL
 tags character varying[] false NULL
+prices character varying[] false NULL
 note character varying false NULL
 extra integer false NULL
 moods character varying[] false NULL
+discounts character varying[] false NULL
 _rw_timestamp timestamp with time zone true NULL
 primary key id NULL NULL
 distribution key id NULL NULL
@@ -135,5 +146,6 @@ psql -c "
     FROM pg_replication_slots
     WHERE slot_name = 'corner_schema_change_slot';
     DROP TABLE IF EXISTS corner_enum_arr;
+    DROP TYPE IF EXISTS corner_money;
     DROP TYPE IF EXISTS mood_enum;
 "

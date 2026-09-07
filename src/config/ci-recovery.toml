@@ -4,6 +4,7 @@ max_heartbeat_interval_secs = 60
 
 [streaming]
 in_flight_barrier_nums = 10
+snapshot_backfill_barrier_amplification_factor = 10
 
 [storage]
 imm_merge_threshold = 2

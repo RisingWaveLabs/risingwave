@@ -26,6 +26,8 @@ pub struct LocalExchangeSource {
 
     /// Id of task which contains the `ExchangeExecutor` of this source.
     task_id: TaskId,
+
+    take_data_span: await_tree::Span,
 }
 
 impl LocalExchangeSource {
@@ -35,9 +37,14 @@ impl LocalExchangeSource {
         task_id: TaskId,
     ) -> Result<Self> {
         let task_output = context.get_task_output(output_id)?;
+        let take_data_span = await_tree::span!(
+            "local_exchange_take_data (task_output {:?})",
+            task_output.id()
+        );
         Ok(Self {
             task_output,
             task_id,
+            take_data_span,
         })
     }
 }
@@ -52,7 +59,12 @@ impl Debug for LocalExchangeSource {
 
 impl ExchangeSource for LocalExchangeSource {
     async fn take_data(&mut self) -> Result<Option<DataChunk>> {
-        let ret = self.task_output.direct_take_data().await?;
+        use await_tree::InstrumentAwait;
+        let ret = self
+            .task_output
+            .direct_take_data()
+            .instrument_await(self.take_data_span.clone())
+            .await?;
         if let Some(data) = ret {
             let data = data.compact_vis();
             trace!(

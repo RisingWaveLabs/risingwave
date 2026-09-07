@@ -250,8 +250,12 @@ enum ErrorKind {
     Date { days: i32 },
     #[error("Invalid time: secs: {secs}, nanoseconds: {nsecs}")]
     Time { secs: u32, nsecs: u32 },
+    #[error("Invalid time: {value} {unit} is out of range for a time of day")]
+    TimeOfDay { value: u64, unit: &'static str },
     #[error("Invalid datetime: seconds: {secs}, nanoseconds: {nsecs}")]
     DateTime { secs: i64, nsecs: u32 },
+    #[error("Invalid datetime: {value} {unit} is out of range")]
+    Timestamp { value: i64, unit: &'static str },
     #[error("Can't cast string to date (expected format is YYYY-MM-DD)")]
     ParseDate,
     #[error(
@@ -277,8 +281,16 @@ impl InvalidParamsError {
         ErrorKind::Time { secs, nsecs }.into()
     }
 
+    pub fn time_of_day(value: u64, unit: &'static str) -> Self {
+        ErrorKind::TimeOfDay { value, unit }.into()
+    }
+
     pub fn datetime(secs: i64, nsecs: u32) -> Self {
         ErrorKind::DateTime { secs, nsecs }.into()
+    }
+
+    pub fn timestamp(value: i64, unit: &'static str) -> Self {
+        ErrorKind::Timestamp { value, unit }.into()
     }
 }
 
@@ -424,6 +436,10 @@ impl Date {
     }
 }
 
+/// Exclusive upper bounds of a time of day.
+const NANOS_PER_DAY: u64 = 86_400 * 1_000_000_000;
+const MICROS_PER_DAY: u64 = 86_400 * 1_000_000;
+
 impl Time {
     pub fn with_secs_nano(secs: u32, nano: u32) -> Result<Self> {
         Ok(Time::new(
@@ -442,24 +458,36 @@ impl Time {
 
     pub fn to_protobuf<T: Write>(self, output: &mut T) -> ArrayResult<usize> {
         output
-            .write(
-                &(self.0.num_seconds_from_midnight() as u64 * 1_000_000_000
-                    + self.0.nanosecond() as u64)
-                    .to_be_bytes(),
-            )
+            .write(&self.nanos_of_day().to_be_bytes())
             .map_err(Into::into)
     }
 
     pub fn with_nano(nano: u64) -> Result<Self> {
-        let secs = (nano / 1_000_000_000) as u32;
-        let nano = (nano % 1_000_000_000) as u32;
-        Self::with_secs_nano(secs, nano)
+        // Rejecting out-of-day values here also keeps the casts below lossless.
+        if nano >= NANOS_PER_DAY {
+            return Err(InvalidParamsError::time_of_day(nano, "nanoseconds"));
+        }
+        Self::with_secs_nano((nano / 1_000_000_000) as u32, (nano % 1_000_000_000) as u32)
     }
 
     pub fn with_micro(micro: u64) -> Result<Self> {
-        let secs = (micro / 1_000_000) as u32;
-        let nano = ((micro % 1_000_000) * 1_000) as u32;
-        Self::with_secs_nano(secs, nano)
+        if micro >= MICROS_PER_DAY {
+            return Err(InvalidParamsError::time_of_day(micro, "microseconds"));
+        }
+        Self::with_secs_nano(
+            (micro / 1_000_000) as u32,
+            ((micro % 1_000_000) * 1_000) as u32,
+        )
+    }
+
+    /// Nanoseconds since midnight, the inverse of [`Time::with_nano`].
+    pub fn nanos_of_day(self) -> u64 {
+        self.0.num_seconds_from_midnight() as u64 * 1_000_000_000 + self.0.nanosecond() as u64
+    }
+
+    /// Microseconds since midnight, truncating sub-microsecond precision.
+    pub fn micros_of_day(self) -> u64 {
+        self.0.num_seconds_from_midnight() as u64 * 1_000_000 + self.0.nanosecond() as u64 / 1_000
     }
 
     pub fn with_milli(milli: u32) -> Result<Self> {
@@ -523,11 +551,9 @@ impl FirstI64 {
 
 impl Timestamp {
     pub fn with_secs_nsecs(secs: i64, nsecs: u32) -> Result<Self> {
-        Ok(Timestamp::new({
-            DateTime::from_timestamp(secs, nsecs)
-                .map(|t| t.naive_utc())
-                .ok_or_else(|| InvalidParamsError::datetime(secs, nsecs))?
-        }))
+        DateTime::from_timestamp(secs, nsecs)
+            .map(|t| Timestamp(t.naive_utc()))
+            .ok_or_else(|| InvalidParamsError::datetime(secs, nsecs))
     }
 
     pub fn from_protobuf(cur: &mut Cursor<&[u8]>) -> ArrayResult<Timestamp> {
@@ -566,15 +592,20 @@ impl Timestamp {
     }
 
     pub fn with_millis(timestamp_millis: i64) -> Result<Self> {
-        let secs = timestamp_millis.div_euclid(1_000);
-        let nsecs = timestamp_millis.rem_euclid(1_000) * 1_000_000;
-        Self::with_secs_nsecs(secs, nsecs as u32)
+        DateTime::from_timestamp_millis(timestamp_millis)
+            .map(|t| Timestamp(t.naive_utc()))
+            .ok_or_else(|| InvalidParamsError::timestamp(timestamp_millis, "milliseconds"))
     }
 
     pub fn with_micros(timestamp_micros: i64) -> Result<Self> {
-        let secs = timestamp_micros.div_euclid(1_000_000);
-        let nsecs = timestamp_micros.rem_euclid(1_000_000) * 1000;
-        Self::with_secs_nsecs(secs, nsecs as u32)
+        DateTime::from_timestamp_micros(timestamp_micros)
+            .map(|t| Timestamp(t.naive_utc()))
+            .ok_or_else(|| InvalidParamsError::timestamp(timestamp_micros, "microseconds"))
+    }
+
+    /// An `i64` nanosecond count is always representable, so this cannot fail.
+    pub fn with_nanos(timestamp_nanos: i64) -> Self {
+        Timestamp(DateTime::from_timestamp_nanos(timestamp_nanos).naive_utc())
     }
 
     pub fn from_timestamp_uncheck(secs: i64, nsecs: u32) -> Self {
@@ -867,5 +898,24 @@ mod tests {
         Date::from_str("1999-01-08AA").unwrap_err();
         Time::from_str("AA04:05:06").unwrap_err();
         Timestamp::from_str("1999-01-08 04:05:06AA").unwrap_err();
+    }
+
+    #[test]
+    fn time_of_day_bounds() {
+        assert_eq!(
+            Time::with_micro(86_399_999_999).unwrap(),
+            Time::from_hms_micro_uncheck(23, 59, 59, 999_999)
+        );
+        assert_eq!(
+            Time::with_nano(86_399_999_999_999).unwrap(),
+            Time::from_hms_nano_uncheck(23, 59, 59, 999_999_999)
+        );
+
+        Time::with_micro(86_400_000_000).unwrap_err();
+        Time::with_nano(86_400_000_000_000).unwrap_err();
+
+        // A seconds count at a multiple of 2^32 used to wrap into the valid range.
+        Time::with_micro(4_294_967_296_000_000).unwrap_err();
+        Time::with_nano(4_294_967_296_000_000_000).unwrap_err();
     }
 }

@@ -328,3 +328,84 @@
                 └─StreamFilter { predicate: ((initial_bid = 1:Int32) OR (initial_bid = 2:Int32)) }
                   └─StreamRowIdGen { row_id_index: 10 }
                     └─StreamSource { source: auction, columns: [id, item_name, description, initial_bid, reserve, date_time, expires, seller, category, extra, _row_id] }
+- id: predicate_pushdown_blocked_by_over_window
+  sql: |
+    create table t (a int, b int, c int);
+    with cte as (select a, b from t where c > 0)
+    select x.a, x.r1, x.r2, y.b
+    from (
+      select a,
+             rank() over (partition by a order by b) as r1,
+             rank() over (partition by b order by a) as r2
+      from cte
+    ) x
+    join cte y on x.a = y.a;
+  stream_plan: |-
+    StreamMaterialize { columns: [a, r1, r2, b, t._row_id(hidden), t.b(hidden), t._row_id#1(hidden)], stream_key: [t._row_id, a, t.b, t._row_id#1], pk_columns: [t._row_id, a, t.b, t._row_id#1], pk_conflict: NoCheck }
+    └─StreamExchange { dist: HashShard(t.a, t._row_id, t.b, t._row_id) }
+      └─StreamHashJoin { type: Inner, predicate: t.a = t.a, output: [t.a, rank, rank, t.b, t._row_id, t.b, t._row_id] }
+        ├─StreamExchange { dist: HashShard(t.a) }
+        │ └─StreamOverWindow { window_functions: [rank() OVER(PARTITION BY t.b ORDER BY t.a ASC ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)] }
+        │   └─StreamExchange { dist: HashShard(t.b) }
+        │     └─StreamOverWindow { window_functions: [rank() OVER(PARTITION BY t.a ORDER BY t.b ASC ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)] }
+        │       └─StreamExchange { dist: HashShard(t.a) }
+        │         └─StreamShare { id: 3 }
+        │           └─StreamProject { exprs: [t.a, t.b, t._row_id] }
+        │             └─StreamFilter { predicate: (t.c > 0:Int32) }
+        │               └─StreamTableScan { table: t, columns: [t.a, t.b, t._row_id, t.c], stream_scan_type: SnapshotBackfill, stream_key: [t._row_id], pk: [_row_id], dist: UpstreamHashShard(t._row_id) }
+        └─StreamExchange { dist: HashShard(t.a) }
+          └─StreamShare { id: 3 }
+            └─StreamProject { exprs: [t.a, t.b, t._row_id] }
+              └─StreamFilter { predicate: (t.c > 0:Int32) }
+                └─StreamTableScan { table: t, columns: [t.a, t.b, t._row_id, t.c], stream_scan_type: SnapshotBackfill, stream_key: [t._row_id], pk: [_row_id], dist: UpstreamHashShard(t._row_id) }
+- id: column_pruning_with_different_parent_column_subsets
+  sql: |
+    create table t (a int, b int, c int, d int);
+    with cte as (select a, b, c, d from t where a > 0)
+    select cte1.a, cte1.b, cte2.c from cte cte1 join cte cte2 on cte1.a = cte2.a;
+  stream_plan: |-
+    StreamMaterialize { columns: [a, b, c, t._row_id(hidden), t._row_id#1(hidden)], stream_key: [t._row_id, t._row_id#1, a], pk_columns: [t._row_id, t._row_id#1, a], pk_conflict: NoCheck }
+    └─StreamExchange { dist: HashShard(t.a, t._row_id, t._row_id) }
+      └─StreamHashJoin { type: Inner, predicate: t.a = t.a, output: [t.a, t.b, t.c, t._row_id, t._row_id] }
+        ├─StreamExchange { dist: HashShard(t.a) }
+        │ └─StreamShare { id: 2 }
+        │   └─StreamFilter { predicate: (t.a > 0:Int32) }
+        │     └─StreamTableScan { table: t, columns: [t.a, t.b, t.c, t._row_id], stream_scan_type: SnapshotBackfill, stream_key: [t._row_id], pk: [_row_id], dist: UpstreamHashShard(t._row_id) }
+        └─StreamExchange { dist: HashShard(t.a) }
+          └─StreamShare { id: 2 }
+            └─StreamFilter { predicate: (t.a > 0:Int32) }
+              └─StreamTableScan { table: t, columns: [t.a, t.b, t.c, t._row_id], stream_scan_type: SnapshotBackfill, stream_key: [t._row_id], pk: [_row_id], dist: UpstreamHashShard(t._row_id) }
+- id: nested_multi_parent_share
+  sql: |
+    create table t (a int, b int, c int);
+    with cte1 as (select a, b from t where c > 0),
+         cte2 as (select c1.a, c2.b from cte1 c1 join cte1 c2 on c1.a = c2.a)
+    select x.a, y.b from cte2 x join cte2 y on x.a = y.a;
+  stream_plan: |-
+    StreamMaterialize { columns: [a, b, t._row_id(hidden), t._row_id#1(hidden), t._row_id#2(hidden), t._row_id#3(hidden), t.a(hidden)], stream_key: [t._row_id, t._row_id#1, a, t._row_id#2, t._row_id#3], pk_columns: [t._row_id, t._row_id#1, a, t._row_id#2, t._row_id#3], pk_conflict: NoCheck }
+    └─StreamExchange { dist: HashShard(t.a, t._row_id, t._row_id, t._row_id, t._row_id) }
+      └─StreamHashJoin { type: Inner, predicate: t.a = t.a, output: [t.a, t.b, t._row_id, t._row_id, t._row_id, t._row_id, t.a] }
+        ├─StreamShare { id: 7 }
+        │ └─StreamHashJoin { type: Inner, predicate: t.a = t.a, output: [t.a, t.b, t._row_id, t._row_id] }
+        │   ├─StreamExchange { dist: HashShard(t.a) }
+        │   │ └─StreamShare { id: 3 }
+        │   │   └─StreamProject { exprs: [t.a, t.b, t._row_id] }
+        │   │     └─StreamFilter { predicate: (t.c > 0:Int32) }
+        │   │       └─StreamTableScan { table: t, columns: [t.a, t.b, t._row_id, t.c], stream_scan_type: SnapshotBackfill, stream_key: [t._row_id], pk: [_row_id], dist: UpstreamHashShard(t._row_id) }
+        │   └─StreamExchange { dist: HashShard(t.a) }
+        │     └─StreamShare { id: 3 }
+        │       └─StreamProject { exprs: [t.a, t.b, t._row_id] }
+        │         └─StreamFilter { predicate: (t.c > 0:Int32) }
+        │           └─StreamTableScan { table: t, columns: [t.a, t.b, t._row_id, t.c], stream_scan_type: SnapshotBackfill, stream_key: [t._row_id], pk: [_row_id], dist: UpstreamHashShard(t._row_id) }
+        └─StreamShare { id: 7 }
+          └─StreamHashJoin { type: Inner, predicate: t.a = t.a, output: [t.a, t.b, t._row_id, t._row_id] }
+            ├─StreamExchange { dist: HashShard(t.a) }
+            │ └─StreamShare { id: 3 }
+            │   └─StreamProject { exprs: [t.a, t.b, t._row_id] }
+            │     └─StreamFilter { predicate: (t.c > 0:Int32) }
+            │       └─StreamTableScan { table: t, columns: [t.a, t.b, t._row_id, t.c], stream_scan_type: SnapshotBackfill, stream_key: [t._row_id], pk: [_row_id], dist: UpstreamHashShard(t._row_id) }
+            └─StreamExchange { dist: HashShard(t.a) }
+              └─StreamShare { id: 3 }
+                └─StreamProject { exprs: [t.a, t.b, t._row_id] }
+                  └─StreamFilter { predicate: (t.c > 0:Int32) }
+                    └─StreamTableScan { table: t, columns: [t.a, t.b, t._row_id, t.c], stream_scan_type: SnapshotBackfill, stream_key: [t._row_id], pk: [_row_id], dist: UpstreamHashShard(t._row_id) }

@@ -214,6 +214,22 @@ impl NotificationManager {
             .await
     }
 
+    pub(crate) async fn notify_hummock_targeted_update(
+        &self,
+        worker_key: WorkerKey,
+        info: Info,
+    ) -> NotificationVersion {
+        self.notify_with_version(
+            Target {
+                subscribe_type: SubscribeType::Hummock,
+                worker_key: Some(worker_key),
+            },
+            Operation::Update,
+            info,
+        )
+        .await
+    }
+
     pub async fn notify_compactor(&self, operation: Operation, info: Info) -> NotificationVersion {
         self.notify_with_version(SubscribeType::Compactor.into(), operation, info)
             .await
@@ -424,6 +440,32 @@ mod tests {
         assert!(rx1.try_recv().is_err());
         assert!(rx2.recv().await.is_some());
         assert!(rx3.recv().await.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_notify_hummock_targeted_update() {
+        let mgr = NotificationManager::new(SqlMetaStore::for_test().await).await;
+        let worker_key1 = WorkerKey(HostAddress {
+            host: "a".to_owned(),
+            port: 1,
+        });
+        let worker_key2 = WorkerKey(HostAddress {
+            host: "a".to_owned(),
+            port: 2,
+        });
+        let (hummock_tx1, mut hummock_rx1) = mpsc::unbounded_channel();
+        let (hummock_tx2, mut hummock_rx2) = mpsc::unbounded_channel();
+        let (frontend_tx1, mut frontend_rx1) = mpsc::unbounded_channel();
+        mgr.insert_sender(SubscribeType::Hummock, worker_key1.clone(), hummock_tx1);
+        mgr.insert_sender(SubscribeType::Hummock, worker_key2.clone(), hummock_tx2);
+        mgr.insert_sender(SubscribeType::Frontend, worker_key1.clone(), frontend_tx1);
+
+        mgr.notify_hummock_targeted_update(worker_key1, Info::Database(Default::default()))
+            .await;
+
+        assert!(hummock_rx1.recv().await.is_some());
+        assert!(hummock_rx2.try_recv().is_err());
+        assert!(frontend_rx1.try_recv().is_err());
     }
 
     #[tokio::test]

@@ -1,4 +1,10 @@
 name: Security audit
+
+permissions:
+  checks: write
+  contents: read
+  issues: write
+
 on:
   schedule:
     - cron: '0 0 * * *'

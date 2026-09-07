@@ -1,0 +1,42 @@
+# Regression test for reading Parquet TIME columns in every Arrow time unit.
+#
+# Schema conversion already mapped all four units to RisingWave `time`, but array
+# conversion only handled `Time64(Microsecond)`, so the other three failed to decode.
+#
+# The committed fixture `data/time_units/data.parquet` was generated with parquet-rs
+# 58.1.0 (ArrowWriter), which is the only writer that round-trips `time32[s]`: Parquet's
+# TIME logical type has no SECOND unit, so it is stored as a bare INT32 and recovered
+# from the embedded `ARROW:schema` hint.
+#   id:   int32      = [1, 2]
+#   t_s:  time32[s]  = [01:01:01, NULL]
+#   t_ms: time32[ms] = [01:01:01.123, NULL]
+#   t_us: time64[us] = [01:01:01.123456, NULL]
+#   t_ns: time64[ns] = [01:01:01.123456789, NULL]
+
+statement ok
+create table parquet_time_units (
+    id int,
+    t_s time,
+    t_ms time,
+    t_us time,
+    t_ns time
+) with (
+    connector = 'posix_fs',
+    posix_fs.root = 'e2e_test/source_inline/fs/data/time_units'
+) format plain encode parquet;
+
+# Wait until the reader has discovered and ingested the file.
+query I retry 60 backoff 1s
+select count(*) from parquet_time_units;
+----
+2
+
+# `t_ns` is truncated to microseconds, matching the precision of RisingWave's `time`.
+query ITTTT
+select id, t_s, t_ms, t_us, t_ns from parquet_time_units order by id;
+----
+1 01:01:01 01:01:01.123 01:01:01.123456 01:01:01.123456
+2 NULL NULL NULL NULL
+
+statement ok
+drop table parquet_time_units;

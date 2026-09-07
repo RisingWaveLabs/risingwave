@@ -11,7 +11,7 @@ repository = { workspace = true }
 anyhow = { version = "1", features = ["backtrace"] }
 chrono = { workspace = true, features = ['serde'] }
 clap = { workspace = true }
-pg_interval = "0.4"
+pg_interval = "0.6"
 rust_decimal = { version = "1.40", features = ["db-postgres"] }
 tokio = { workspace = true }
 tokio-postgres = { version = "0.7", features = ["with-chrono-0_4"] }

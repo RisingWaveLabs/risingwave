@@ -25,6 +25,7 @@ bytes = { version = "1", features = ["serde"] }
 crc32fast = "1"
 fail = "0.5"
 futures = { version = "0.3", default-features = false, features = ["alloc"] }
+futures-async-stream = { workspace = true }
 itertools = { workspace = true }
 madsim = { workspace = true }
 opendal = { workspace = true, features = [
@@ -39,8 +40,10 @@ opendal = { workspace = true, features = [
     "services-webhdfs",
     "services-azfile",
 ] }
+opendal-http-transport-reqwest = { workspace = true }
+pin-project-lite = { workspace = true }
 prometheus = { version = "0.14", features = ["process"] }
-reqwest = "0.12.2" # required by opendal
+reqwest = "0.13.4" # required by opendal-http-transport-reqwest
 risingwave_common = { workspace = true }
 spin = "0.10"
 thiserror = { workspace = true }

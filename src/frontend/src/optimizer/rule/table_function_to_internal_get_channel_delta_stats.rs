@@ -64,12 +64,12 @@ pub struct TableFunctionToInternalGetChannelDeltaStatsRule {}
 impl FallibleRule<Logical> for TableFunctionToInternalGetChannelDeltaStatsRule {
     fn apply(&self, plan: PlanRef) -> ApplyResult<PlanRef> {
         let logical_table_function: &LogicalTableFunction = plan.as_logical_table_function()?;
-        if logical_table_function.table_function.function_type
+        if logical_table_function.table_function().function_type
             != TableFunctionType::InternalGetChannelDeltaStats
         {
             return ApplyResult::NotApplicable;
         }
-        let plan = Self::build_plan(plan.ctx(), &logical_table_function.table_function)?;
+        let plan = Self::build_plan(plan.ctx(), logical_table_function.table_function())?;
         ApplyResult::Ok(plan)
     }
 }

@@ -16,28 +16,25 @@
  */
 
 import {
-  Box,
-  Button,
   Popover,
   PopoverArrow,
   PopoverBody,
   PopoverCloseButton,
   PopoverContent,
   PopoverTrigger,
-  Table,
-  TableContainer,
-  Tbody,
-  Td,
-  Th,
-  Thead,
-  Tr,
 } from "@chakra-ui/react"
 import loadable from "@loadable/component"
 import Head from "next/head"
 
 import Link from "next/link"
-import { Fragment } from "react"
-import Title from "../components/Title"
+import {
+  Fragment,
+  forwardRef,
+  type ButtonHTMLAttributes,
+  type ComponentProps,
+  type CSSProperties,
+  type ReactNode,
+} from "react"
 import useFetch from "../lib/api/fetch"
 import {
   Relation,
@@ -49,34 +46,173 @@ import {
 } from "../lib/api/streaming"
 import extractColumnInfo from "../lib/extractInfo"
 import {
+  canvasTexture,
+  colors,
+  fills,
+  fonts,
+  motion,
+  radii,
+  shadows,
+} from "../lib/design-tokens"
+import {
   Sink as RwSink,
   Source as RwSource,
   Table as RwTable,
 } from "../proto/gen/catalog"
 import { CatalogModal, useCatalogModal } from "./CatalogModal"
+import { IconRefresh } from "./utils/stroke-icons"
 
 export const ReactJson = loadable(() => import("react-json-view"))
 
 export type Column<R> = {
   name: string
   width: number
-  content: (r: R) => React.ReactNode
+  content: (r: R) => ReactNode
 }
+
+const pageStyle: CSSProperties = {
+  minHeight: "100vh",
+  padding: "32px 24px",
+  color: colors.foreground,
+  backgroundColor: colors.background,
+  backgroundImage: canvasTexture.backgroundImage,
+  backgroundSize: canvasTexture.backgroundSize,
+  fontFamily: fonts.body,
+}
+
+const headingStyle: CSSProperties = {
+  margin: 0,
+  fontSize: 24,
+  fontWeight: 600,
+  lineHeight: 1.2,
+  letterSpacing: "-0.01em",
+}
+
+const countTextStyle: CSSProperties = {
+  margin: "8px 0 0",
+  color: colors.mutedForeground,
+  fontSize: 14,
+  lineHeight: 1.5,
+}
+
+const headerRowStyle: CSSProperties = {
+  display: "flex",
+  alignItems: "flex-start",
+  justifyContent: "space-between",
+  gap: 16,
+}
+
+const refreshButtonStyle: CSSProperties = {
+  display: "inline-flex",
+  flexShrink: 0,
+  alignItems: "center",
+  gap: 6,
+  padding: "6px 12px",
+  border: "1px solid rgba(227, 224, 216, 0.65)",
+  borderRadius: radii.md,
+  color: colors.foregroundSecondary,
+  background: "rgba(255, 255, 255, 0.96)",
+  boxShadow: shadows.surfaceCard,
+  fontSize: 12,
+  fontWeight: 500,
+  lineHeight: 1.4,
+  cursor: "pointer",
+  transition: `background-color ${motion.durationMs.micro}ms ${motion.easeOut}`,
+}
+
+const tableCardStyle: CSSProperties = {
+  marginTop: 24,
+  overflowX: "auto",
+  border: "1px solid rgba(227, 224, 216, 0.65)",
+  borderRadius: radii.lg,
+  background: "rgba(255, 255, 255, 0.96)",
+  boxShadow: shadows.surfaceCard,
+}
+
+const tableStyle: CSSProperties = {
+  width: "100%",
+  borderCollapse: "collapse",
+  fontSize: 14,
+  lineHeight: 1.5,
+}
+
+const thStyle: CSSProperties = {
+  padding: "10px 16px",
+  borderBottom: `1px solid ${colors.border}`,
+  color: colors.mutedForeground,
+  fontSize: 12,
+  fontWeight: 500,
+  lineHeight: 1.4,
+  textAlign: "left",
+  whiteSpace: "nowrap",
+}
+
+const tdStyle: CSSProperties = {
+  padding: "10px 16px",
+  borderBottom: "1px solid rgba(227, 224, 216, 0.5)",
+  color: colors.foregroundSecondary,
+  verticalAlign: "top",
+  whiteSpace: "nowrap",
+}
+
+const emptyStateStyle: CSSProperties = {
+  display: "flex",
+  flexDirection: "column",
+  alignItems: "center",
+  gap: 4,
+  padding: "48px 16px",
+  textAlign: "center",
+}
+
+const emptyTitleStyle: CSSProperties = {
+  margin: 0,
+  color: colors.foregroundSecondary,
+  fontSize: 14,
+  fontWeight: 500,
+  lineHeight: 1.4,
+}
+
+const emptyHintStyle: CSSProperties = {
+  margin: 0,
+  color: colors.mutedForeground,
+  fontSize: 12,
+  lineHeight: 1.45,
+}
+
+const textButtonStyle: CSSProperties = {
+  padding: 0,
+  border: "none",
+  color: colors.accent,
+  background: "none",
+  font: "inherit",
+  cursor: "pointer",
+  textDecoration: "none",
+}
+
+const textLinkStyle: CSSProperties = {
+  color: colors.accent,
+  textDecoration: "none",
+}
+
+const TextButton = forwardRef<
+  HTMLButtonElement,
+  ButtonHTMLAttributes<HTMLButtonElement>
+>(({ style, ...props }, ref) => (
+  <button ref={ref} {...props} style={{ ...textButtonStyle, ...style }} />
+))
+TextButton.displayName = "TextButton"
+
+const TextLink = ({ style, ...props }: ComponentProps<typeof Link>) => (
+  <Link {...props} style={{ ...textLinkStyle, ...style }} />
+)
 
 export const dependentsColumn: Column<Relation> = {
   name: "Depends",
   width: 1,
   content: (r) => (
-    <Link href={`/relation_graph/?id=${r.id}`}>
-      <Button
-        size="sm"
-        aria-label="view dependents"
-        colorScheme="blue"
-        variant="link"
-      >
-        D
-      </Button>
-    </Link>
+    <TextLink href={`/relation_graph/?id=${r.id}`} aria-label="view dependents">
+      D
+    </TextLink>
   ),
 }
 
@@ -84,16 +220,9 @@ export const fragmentsColumn: Column<Relation> = {
   name: "Fragments",
   width: 1,
   content: (r) => (
-    <Link href={`/fragment_graph/?id=${r.id}`}>
-      <Button
-        size="sm"
-        aria-label="view fragments"
-        colorScheme="blue"
-        variant="link"
-      >
-        F
-      </Button>
-    </Link>
+    <TextLink href={`/fragment_graph/?id=${r.id}`} aria-label="view fragments">
+      F
+    </TextLink>
   ),
 }
 
@@ -158,9 +287,7 @@ export const configOverrideColumn: Column<Relation> = {
     return (
       <Popover placement="auto" trigger="click">
         <PopoverTrigger>
-          <Button size="sm" variant="link" colorScheme="blue">
-            C
-          </Button>
+          <TextButton aria-label="view config override">C</TextButton>
         </PopoverTrigger>
         <PopoverContent maxW="lg">
           <PopoverArrow />
@@ -188,7 +315,11 @@ export function Relations<R extends Relation>(
     withStreamingJobs?: boolean
   }
 ) {
-  const { response: relationList } = useFetch(async () => {
+  const {
+    response: relationList,
+    refresh,
+    loading,
+  } = useFetch(async () => {
     const streamingJobsPromise = options?.withStreamingJobs
       ? getStreamingJobs()
       : undefined
@@ -228,68 +359,106 @@ export function Relations<R extends Relation>(
   )
 
   const table = (
-    <Box p={3}>
-      <Title>{title}</Title>
-      {relationList && (
-        <Box mb={3} fontSize="sm" color="gray.600">
-          Total: {relationList.length}{" "}
-          {relationList.length === 1 ? "item" : "items"}
-        </Box>
-      )}
-      <TableContainer>
-        <Table variant="simple" size="sm" maxWidth="full">
-          <Thead>
-            <Tr>
-              <Th width={3}>Id</Th>
-              <Th width={5}>Database</Th>
-              <Th width={5}>Schema</Th>
-              <Th width={5}>Name</Th>
-              <Th width={3}>Owner</Th>
-              {extraColumns.map((c) => (
-                <Th key={c.name} width={c.width}>
-                  {c.name}
-                </Th>
-              ))}
-              <Th>Visible Columns</Th>
-            </Tr>
-          </Thead>
-          <Tbody>
-            {relationList?.map((r) => (
-              <Tr key={r.id}>
-                <Td>
-                  <Button
-                    size="sm"
-                    aria-label="view catalog"
-                    colorScheme="blue"
-                    variant="link"
-                    onClick={() => setModalId(r.id)}
-                  >
-                    {r.id}
-                  </Button>
-                </Td>
-                <Td>{r.databaseName}</Td>
-                <Td>{r.schemaName}</Td>
-                <Td>{r.name}</Td>
-                <Td>{r.ownerName}</Td>
+    <main style={pageStyle}>
+      <div style={headerRowStyle}>
+        <div>
+          <h1 style={headingStyle}>{title}</h1>
+          {relationList && (
+            <p style={countTextStyle}>
+              Total: {relationList.length}{" "}
+              {relationList.length === 1 ? "item" : "items"}
+            </p>
+          )}
+        </div>
+        <button
+          onClick={refresh}
+          disabled={loading}
+          aria-label="refresh"
+          style={{
+            ...refreshButtonStyle,
+            ...(loading ? { opacity: 0.6, cursor: "default" } : null),
+          }}
+        >
+          <span
+            style={{
+              display: "inline-flex",
+              animation: loading ? "rw-spin 0.8s linear infinite" : "none",
+            }}
+          >
+            <IconRefresh size={14} />
+          </span>
+          Refresh
+        </button>
+      </div>
+      <div style={tableCardStyle}>
+        {relationList && relationList.length === 0 ? (
+          <div style={emptyStateStyle}>
+            <p style={emptyTitleStyle}>No {title.toLowerCase()} yet</p>
+            <p style={emptyHintStyle}>
+              Objects you create will show up here once they exist.
+            </p>
+          </div>
+        ) : (
+          <table style={tableStyle}>
+            <thead>
+              <tr>
+                <th style={thStyle}>Id</th>
+                <th style={thStyle}>Database</th>
+                <th style={thStyle}>Schema</th>
+                <th style={thStyle}>Name</th>
+                <th style={thStyle}>Owner</th>
                 {extraColumns.map((c) => (
-                  <Td key={c.name}>{c.content(r)}</Td>
+                  <th key={c.name} style={thStyle}>
+                    {c.name}
+                  </th>
                 ))}
-                {r.columns && r.columns.length > 0 && (
-                  <Td overflowWrap="normal">
-                    {r.columns
-                      .filter((col) =>
-                        "isHidden" in col ? !col.isHidden : true
-                      )
-                      .map((col) => extractColumnInfo(col))
-                      .join(", ")}
-                  </Td>
-                )}
-              </Tr>
-            ))}
-          </Tbody>
-        </Table>
-      </TableContainer>
-    </Box>
+                <th style={thStyle}>Visible Columns</th>
+              </tr>
+            </thead>
+            <tbody>
+              {relationList?.map((r, index) => {
+                const rowTdStyle =
+                  index === relationList.length - 1
+                    ? { ...tdStyle, borderBottom: "none" }
+                    : tdStyle
+
+                return (
+                  <tr key={r.id}>
+                    <td style={rowTdStyle}>
+                      <TextButton
+                        aria-label="view catalog"
+                        onClick={() => setModalId(r.id)}
+                      >
+                        {r.id}
+                      </TextButton>
+                    </td>
+                    <td style={rowTdStyle}>{r.databaseName}</td>
+                    <td style={rowTdStyle}>{r.schemaName}</td>
+                    <td style={rowTdStyle}>{r.name}</td>
+                    <td style={rowTdStyle}>{r.ownerName}</td>
+                    {extraColumns.map((c) => (
+                      <td key={c.name} style={rowTdStyle}>
+                        {c.content(r)}
+                      </td>
+                    ))}
+                    {r.columns && r.columns.length > 0 && (
+                      <td style={{ ...rowTdStyle, whiteSpace: "normal" }}>
+                        {r.columns
+                          .filter((col) =>
+                            "isHidden" in col ? !col.isHidden : true
+                          )
+                          .map((col) => extractColumnInfo(col))
+                          .join(", ")}
+                      </td>
+                    )}
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        )}
+      </div>
+    </main>
   )
 
   return (

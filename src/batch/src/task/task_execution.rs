@@ -324,6 +324,10 @@ pub struct BatchTaskExecution {
     shutdown_tx: ShutdownSender,
     shutdown_rx: ShutdownToken,
     heartbeat_join_handle: Mutex<Option<JoinHandle<()>>>,
+
+    /// Registry for await-tree. The task will be registered as a root when spawned,
+    /// so that it shows up in the await-tree dump.
+    await_tree_reg: Option<await_tree::Registry>,
 }
 
 impl BatchTaskExecution {
@@ -332,6 +336,7 @@ impl BatchTaskExecution {
         plan: PlanFragment,
         context: Arc<dyn BatchTaskContext>,
         runtime: Arc<BackgroundShutdownRuntime>,
+        await_tree_reg: Option<await_tree::Registry>,
     ) -> Result<Self> {
         let task_id = TaskId::from(prost_tid);
 
@@ -356,6 +361,7 @@ impl BatchTaskExecution {
             shutdown_tx,
             shutdown_rx,
             heartbeat_join_handle: Mutex::new(None),
+            await_tree_reg,
         })
     }
 
@@ -461,7 +467,18 @@ impl BatchTaskExecution {
             }
         };
 
-        self.runtime.spawn(fut);
+        if let Some(reg) = self.await_tree_reg.clone() {
+            let key = crate::task::await_tree_key::BatchTask(self.task_id.clone());
+            let span = await_tree::span!(
+                "Batch Task (query {} stage {} task {})",
+                self.task_id.query_id,
+                self.task_id.stage_id,
+                self.task_id.task_id
+            );
+            self.runtime.spawn(reg.register(key, span).instrument(fut));
+        } else {
+            self.runtime.spawn(fut);
+        }
 
         Ok(())
     }

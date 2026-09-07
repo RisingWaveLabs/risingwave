@@ -405,7 +405,7 @@ impl BindContext {
     /// Resolve the relation range for a `table_name` in the current bind scope.
     ///
     /// Alias matches are prioritized over base relation name matches.
-    fn resolve_relation_range(
+    pub(super) fn resolve_relation_range(
         &self,
         table_name: &String,
         schema_name: &Option<String>,
@@ -413,15 +413,26 @@ impl BindContext {
         let mut alias_ranges = Vec::new();
         let mut base_ranges = Vec::new();
 
-        for ((_, _), range) in self.range_of.iter().filter(|((rel_schema, rel_name), _)| {
-            rel_name == table_name
-                && schema_name
+        for ((rel_schema, rel_name), range) in &self.range_of {
+            if rel_name != table_name
+                || !schema_name
                     .as_deref()
                     .is_none_or(|s| rel_schema.as_deref() == Some(s))
-        }) {
-            match self.columns[range.0].table_alias {
-                Some(_) => alias_ranges.push(*range),
-                None => base_ranges.push(*range),
+            {
+                continue;
+            }
+
+            // Empty ranges have no column binding from which to read `table_alias`. Explicit
+            // aliases are stored without a schema in `range_of`.
+            let is_alias = if range.0 == range.1 {
+                rel_schema.is_none()
+            } else {
+                self.columns[range.0].table_alias.is_some()
+            };
+            if is_alias {
+                alias_ranges.push(*range);
+            } else {
+                base_ranges.push(*range);
             }
         }
 

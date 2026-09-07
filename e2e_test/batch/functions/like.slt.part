@@ -20,3 +20,31 @@ statement ok
 drop table test_table;
 
 # End
+
+# Begin https://github.com/risingwavelabs/risingwave/issues/26196
+
+statement ok
+create table like_escape_trades(id varchar);
+
+statement ok
+insert into like_escape_trades values
+    ('abc_def'),
+    ('x_y'),
+    ('DROPFEED_1'),
+    ('abcdef'),
+    ('DROPFEEDabc');
+
+query T rowsort
+select id
+from like_escape_trades
+where id like '%\_%' escape '\'
+  and id not like 'DROPFEED%'
+limit 1000;
+----
+abc_def
+x_y
+
+statement ok
+drop table like_escape_trades;
+
+# End

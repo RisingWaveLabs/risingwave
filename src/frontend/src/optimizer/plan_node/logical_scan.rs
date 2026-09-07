@@ -598,16 +598,19 @@ impl ToBatch for LogicalScan {
                     return required_order.enforce_if_not_satisfies(scan.to_batch()?);
                 } else if let Some(join) = applied.as_logical_join() {
                     // index lookup join
-                    return required_order
-                        .enforce_if_not_satisfies(join.index_lookup_join_to_batch_lookup_join()?);
+                    if let Some(lookup_join) = join.index_lookup_join_to_batch_lookup_join()? {
+                        return required_order.enforce_if_not_satisfies(lookup_join);
+                    }
                 } else {
                     unreachable!();
                 }
-            } else {
-                // Try to make use of index if it satisfies the required order
-                if let Some(plan_ref) = new.use_index_scan_if_order_is_satisfied(required_order) {
-                    return plan_ref;
-                }
+            }
+
+            // Try to make use of index if it satisfies the required order.
+            // Also reach here when a cost-selected non-covering index candidate cannot be
+            // converted to a physical lookup join.
+            if let Some(plan_ref) = new.use_index_scan_if_order_is_satisfied(required_order) {
+                return plan_ref;
             }
         }
         new.to_batch_inner_with_required(required_order)

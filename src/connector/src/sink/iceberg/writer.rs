@@ -56,6 +56,7 @@ use risingwave_common::bitmap::Bitmap;
 use risingwave_common::metrics::{LabelGuardedHistogram, LabelGuardedIntCounter};
 use risingwave_common_estimate_size::EstimateSize;
 use risingwave_pb::connector_service::SinkMetadata;
+use thiserror_ext::AsReport;
 use uuid::Uuid;
 
 use super::prometheus::monitored_general_writer::MonitoredGeneralWriterBuilder;
@@ -238,6 +239,11 @@ pub struct IcebergSinkWriterInner {
     metrics: IcebergWriterMetrics,
     // State of iceberg table for this writer
     table: Table,
+    actor_id: String,
+    sink_id: String,
+    sink_name: String,
+    table_name: String,
+    writer_mode: &'static str,
     // For chunk with extra partition column, we should remove this column before write.
     // This project index vec is used to avoid create project idx each time.
     project_idx_vec: ProjectIdxVec,
@@ -354,8 +360,25 @@ impl IcebergSinkWriterInner {
         let schema = table.metadata().current_schema();
         let partition_spec = table.metadata().default_partition_spec();
         let fanout_enabled = !partition_spec.fields().is_empty();
+        let table_name = table.identifier().to_string();
         // To avoid duplicate file name, each time the sink created will generate a unique uuid as file name suffix.
         let unique_uuid_suffix = Uuid::now_v7();
+        tracing::info!(
+            iceberg_component = "sink_writer",
+            iceberg_operation = "build_writer",
+            actor_id = %actor_id,
+            sink_id = %sink_id,
+            sink_name = %sink_name,
+            table = %table_name,
+            writer_mode = "append_only",
+            schema_id = table.metadata().current_schema_id(),
+            partition_spec_id = table.metadata().default_partition_spec_id(),
+            format_version = ?table.metadata().format_version(),
+            fanout_enabled,
+            target_file_size_mb = config.target_file_size_mb(),
+            parquet_compression = ?config.get_parquet_compression(),
+            "iceberg_sink_writer_initialized",
+        );
 
         let parquet_writer_properties = WriterProperties::builder()
             .set_compression(config.get_parquet_compression())
@@ -369,7 +392,7 @@ impl IcebergSinkWriterInner {
             parquet_writer_builder,
             (config.target_file_size_mb() * 1024 * 1024) as usize,
             table.file_io().clone(),
-            DefaultLocationGenerator::new(table.metadata().clone())
+            DefaultLocationGenerator::new(table.metadata())
                 .map_err(|err| SinkError::Iceberg(anyhow!(err)))?,
             DefaultFileNameGenerator::new(
                 writer_param.actor_id.to_string(),
@@ -410,6 +433,11 @@ impl IcebergSinkWriterInner {
                 writer_builder,
             },
             table,
+            actor_id: actor_id.to_string(),
+            sink_id: sink_id.to_string(),
+            sink_name: sink_name.clone(),
+            table_name,
+            writer_mode: "append_only",
             project_idx_vec: {
                 if let Some(extra_partition_col_idx) = extra_partition_col_idx {
                     ProjectIdxVec::Prepare(*extra_partition_col_idx)
@@ -462,9 +490,29 @@ impl IcebergSinkWriterInner {
         let partition_spec = table.metadata().default_partition_spec();
         let fanout_enabled = !partition_spec.fields().is_empty();
         let use_deletion_vectors = table.metadata().format_version() >= FormatVersion::V3;
+        let table_name = table.identifier().to_string();
 
         // To avoid duplicate file name, each time the sink created will generate a unique uuid as file name suffix.
         let unique_uuid_suffix = Uuid::now_v7();
+        tracing::info!(
+            iceberg_component = "sink_writer",
+            iceberg_operation = "build_writer",
+            actor_id = %actor_id,
+            sink_id = %sink_id,
+            sink_name = %sink_name,
+            table = %table_name,
+            writer_mode = "upsert",
+            schema_id = table.metadata().current_schema_id(),
+            partition_spec_id = table.metadata().default_partition_spec_id(),
+            format_version = ?table.metadata().format_version(),
+            primary_key_columns = ?primary_key_column_names,
+            equality_delete_field_ids = ?unique_column_ids,
+            use_deletion_vectors,
+            fanout_enabled,
+            target_file_size_mb = config.target_file_size_mb(),
+            parquet_compression = ?config.get_parquet_compression(),
+            "iceberg_sink_writer_initialized",
+        );
 
         let parquet_writer_properties = WriterProperties::builder()
             .set_compression(config.get_parquet_compression())
@@ -479,7 +527,7 @@ impl IcebergSinkWriterInner {
                 parquet_writer_builder,
                 (config.target_file_size_mb() * 1024 * 1024) as usize,
                 table.file_io().clone(),
-                DefaultLocationGenerator::new(table.metadata().clone())
+                DefaultLocationGenerator::new(table.metadata())
                     .map_err(|err| SinkError::Iceberg(anyhow!(err)))?,
                 DefaultFileNameGenerator::new(
                     writer_param.actor_id.to_string(),
@@ -490,7 +538,7 @@ impl IcebergSinkWriterInner {
             DataFileWriterBuilder::new(rolling_writer_builder)
         };
         let position_delete_builder = if use_deletion_vectors {
-            let location_generator = DefaultLocationGenerator::new(table.metadata().clone())
+            let location_generator = DefaultLocationGenerator::new(table.metadata())
                 .map_err(|err| SinkError::Iceberg(anyhow!(err)))?;
             PositionDeleteWriterBuilderType::DeletionVector(DeletionVectorWriterBuilder::new(
                 table.file_io().clone(),
@@ -510,7 +558,7 @@ impl IcebergSinkWriterInner {
                 parquet_writer_builder,
                 (config.target_file_size_mb() * 1024 * 1024) as usize,
                 table.file_io().clone(),
-                DefaultLocationGenerator::new(table.metadata().clone())
+                DefaultLocationGenerator::new(table.metadata())
                     .map_err(|err| SinkError::Iceberg(anyhow!(err)))?,
                 DefaultFileNameGenerator::new(
                     writer_param.actor_id.to_string(),
@@ -539,7 +587,7 @@ impl IcebergSinkWriterInner {
                 parquet_writer_builder,
                 (config.target_file_size_mb() * 1024 * 1024) as usize,
                 table.file_io().clone(),
-                DefaultLocationGenerator::new(table.metadata().clone())
+                DefaultLocationGenerator::new(table.metadata())
                     .map_err(|err| SinkError::Iceberg(anyhow!(err)))?,
                 DefaultFileNameGenerator::new(
                     writer_param.actor_id.to_string(),
@@ -606,6 +654,11 @@ impl IcebergSinkWriterInner {
                     ProjectIdxVec::None
                 }
             },
+            actor_id: actor_id.to_string(),
+            sink_id: sink_id.to_string(),
+            sink_name: sink_name.clone(),
+            table_name,
+            writer_mode: "upsert",
         })
     }
 
@@ -706,10 +759,28 @@ impl IcebergSinkWriterInner {
         };
 
         let writer = self.writer.get_writer().unwrap();
+        let batch_rows = batch.num_rows();
+        let batch_columns = batch.num_columns();
         writer
             .write(batch)
             .instrument_await("iceberg_write")
-            .await?;
+            .await
+            .inspect_err(|err| {
+                tracing::error!(
+                    iceberg_component = "sink_writer",
+                    iceberg_operation = "write_batch",
+                    actor_id = %self.actor_id,
+                    sink_id = %self.sink_id,
+                    sink_name = %self.sink_name,
+                    table = %self.table_name,
+                    writer_mode = self.writer_mode,
+                    batch_rows,
+                    batch_columns,
+                    write_bytes = write_batch_size,
+                    error = %err.as_report(),
+                    "iceberg_sink_writer_write_failed",
+                );
+            })?;
         self.metrics.write_bytes.inc_by(write_batch_size as _);
         Ok(())
     }
@@ -729,10 +800,28 @@ impl IcebergSinkWriterInner {
         };
 
         let writer = self.writer.get_writer().unwrap();
+        let batch_rows = batch.num_rows();
+        let batch_columns = batch.num_columns();
         let positions = writer
             .write_with_position(batch)
             .instrument_await("iceberg_write")
-            .await?;
+            .await
+            .inspect_err(|err| {
+                tracing::error!(
+                    iceberg_component = "sink_writer",
+                    iceberg_operation = "write_batch_with_position",
+                    actor_id = %self.actor_id,
+                    sink_id = %self.sink_id,
+                    sink_name = %self.sink_name,
+                    table = %self.table_name,
+                    writer_mode = self.writer_mode,
+                    batch_rows,
+                    batch_columns,
+                    write_bytes = write_batch_size,
+                    error = %err.as_report(),
+                    "iceberg_sink_writer_write_with_position_failed",
+                );
+            })?;
         self.metrics.write_bytes.inc_by(write_batch_size as _);
         Ok(positions)
     }
@@ -745,7 +834,8 @@ impl IcebergSinkWriterInner {
             } => {
                 let close_result = match writer.take() {
                     Some(mut writer) => {
-                        Some(writer.close().instrument_await("iceberg_close").await?)
+                        let data_files = writer.close().instrument_await("iceberg_close").await?;
+                        Some(data_files)
                     }
                     _ => None,
                 };
@@ -753,10 +843,20 @@ impl IcebergSinkWriterInner {
                     Ok(new_writer) => {
                         *writer = Some(Box::new(new_writer));
                     }
-                    _ => {
+                    Err(err) => {
                         // In this case, the writer is closed and we can't build a new writer. But we can't return the error
                         // here because current writer may close successfully. So we just log the error.
-                        tracing::warn!("Failed to build new writer after close");
+                        tracing::warn!(
+                            iceberg_component = "sink_writer",
+                            iceberg_operation = "rebuild_writer",
+                            actor_id = %self.actor_id,
+                            sink_id = %self.sink_id,
+                            sink_name = %self.sink_name,
+                            table = %self.table_name,
+                            writer_mode = self.writer_mode,
+                            error = %err.as_report(),
+                            "iceberg_sink_writer_rebuild_failed_after_close",
+                        );
                     }
                 }
                 close_result
@@ -768,7 +868,8 @@ impl IcebergSinkWriterInner {
             } => {
                 let close_result = match writer.take() {
                     Some(mut writer) => {
-                        Some(writer.close().instrument_await("iceberg_close").await?)
+                        let data_files = writer.close().instrument_await("iceberg_close").await?;
+                        Some(data_files)
                     }
                     _ => None,
                 };
@@ -776,10 +877,20 @@ impl IcebergSinkWriterInner {
                     Ok(new_writer) => {
                         *writer = Some(Box::new(new_writer));
                     }
-                    _ => {
+                    Err(err) => {
                         // In this case, the writer is closed and we can't build a new writer. But we can't return the error
                         // here because current writer may close successfully. So we just log the error.
-                        tracing::warn!("Failed to build new writer after close");
+                        tracing::warn!(
+                            iceberg_component = "sink_writer",
+                            iceberg_operation = "rebuild_writer",
+                            actor_id = %self.actor_id,
+                            sink_id = %self.sink_id,
+                            sink_name = %self.sink_name,
+                            table = %self.table_name,
+                            writer_mode = self.writer_mode,
+                            error = %err.as_report(),
+                            "iceberg_sink_writer_rebuild_failed_after_close",
+                        );
                     }
                 }
                 close_result
@@ -931,7 +1042,7 @@ pub fn resolve_partition_type(table: &Table, spec_id: i32, schema: &Schema) -> R
 /// The modified `DataFile` with large statistics truncated
 pub fn truncate_datafile(mut data_file: DataFile) -> DataFile {
     // Process lower_bounds - remove entries with large values
-    data_file.lower_bounds.retain(|field_id, datum| {
+    data_file.lower_bounds_mut().retain(|field_id, datum| {
         // Use to_bytes() to get the actual binary size without JSON serialization overhead
         let size = match datum.to_bytes() {
             Ok(bytes) => bytes.len(),
@@ -950,7 +1061,7 @@ pub fn truncate_datafile(mut data_file: DataFile) -> DataFile {
     });
 
     // Process upper_bounds - remove entries with large values
-    data_file.upper_bounds.retain(|field_id, datum| {
+    data_file.upper_bounds_mut().retain(|field_id, datum| {
         // Use to_bytes() to get the actual binary size without JSON serialization overhead
         let size = match datum.to_bytes() {
             Ok(bytes) => bytes.len(),

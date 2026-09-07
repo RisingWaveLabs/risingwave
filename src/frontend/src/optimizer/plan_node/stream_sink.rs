@@ -34,7 +34,7 @@ use risingwave_connector::sink::{
     SINK_TYPE_RETRACT, SINK_TYPE_UPSERT, SINK_USER_FORCE_APPEND_ONLY_OPTION,
     SINK_USER_IGNORE_DELETE_OPTION, SINK_USER_PRESERVE_ROW_LEVEL_CHANGES,
 };
-use risingwave_connector::{WithPropertiesExt, match_sink_name_str};
+use risingwave_connector::{AUTO_SCHEMA_CHANGE_KEY, WithPropertiesExt, match_sink_name_str};
 use risingwave_pb::expr::expr_node::Type;
 use risingwave_pb::stream_plan::SinkLogStoreType;
 use risingwave_pb::stream_plan::stream_node::PbNodeBody;
@@ -418,16 +418,30 @@ impl StreamSink {
             )
         }
 
-        // The "upsert" property is defined based on a specific stream key: columns other than the stream key
-        // might not be valid. We should reject the cases referencing such columns in primary key.
+        // The "upsert" property is defined based on a specific stream key: columns other than the
+        // stream key might not be valid. We should reject the cases referencing such columns in
+        // primary key unless the user explicitly opts in to the unsafe behavior.
         if let StreamKind::Upsert = input.stream_kind()
             && let Some(downstream_pk) = &downstream_pk
             && !downstream_pk.iter().all(|i| derived_pk.contains(i))
         {
-            bail_bind_error!(
-                "When sinking from an upsert stream, \
-                 the downstream primary key must be the same as or a subset of the one derived from the stream."
-            )
+            let unsafe_allow_pk_mismatch = input
+                .ctx()
+                .session_ctx()
+                .config()
+                .streaming_unsafe_allow_upsert_sink_pk_mismatch();
+            if !unsafe_allow_pk_mismatch {
+                bail_bind_error!(
+                    "When sinking from an upsert stream, \
+                     the downstream primary key must be the same as or a subset of the one derived from the stream."
+                )
+            }
+            input.ctx().session_ctx().notice_to_user(
+                "Unsafe upsert sink primary-key mismatch is allowed by session variable \
+                 `streaming_unsafe_allow_upsert_sink_pk_mismatch`. This may leave stale rows in \
+                 the downstream system if a downstream primary-key column changes without its \
+                 old value being emitted.",
+            );
         }
 
         if let Some(upstream_table) = &auto_refresh_schema_from_table
@@ -591,6 +605,7 @@ impl StreamSink {
                         if connector == TABLE_SINK && sink_desc.target_table.is_none() {
                             unsupported_sink(TABLE_SINK)
                         } else {
+                            sink_desc.properties.remove(AUTO_SCHEMA_CHANGE_KEY);
                             SinkType::set_default_commit_checkpoint_interval(
                                 &mut sink_desc,
                                 &input.ctx().session_ctx().config().sink_decouple(),
@@ -619,29 +634,17 @@ impl StreamSink {
                 .into());
             }
         };
-        let hint_string =
-            |expected: bool| format!("Please run `set sink_decouple = {}` first.", expected);
-        if !sink_decouple {
-            // For file sink, it must have sink_decouple turned on.
-            if sink_desc.is_file_sink() {
-                return Err(ErrorCode::NotSupported(
-                    "File sink can only be created with sink_decouple enabled.".to_owned(),
-                    hint_string(true),
-                )
-                .into());
-            }
-
-            if sink_desc.is_exactly_once.is_none()
-                && let Some(connector) = sink_desc.properties.get(CONNECTOR_TYPE_KEY)
-            {
-                let connector_type = connector.to_lowercase();
-                if connector_type == ICEBERG_SINK {
-                    // iceberg sink defaults to exactly once
-                    // However, when sink_decouple is disabled, we enforce it to false.
-                    sink_desc
-                        .properties
-                        .insert("is_exactly_once".to_owned(), "false".to_owned());
-                }
+        if !sink_decouple
+            && sink_desc.is_exactly_once.is_none()
+            && let Some(connector) = sink_desc.properties.get(CONNECTOR_TYPE_KEY)
+        {
+            let connector_type = connector.to_lowercase();
+            if connector_type == ICEBERG_SINK {
+                // iceberg sink defaults to exactly once
+                // However, when sink_decouple is disabled, we enforce it to false.
+                sink_desc
+                    .properties
+                    .insert("is_exactly_once".to_owned(), "false".to_owned());
             }
         }
         let log_store_type = if sink_decouple {

@@ -18,6 +18,7 @@ use std::ops::Bound;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use await_tree::{InstrumentAwait, SpanExt};
 use bytes::Bytes;
 use itertools::Itertools;
 use risingwave_common::catalog::TableId;
@@ -70,7 +71,11 @@ impl<W: SstableWriterFactory, F: FilterBuilder> TableBuilderFactory for RemoteBu
 
     async fn open_builder(&mut self) -> HummockResult<SstableBuilder<Self::Writer, Self::Filter>> {
         let timer = Instant::now();
-        let table_id = self.object_id_getter.get_new_sst_object_id().await?;
+        let table_id = self
+            .object_id_getter
+            .get_new_sst_object_id()
+            .instrument_await("remote_builder_get_new_sst_object_id".verbose())
+            .await?;
         let cost = (timer.elapsed().as_secs_f64() * 1000000.0).round() as u64;
         self.remote_rpc_cost.fetch_add(cost, Ordering::Relaxed);
         let writer_options = SstableWriterOptions {
@@ -81,6 +86,7 @@ impl<W: SstableWriterFactory, F: FilterBuilder> TableBuilderFactory for RemoteBu
         let writer = self
             .sstable_writer_factory
             .create_sst_writer(table_id, writer_options)
+            .instrument_await("remote_builder_create_sst_writer".verbose())
             .await?;
         let builder = SstableBuilder::new(
             table_id,

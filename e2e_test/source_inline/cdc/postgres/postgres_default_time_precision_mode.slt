@@ -1,0 +1,110 @@
+control substitution on
+
+statement ok
+drop table if exists postgres_time_precision_default_rw;
+
+statement ok
+drop source if exists postgres_time_precision_default_source;
+
+system ok
+PGDATABASE=${PGDATABASE:-postgres} psql -c "
+    SELECT pg_terminate_backend(active_pid)
+    FROM pg_replication_slots
+    WHERE slot_name = 'postgres_time_precision_default_slot' AND active_pid IS NOT NULL;
+    SELECT pg_sleep(1);
+    SELECT pg_drop_replication_slot(slot_name)
+    FROM pg_replication_slots
+    WHERE slot_name = 'postgres_time_precision_default_slot';
+    DROP PUBLICATION IF EXISTS postgres_time_precision_default_pub;
+    DROP TABLE IF EXISTS public.postgres_time_precision_default CASCADE;
+    CREATE TABLE public.postgres_time_precision_default (
+        id int PRIMARY KEY,
+        c_date date NOT NULL,
+        c_time time NOT NULL,
+        c_timestamp timestamp NOT NULL,
+        c_timestamptz timestamptz NOT NULL
+    );
+    INSERT INTO public.postgres_time_precision_default VALUES
+        (1, '0001-01-01', '00:00:00', '2001-01-01 00:00:00', '2001-01-01 00:00:00-8'),
+        (2, '2024-05-19', '12:34:56.123456', '2024-05-19 12:34:56.123456', '2024-05-19 12:34:56.123456+00');
+    CREATE PUBLICATION postgres_time_precision_default_pub FOR TABLE public.postgres_time_precision_default;
+    "
+
+statement ok
+create source postgres_time_precision_default_source with (
+    connector = 'postgres-cdc',
+    hostname = '${PGHOST:localhost}',
+    port = '${PGPORT:5432}',
+    username = '${PGUSER:$USER}',
+    password = '${PGPASSWORD:}',
+    database.name = '${PGDATABASE:postgres}',
+    schema.name = 'public',
+    publication.name = 'postgres_time_precision_default_pub',
+    publication.create.enable = 'false',
+    slot.name = 'postgres_time_precision_default_slot'
+);
+
+# Intentionally leave `debezium.time.precision.mode` unset to verify the default
+# microsecond parser for Postgres CDC.
+statement ok
+create table postgres_time_precision_default_rw (*)
+from postgres_time_precision_default_source table 'public.postgres_time_precision_default';
+
+query TTTT retry 30 backoff 1s
+describe postgres_time_precision_default_rw;
+----
+id integer false NULL
+c_date date false NULL
+c_time time without time zone false NULL
+c_timestamp timestamp without time zone false NULL
+c_timestamptz timestamp with time zone false NULL
+_rw_timestamp timestamp with time zone true NULL
+primary key id NULL NULL
+distribution key id NULL NULL
+table description postgres_time_precision_default_rw NULL NULL
+
+query ITTTT retry 30 backoff 1s
+select id, c_date, c_time, c_timestamp, c_timestamptz
+from postgres_time_precision_default_rw
+order by id;
+----
+1 0001-01-01 00:00:00 2001-01-01 00:00:00 2001-01-01 08:00:00+00:00
+2 2024-05-19 12:34:56.123456 2024-05-19 12:34:56.123456 2024-05-19 12:34:56.123456+00:00
+
+system ok
+PGDATABASE=${PGDATABASE:-postgres} psql -c "
+    INSERT INTO public.postgres_time_precision_default VALUES
+        (3, '0001-01-01', '00:00:00', '0001-01-01 00:00:00', '0001-01-01 00:00:00+00'),
+        (4, '8000-06-01', '12:00:00', '8000-06-01 12:00:00', '8000-06-01 12:00:00+00'),
+        (5, '5138-11-16', '09:46:40', '5138-11-16 09:46:40', '5138-11-16 09:46:40+00'),
+        (6, '9999-12-31', '23:59:59.999', '9999-12-31 23:59:59.999', '9999-12-31 23:59:59.999+00'),
+        (7, '1967-06-30', '22:00:00', '1967-06-30 22:00:00', '1967-06-30 22:00:00+00');
+    "
+
+query ITTTT retry 30 backoff 1s
+select id, c_date, c_time, c_timestamp, c_timestamptz
+from postgres_time_precision_default_rw
+where id between 3 and 7
+order by id;
+----
+3 0001-01-01 00:00:00 0001-01-01 00:00:00 0001-01-01 00:00:00+00:00
+4 8000-06-01 12:00:00 8000-06-01 12:00:00 8000-06-01 12:00:00+00:00
+5 5138-11-16 09:46:40 5138-11-16 09:46:40 5138-11-16 09:46:40+00:00
+6 9999-12-31 23:59:59.999 9999-12-31 23:59:59.999 9999-12-31 23:59:59.999+00:00
+7 1967-06-30 22:00:00 1967-06-30 22:00:00 1967-06-30 22:00:00+00:00
+
+statement ok
+drop source postgres_time_precision_default_source cascade;
+
+system ok
+PGDATABASE=${PGDATABASE:-postgres} psql -c "
+    SELECT pg_terminate_backend(active_pid)
+    FROM pg_replication_slots
+    WHERE slot_name = 'postgres_time_precision_default_slot' AND active_pid IS NOT NULL;
+    SELECT pg_sleep(1);
+    SELECT pg_drop_replication_slot(slot_name)
+    FROM pg_replication_slots
+    WHERE slot_name = 'postgres_time_precision_default_slot';
+    DROP PUBLICATION IF EXISTS postgres_time_precision_default_pub;
+    DROP TABLE IF EXISTS public.postgres_time_precision_default CASCADE;
+    "

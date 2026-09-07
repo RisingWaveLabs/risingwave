@@ -26,7 +26,8 @@ rustflags = [
 [target.aarch64-apple-darwin]
 rustflags = [
     # neon is enabled by default
-    "-Clink-arg=-fuse-ld=lld",
+    # Note: no `-fuse-ld=lld` here. On Apple Silicon the default system linker
+    # (ld-prime, ld64 >= 1000) links the `risingwave` binary ~40% faster than lld.
 ]
 
 # Flags for all targets.
@@ -35,6 +36,12 @@ rustflags = ["--cfg", "tokio_unstable", "-Zhigher-ranked-assumptions"]
 
 [build]
 rustdocflags = ["-Zhigher-ranked-assumptions"]
+
+[unstable]
+min-publish-age = true
+
+[registry]
+global-min-publish-age = "14 days"
 
 # We have large git dependencies. This can make cloning faster.
 # https://doc.rust-lang.org/nightly/cargo/reference/unstable.html#git

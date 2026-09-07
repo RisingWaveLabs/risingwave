@@ -1,5 +1,9 @@
 # To test: gh workflow run 'Build Docker Image on On-Demand EC2' --ref kwannoel/workflow-update-branch
 name: Build Docker Image on On-Demand EC2
+
+permissions:
+  contents: read
+
 on:
   workflow_dispatch:
     inputs:

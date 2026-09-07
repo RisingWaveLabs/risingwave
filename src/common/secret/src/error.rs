@@ -34,7 +34,7 @@ pub enum SecretError {
     #[error("unspecified secret ref type: {0}")]
     UnspecifiedRefType(SecretId),
 
-    #[error("fail to encrypt/decrypt secret")]
+    #[error("failed to encrypt or decrypt the secret")]
     AesError,
 
     #[error("ser/de proto message error: {0}")]

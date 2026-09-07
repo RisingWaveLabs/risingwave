@@ -85,8 +85,7 @@ impl<S: OpendalSinkBackend> FileSink<S> {
         }
         let operator: Operator = Operator::new(builder)?
             .layer(LoggingLayer::default())
-            .layer(RetryLayer::default())
-            .finish();
+            .layer(RetryLayer::default());
 
         Ok(operator)
     }
@@ -100,6 +99,8 @@ impl UnknownFields for AzblobConfig {
         self.unknown_fields.clone()
     }
 }
+
+crate::impl_sink_unknown_fields!(AzblobConfig);
 
 impl OpendalSinkBackend for AzblobSink {
     type Properties = AzblobConfig;

@@ -73,5 +73,27 @@ select * from postgres_query('postgres_cdc_source', 'select * from test where id
 99 t 1 1 1 1 1 1.0 2021-01-01 00:00:00 2021-01-01 00:00:00 2021-01-01 08:00:00+00:00 text varchar 1 day {} \x01
 100 t 1 1 1 1 1 1.0 2021-01-01 00:00:00 2021-01-01 00:00:00 2021-01-01 08:00:00+00:00 text varchar 1 day {} \x01
 
+# postgres_query(source_name, query) requires SELECT privilege on that source.
+statement ok
+create user new_user;
+
+system ok
+psql \
+  -X \
+  -h "$SLT_HOST" \
+  -p "$SLT_PORT" \
+  -U new_user \
+  -d "$SLT_DB" \
+  -v ON_ERROR_STOP=1 \
+  2>&1 \
+  <<'SQL' |
+SELECT *
+FROM postgres_query('postgres_cdc_source', 'select id from test limit 1');
+SQL
+grep -Fq 'permission denied for source "postgres_cdc_source": "SELECT"'
+
+statement ok
+drop user new_user;
+
 statement ok
 drop source postgres_cdc_source;

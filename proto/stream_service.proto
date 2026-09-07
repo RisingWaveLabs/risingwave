@@ -15,6 +15,7 @@ enum PbIcebergPkIndexSinkRole {
   PB_ICEBERG_PK_INDEX_SINK_ROLE_UNSPECIFIED = 0;
   PB_ICEBERG_PK_INDEX_SINK_ROLE_WRITER = 1;
   PB_ICEBERG_PK_INDEX_SINK_ROLE_POSITION_DELETE_MERGER = 2;
+  PB_ICEBERG_PK_INDEX_SINK_ROLE_COMPACTION_RESOLVER = 3;
 }
 
 message InjectBarrierRequest {
@@ -146,13 +147,16 @@ message BarrierCompleteResponse {
 
 message StreamingControlStreamRequest {
   message InitRequest {
-    string term_id = 1;
+    reserved 1;
+    reserved "term_id";
   }
 
   message CreatePartialGraphRequest {
     uint64 partial_graph_id = 1;
     reserved 2;
     reserved "database_id";
+    // Identifies the database recovery incarnation of this partial graph.
+    string term_id = 3;
   }
 
   message RemovePartialGraphRequest {

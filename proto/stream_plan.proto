@@ -174,6 +174,19 @@ message InjectSourceOffsetsMutation {
   map<string, string> split_offsets = 2;
 }
 
+// Context for an ongoing iceberg pk-index compaction.
+message IcebergPkIndexCompactionContext {
+  enum Phase {
+    PHASE_UNSPECIFIED = 0;
+    PHASE_BEGIN = 1;
+    PHASE_END = 2;
+  }
+
+  uint32 sink_id = 1;
+  uint64 task_id = 2;
+  Phase phase = 3;
+}
+
 message BarrierMutation {
   oneof mutation {
     // Add new dispatchers to some actors, used for creating materialized views.
@@ -234,6 +247,7 @@ message Barrier {
   map<string, string> tracing_context = 2;
   // The kind of the barrier.
   BarrierKind kind = 9;
+  optional IcebergPkIndexCompactionContext iceberg_pk_index_compaction = 10;
 }
 
 message Watermark {
@@ -390,6 +404,16 @@ message IcebergWithPkIndexWriterNode {
 
 message IcebergWithPkIndexPositionDeleteMergerNode {
   SinkDesc sink_desc = 1;
+}
+
+// Leaf of a transient pk-index compaction pipeline
+message CompactionResolverNode {
+  SinkDesc sink_desc = 1;
+  catalog.Table pk_index_table = 2;
+  repeated string output_data_file_paths = 3;
+  repeated string input_data_file_paths = 4;
+  int64 read_snapshot_id = 5;
+  uint64 compaction_task_id = 6;
 }
 
 message ProjectNode {
@@ -765,6 +789,8 @@ message MergeNode {
   DispatcherType upstream_dispatcher_type = 3;
   // The schema of input columns. Already deprecated.
   repeated plan_common.Field fields = 4 [deprecated = true];
+  // Allows this merge to start without upstream actors and receive them later through a MergeUpdate.
+  bool allow_no_initial_upstream = 5;
 }
 
 // passed from frontend to meta, used by fragmenter to generate `MergeNode`
@@ -1205,6 +1231,7 @@ message StreamNode {
     VectorIndexLookupJoinNode vector_index_lookup_join = 155;
     IcebergWithPkIndexWriterNode iceberg_with_pk_index_writer = 156;
     IcebergWithPkIndexPositionDeleteMergerNode iceberg_with_pk_index_position_delete_merger = 157;
+    CompactionResolverNode compaction_resolver = 159;
   }
   // The id for the operator. This is local per mview.
   // TODO: should better be a uint32.

@@ -12,66 +12,30 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::env;
-use std::io::Write;
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use super::docker_service::{DockerService, DockerServiceConfig};
+use crate::RedisConfig;
 
-use anyhow::{Result, anyhow};
-
-use crate::util::stylized_risedev_subcmd;
-use crate::{ExecuteContext, RedisConfig, Task};
-
-pub struct RedisService {
-    pub config: RedisConfig,
-}
-
-impl RedisService {
-    pub fn new(config: RedisConfig) -> Result<Self> {
-        Ok(Self { config })
-    }
-
-    fn redis_path(&self) -> Result<PathBuf> {
-        let prefix_bin = env::var("PREFIX_BIN")?;
-        Ok(Path::new(&prefix_bin)
-            .join("redis")
-            .join("src")
-            .join("redis-server"))
-    }
-
-    fn redis(&self) -> Result<Command> {
-        Ok(Command::new(self.redis_path()?))
-    }
-}
-
-impl Task for RedisService {
-    fn execute(&mut self, ctx: &mut ExecuteContext<impl Write>) -> Result<()> {
-        ctx.service(self);
-        ctx.pb.set_message("starting");
-        let path = self.redis_path()?;
-        if !path.exists() {
-            return Err(anyhow!(
-                "Redis binary not found in {:?}\nDid you enable redis feature in `{}`?",
-                path,
-                stylized_risedev_subcmd("configure")
-            ));
-        }
-
-        let mut cmd = self.redis()?;
-        cmd.arg("--bind")
-            .arg(&self.config.address)
-            .arg("--port")
-            .arg(self.config.port.to_string())
-            .arg("--shutdown-on-sigint")
-            .arg("nosave");
-
-        ctx.run_command(ctx.tmux_run(cmd)?)?;
-        ctx.pb.set_message("started");
-
-        Ok(())
-    }
-
+impl DockerServiceConfig for RedisConfig {
     fn id(&self) -> String {
-        self.config.id.clone()
+        self.id.clone()
+    }
+
+    fn is_user_managed(&self) -> bool {
+        self.user_managed
+    }
+
+    fn image(&self) -> String {
+        self.image.clone()
+    }
+
+    fn ports(&self) -> Vec<(String, String)> {
+        vec![(self.port.to_string(), "6379".to_owned())]
+    }
+
+    fn data_path(&self) -> Option<String> {
+        self.persist_data.then(|| "/data".to_owned())
     }
 }
+
+/// Docker-backed Redis service.
+pub type RedisService = DockerService<RedisConfig>;

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! pk-index sink (V2/V3)
+//! pk-index sink
 //!
 //! This module implements three core executors for the Iceberg pk-index sink that uses
 //! Deletion Vectors (DVs) instead of Equality Delete files:
@@ -25,12 +25,47 @@
 //!    messages, merges delete positions with historical deletes, and reports the resulting delete
 //!    files to meta.
 
+mod compaction_resolver;
 mod position_delete_handler_impl;
 mod position_delete_merger;
+mod position_delete_staging;
 mod writer;
 mod writer_impl;
 
+use std::time::Duration;
+
+pub use compaction_resolver::CompactionResolverExecutor;
+use iceberg::table::Table;
 pub use position_delete_handler_impl::PositionDeleteHandlerImpl;
 pub use position_delete_merger::PositionDeleteMergerExecutor;
+use risingwave_connector::sink::iceberg::IcebergConfig;
+use risingwave_connector::sink::{Result as SinkResult, SinkError};
 pub use writer::WriterExecutor;
 pub use writer_impl::IcebergWriterImpl;
+
+/// Load the table, retrying until its snapshot set contains `expected`
+pub async fn load_table_at_least(
+    config: &IcebergConfig,
+    expected: Option<i64>,
+) -> SinkResult<Table> {
+    const MAX_ATTEMPTS: usize = 10;
+    const BACKOFF: Duration = Duration::from_millis(500);
+    let mut last = None;
+    for _ in 0..MAX_ATTEMPTS {
+        let table = config.load_table().await?;
+        let Some(expected) = expected else {
+            return Ok(table);
+        };
+        if table.metadata().snapshot_by_id(expected).is_some() {
+            return Ok(table);
+        }
+        last = Some(table.metadata().current_snapshot_id());
+        tokio::time::sleep(BACKOFF).await;
+    }
+    Err(SinkError::Iceberg(anyhow::anyhow!(
+        "iceberg catalog did not reflect committed pk-index snapshot {:?} after {} attempts (last current_snapshot_id={:?})",
+        expected,
+        MAX_ATTEMPTS,
+        last,
+    )))
+}

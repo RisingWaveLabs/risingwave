@@ -76,6 +76,9 @@ pub struct ElasticSearchOpenSearchConfig {
     #[serde(rename = "routing_column")]
     pub routing_column: Option<String>,
 
+    #[serde(flatten)]
+    pub unknown_fields: std::collections::HashMap<String, String>,
+
     #[serde(rename = "retry_on_conflict")]
     #[serde_as(as = "DisplayFromStr")]
     #[serde(default = "default_retry_on_conflict")]
@@ -84,21 +87,26 @@ pub struct ElasticSearchOpenSearchConfig {
     #[serde(rename = "batch_num_messages")]
     #[serde_as(as = "DisplayFromStr")]
     #[serde(default = "default_batch_num_messages")]
+    #[with_option(allow_alter_on_fly)]
     pub batch_num_messages: usize,
 
     #[serde(rename = "batch_size_kb")]
     #[serde_as(as = "DisplayFromStr")]
     #[serde(default = "default_batch_size_kb")]
+    #[with_option(allow_alter_on_fly)]
     pub batch_size_kb: usize,
 
     #[serde(rename = "concurrent_requests")]
     #[serde_as(as = "DisplayFromStr")]
     #[serde(default = "default_concurrent_requests")]
+    #[with_option(allow_alter_on_fly)]
     pub concurrent_requests: usize,
 
     #[serde(default = "default_type")]
     pub r#type: String,
 }
+
+crate::impl_sink_unknown_fields!(ElasticSearchOpenSearchConfig);
 
 impl EnforceSecret for ElasticSearchOpenSearchConfig {
     const ENFORCE_SECRET_PROPERTIES: phf::Set<&'static str> = phf::phf_set! {

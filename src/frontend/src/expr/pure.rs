@@ -291,6 +291,10 @@ impl ExprVisitor for ImpureAnalyzer {
             | Type::JsonbPopulateMap
             | Type::IsJson
             | Type::ToJsonb
+            | Type::ToVariant
+            | Type::VariantGet
+            | Type::TryVariantGet
+            | Type::VariantTypeof
             | Type::Sind
             | Type::Cosd
             | Type::Cotd
@@ -402,7 +406,9 @@ impl ExprVisitor for ImpureAnalyzer {
             | Type::HasFunctionPrivilege
             | Type::OpenaiEmbedding
             | Type::HasDatabasePrivilege
-            | Type::Random => self.impure = Some(func_type.as_str_name().into()),
+            | Type::Random
+            | Type::ClockTimestamp
+            | Type::GenRandomUuid => self.impure = Some(func_type.as_str_name().into()),
         }
     }
 }

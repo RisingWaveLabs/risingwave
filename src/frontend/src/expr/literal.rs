@@ -53,6 +53,7 @@ impl std::fmt::Debug for Literal {
                     | DataType::Time
                     | DataType::Interval
                     | DataType::Jsonb
+                    | DataType::Variant
                     | DataType::Int256
                     | DataType::Struct(_)
                     | DataType::Map(_)

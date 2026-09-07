@@ -21,6 +21,58 @@ Caused by these errors (recent errors listed first):
 Hint: You may want to set a license key with `ALTER SYSTEM SET license_key = '...';` command. For more information, visit https://go.risingwave.com/premium.
 
 
+# Locality backfill remains available for a simple plan under the unlicensed provider limit.
+statement ok
+SET enable_locality_backfill = true;
+
+statement ok
+SET locality_backfill_mode = always;
+
+statement ok
+CREATE TABLE locality_license_t (a INT, b INT);
+
+statement ok
+CREATE MATERIALIZED VIEW locality_license_small AS
+SELECT count(*) FROM locality_license_t GROUP BY b;
+
+query I
+SELECT count(*)
+FROM rw_fragments f
+JOIN rw_materialized_views m ON f.table_id = m.id
+WHERE m.name = 'locality_license_small'
+  AND f.flags @> ARRAY['LOCALITY_PROVIDER'];
+----
+1
+
+statement ok
+DROP MATERIALIZED VIEW locality_license_small;
+
+# A complex shared plan falls back to regular backfill instead of failing the DDL.
+statement ok
+CREATE MATERIALIZED VIEW locality_license_fallback AS
+WITH shared AS (SELECT * FROM locality_license_t)
+SELECT count(*)
+FROM shared s1
+JOIN shared s2 ON s1.a = s2.a
+JOIN shared s3 ON s1.a = s3.a
+JOIN shared s4 ON s1.a = s4.a
+GROUP BY s1.b;
+
+query I
+SELECT count(*)
+FROM rw_fragments f
+JOIN rw_materialized_views m ON f.table_id = m.id
+WHERE m.name = 'locality_license_fallback'
+  AND f.flags @> ARRAY['LOCALITY_PROVIDER'];
+----
+0
+
+statement ok
+DROP MATERIALIZED VIEW locality_license_fallback;
+
+statement ok
+DROP TABLE locality_license_t;
+
 # Set the license key to an invalid key.
 statement ok
 ALTER SYSTEM SET license_key TO 'invalid';

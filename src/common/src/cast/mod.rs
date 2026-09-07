@@ -66,8 +66,8 @@ pub fn i64_to_timestamptz(t: i64) -> Result<Timestamptz> {
     match t.abs_diff(0) {
         0..E11 => Ok(Timestamptz::from_secs(t).unwrap()), // s
         E11..E14 => Ok(Timestamptz::from_millis(t).unwrap()), // ms
-        E14..E17 => Ok(Timestamptz::from_micros(t)),      // us
-        E17.. => Ok(Timestamptz::from_micros(t / 1000)),  // ns
+        E14..E17 => Ok(Timestamptz::from_micros(t).unwrap()), // us
+        E17.. => Ok(Timestamptz::from_micros(t / 1000).unwrap()), // ns
     }
 }
 

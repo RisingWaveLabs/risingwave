@@ -85,7 +85,7 @@ where
                     return;
                 }
                 (Err(err), _) => {
-                    tracing::error!("Telemetry failed to get tracking_id, err {}", err);
+                    tracing::error!("Telemetry failed to get the tracking ID: {}", err);
                     return;
                 }
                 (Ok(Some(_)), Some(cloud_uuid)) => cloud_uuid,
@@ -97,7 +97,7 @@ where
             .set(tracking_id.clone())
             .unwrap_or_else(|_| {
                 tracing::warn!(
-                    "Telemetry failed to set tracking_id, event reporting will be disabled"
+                    "Telemetry failed to set the tracking ID; event reporting will be disabled"
                 )
             });
 
@@ -106,7 +106,7 @@ where
         let mut enable_event_report = true;
         TELEMETRY_EVENT_REPORT_TX.set(tx).unwrap_or_else(|_| {
             tracing::warn!(
-                "Telemetry failed to set event reporting tx, event reporting will be disabled"
+                "Telemetry failed to set the event reporting sender; event reporting will be disabled"
             );
             // possible failure:
             // When running in standalone mode, the static TELEMETRY_EVENT_REPORT_TX is shared

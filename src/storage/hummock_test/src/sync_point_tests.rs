@@ -34,8 +34,13 @@ use risingwave_storage::StateStore;
 use risingwave_storage::compaction_catalog_manager::CompactionCatalogAgentRef;
 use risingwave_storage::hummock::compactor::CompactorContext;
 use risingwave_storage::hummock::compactor::compactor_runner::compact_with_agent;
+use risingwave_storage::hummock::iterator::test_utils::mock_sstable_store;
 use risingwave_storage::hummock::test_utils::{ReadOptions, *};
-use risingwave_storage::hummock::{CachePolicy, GetObjectId, ObjectIdManager};
+use risingwave_storage::hummock::value::HummockValue;
+use risingwave_storage::hummock::{
+    CachePolicy, GetObjectId, ObjectIdManager, get_from_sstable_info,
+};
+use risingwave_storage::monitor::StoreLocalStatistic;
 use risingwave_storage::store::*;
 use serial_test::serial;
 
@@ -44,6 +49,94 @@ use crate::compactor_tests::tests::{flush_and_commit, get_compactor_context};
 use crate::get_notification_client_for_test;
 use crate::local_state_store_test_utils::LocalStateStoreTestExt;
 use crate::test_utils::gen_key_from_bytes;
+
+#[cfg(feature = "sync_point")]
+struct SyncPointActionGuard(sync_point::SyncPoint);
+
+#[cfg(feature = "sync_point")]
+impl Drop for SyncPointActionGuard {
+    fn drop(&mut self) {
+        sync_point::remove_action(self.0);
+    }
+}
+
+#[tokio::test]
+async fn test_get_from_sstable_info_success_settles_nested_stats_once() {
+    let sstable_store = mock_sstable_store().await;
+    let (_sstable, sstable_info) = gen_test_sstable(
+        default_builder_opt_for_test(),
+        0,
+        (0..10).map(|idx| (test_key_of(idx), HummockValue::put(test_value_of(idx)))),
+        sstable_store.clone(),
+    )
+    .await;
+    let mut parent_stats = StoreLocalStatistic {
+        cache_data_block_total: 7,
+        ..Default::default()
+    };
+    let full_key = test_key_of(0);
+    let read_options = risingwave_storage::store::ReadOptions::default();
+
+    let iter = get_from_sstable_info(
+        sstable_store,
+        &sstable_info,
+        full_key.to_ref(),
+        &read_options,
+        None,
+        &mut parent_stats,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    drop(iter);
+
+    assert_eq!(parent_stats.cache_data_block_total, 8);
+}
+
+#[tokio::test]
+#[cfg(feature = "sync_point")]
+#[serial]
+async fn test_get_from_sstable_info_cancellation_settles_nested_stats() {
+    const PAUSE: &str = "SSTABLE_ITERATOR::SEEK::BEFORE_NEXT_BLOCK";
+    const PAUSED: &str = "SSTABLE_ITERATOR::SEEK::BEFORE_NEXT_BLOCK::PAUSED";
+
+    sync_point::reset();
+    sync_point::hook(PAUSE, || async {
+        sync_point::on(PAUSED).await;
+        futures::future::pending::<()>().await;
+    });
+    let _pause_cleanup = SyncPointActionGuard(PAUSE);
+
+    let sstable_store = mock_sstable_store().await;
+    let (_sstable, sstable_info) = gen_test_sstable(
+        default_builder_opt_for_test(),
+        0,
+        (0..10).map(|idx| (test_key_of(idx), HummockValue::put(test_value_of(idx)))),
+        sstable_store.clone(),
+    )
+    .await;
+    let mut parent_stats = StoreLocalStatistic::default();
+    let full_key = test_key_of(10);
+    let read_options = risingwave_storage::store::ReadOptions::default();
+    let mut get = Box::pin(get_from_sstable_info(
+        sstable_store,
+        &sstable_info,
+        full_key.to_ref(),
+        &read_options,
+        None,
+        &mut parent_stats,
+    ));
+
+    tokio::select! {
+        result = sync_point::wait_timeout(PAUSED, Duration::from_secs(10)) => {
+            result.expect("GET did not reach the cancellation hook");
+        }
+        _ = get.as_mut() => panic!("GET completed before cancellation"),
+    }
+    drop(get);
+
+    assert_eq!(parent_stats.cache_data_block_total, 1);
+}
 
 #[tokio::test]
 #[cfg(feature = "sync_point")]

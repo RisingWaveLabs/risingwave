@@ -323,12 +323,19 @@ impl std::fmt::Display for TrackingJob {
 impl TrackingJob {
     /// Create a new tracking job.
     pub(crate) fn new(stream_job_fragments: &StreamJobFragments) -> Self {
+        let finished_backfill_fragments = stream_job_fragments.source_backfill_fragments();
+        // `None` when empty, consistent with the recovered-job constructor.
+        let source_change = if finished_backfill_fragments.is_empty() {
+            None
+        } else {
+            Some(SourceChange::CreateJobFinished {
+                finished_backfill_fragments,
+            })
+        };
         Self {
             job_id: stream_job_fragments.stream_job_id,
             is_recovered: false,
-            source_change: Some(SourceChange::CreateJobFinished {
-                finished_backfill_fragments: stream_job_fragments.source_backfill_fragments(),
-            }),
+            source_change,
         }
     }
 
@@ -447,45 +454,43 @@ impl CreateMviewProgressTracker {
         backfill_order_state: BackfillOrderState,
         version_stats: &HummockVersionStats,
     ) -> Self {
-        {
-            let tracking_job = TrackingJob::recovered(creating_job_id, fragment_infos);
-            let actors = InflightStreamingJobInfo::tracking_progress_actor_ids(fragment_infos);
-            let status = if actors.is_empty() {
-                CreateMviewStatus::Finished {
-                    table_ids_to_truncate: vec![],
-                }
-            } else {
-                let mut states = HashMap::new();
-                let mut backfill_upstream_types = HashMap::new();
-
-                for (actor, backfill_upstream_type) in actors {
-                    states.insert(actor, BackfillState::ConsumingUpstream(Epoch(0), 0, 0));
-                    backfill_upstream_types.insert(actor, backfill_upstream_type);
-                }
-
-                let progress = Self::recover_progress(
-                    creating_job_id,
-                    states,
-                    backfill_upstream_types,
-                    StreamJobFragments::upstream_table_counts_impl(
-                        fragment_infos.values().map(|fragment| &fragment.nodes),
-                    ),
-                    version_stats,
-                    backfill_order_state,
-                );
-                let pending_backfill_nodes = progress
-                    .backfill_order_state
-                    .current_backfill_node_fragment_ids();
-                CreateMviewStatus::Backfilling {
-                    progress,
-                    pending_backfill_nodes,
-                    table_ids_to_truncate: vec![],
-                }
-            };
-            Self {
-                tracking_job,
-                status,
+        let tracking_job = TrackingJob::recovered(creating_job_id, fragment_infos);
+        let actors = InflightStreamingJobInfo::tracking_progress_actor_ids(fragment_infos);
+        let status = if actors.is_empty() {
+            CreateMviewStatus::Finished {
+                table_ids_to_truncate: vec![],
             }
+        } else {
+            let mut states = HashMap::new();
+            let mut backfill_upstream_types = HashMap::new();
+
+            for (actor, backfill_upstream_type) in actors {
+                states.insert(actor, BackfillState::ConsumingUpstream(Epoch(0), 0, 0));
+                backfill_upstream_types.insert(actor, backfill_upstream_type);
+            }
+
+            let progress = Self::recover_progress(
+                creating_job_id,
+                states,
+                backfill_upstream_types,
+                StreamJobFragments::upstream_table_counts_impl(
+                    fragment_infos.values().map(|fragment| &fragment.nodes),
+                ),
+                version_stats,
+                backfill_order_state,
+            );
+            let pending_backfill_nodes = progress
+                .backfill_order_state
+                .current_backfill_node_fragment_ids();
+            CreateMviewStatus::Backfilling {
+                progress,
+                pending_backfill_nodes,
+                table_ids_to_truncate: vec![],
+            }
+        };
+        Self {
+            tracking_job,
+            status,
         }
     }
 
@@ -1175,5 +1180,68 @@ mod tests {
         // Should now be in Finished state
         assert!(matches!(tracker.status, CreateMviewStatus::Finished { .. }));
         assert!(tracker.is_finished());
+    }
+
+    #[test]
+    fn tracking_job_new_without_source_backfill_has_no_source_change() {
+        use std::collections::BTreeMap;
+
+        let fragments = StreamJobFragments::for_test(JobId::new(1), BTreeMap::new());
+        let job = TrackingJob::new(&fragments);
+        assert!(job.source_change.is_none());
+    }
+
+    #[test]
+    fn tracking_job_new_with_source_backfill_tracks_finished_fragments() {
+        use std::collections::{BTreeMap, BTreeSet};
+
+        use risingwave_common::id::SourceId;
+        use risingwave_pb::stream_plan::stream_node::NodeBody;
+        use risingwave_pb::stream_plan::{MergeNode, SourceBackfillNode};
+
+        use crate::model::Fragment;
+
+        let source_id = SourceId::new(42);
+        let backfill_fragment_id = FragmentId::new(2);
+        let upstream_source_fragment_id = FragmentId::new(1);
+
+        let nodes = PbStreamNode {
+            node_body: Some(NodeBody::SourceBackfill(Box::new(SourceBackfillNode {
+                upstream_source_id: source_id,
+                ..Default::default()
+            }))),
+            input: vec![PbStreamNode {
+                node_body: Some(NodeBody::Merge(Box::new(MergeNode {
+                    upstream_fragment_id: upstream_source_fragment_id,
+                    ..Default::default()
+                }))),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let fragment = Fragment {
+            fragment_id: backfill_fragment_id,
+            nodes,
+            ..Default::default()
+        };
+        let fragments = StreamJobFragments::for_test(
+            JobId::new(1),
+            BTreeMap::from([(backfill_fragment_id, fragment)]),
+        );
+
+        let job = TrackingJob::new(&fragments);
+        let Some(SourceChange::CreateJobFinished {
+            finished_backfill_fragments,
+        }) = job.source_change
+        else {
+            panic!("expected CreateJobFinished");
+        };
+        assert_eq!(
+            finished_backfill_fragments,
+            HashMap::from([(
+                source_id,
+                BTreeSet::from([(backfill_fragment_id, upstream_source_fragment_id)]),
+            )])
+        );
     }
 }

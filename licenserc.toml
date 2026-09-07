@@ -1,5 +1,7 @@
-headerPath = "ci/license-header.txt"
+[header]
+path = "ci/license-header.txt"
 
+[files]
 includes = [
   "src/**/*.rs",
   "src/**/*.py",
@@ -22,4 +24,4 @@ excludes = [
 
 [git]
 ignore = "enable"
-attrs = "enable"
+file_attrs = "enable"

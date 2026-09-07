@@ -227,10 +227,12 @@ impl ConsumerFuture {
                         pending().await
                     }
 
-                    let chunk = read_future
-                        .next_chunk(progress, read_state, buffer, metrics)
+                    let message = read_future
+                        .next_message(progress, read_state, buffer, metrics)
                         .await?;
-                    metrics.total_read_count.inc_by(chunk.cardinality() as _);
+                    if let Message::Chunk(chunk) = &message {
+                        metrics.total_read_count.inc_by(chunk.cardinality() as _);
+                    }
 
                     let clean_state_reached =
                         read_future.mark_clean_state(clean_state, buffer, metrics);
@@ -238,7 +240,7 @@ impl ConsumerFuture {
                         self.as_mut().project_replace(ConsumerFuture::PlaceHolder),
                         ConsumerFutureProjReplace::ReadingChunk { inner } => inner
                     );
-                    self.set(Self::dispatch(inner, Message::Chunk(chunk)));
+                    self.set(Self::dispatch(inner, message));
 
                     if clean_state_reached {
                         return Ok(ConsumerFutureEvent::CleanStateReached);
@@ -466,8 +468,8 @@ impl<S: StateStore> StreamConsumer for SyncLogStoreDispatchExecutor<S> {
                                         consumer_future_state.as_mut().push_barrier(barrier);
                                     }
                                 }
-                                // TODO: handle upstream watermark in sync log store dispatch.
-                                Message::Watermark(_watermark) => {
+                                Message::Watermark(watermark) => {
+                                    buffer.add_watermark(write_state.epoch().curr, watermark);
                                     write_future_state =
                                         WriteFuture::receive_from_upstream(stream, write_state);
                                 }
@@ -642,12 +644,22 @@ mod tests {
         assert_eq!(barriers[0].epoch.curr, test_epoch(1));
 
         input_tx.push_chunk(chunk_1.clone());
+        input_tx.push_int64_watermark(0, 7);
         input_tx.push_chunk(chunk_2.clone());
         let msg = timeout(Duration::from_secs(1), down_rx.recv())
             .await
             .unwrap()
             .expect("downstream should receive chunk(1)");
         assert_stream_chunk_eq!(msg.as_chunk().unwrap(), chunk_1);
+
+        let msg = timeout(Duration::from_secs(1), down_rx.recv())
+            .await
+            .unwrap()
+            .expect("downstream should receive watermark");
+        assert_eq!(
+            msg.as_watermark().unwrap(),
+            &Watermark::new(0, DataType::Int64, 7_i64.into())
+        );
 
         let msg = timeout(Duration::from_secs(1), down_rx.recv())
             .await

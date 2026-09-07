@@ -19,6 +19,7 @@ use risingwave_sqlparser::ast::ObjectName;
 
 use super::{HandlerArgs, RwPgResponse};
 use crate::Binder;
+use crate::catalog::OwnedByUserCatalog;
 use crate::catalog::root_catalog::SchemaPath;
 use crate::catalog::table_catalog::TableType;
 use crate::error::{ErrorCode, Result};
@@ -240,8 +241,8 @@ pub async fn handle_rename_schema(
     let new_schema_name = Binder::resolve_schema_name(new_schema_name)?;
 
     let schema_id = {
-        let user_reader = session.env().user_info_reader().read_guard();
         let catalog_reader = session.env().catalog_reader().read_guard();
+        let user_reader = session.env().user_info_reader().read_guard();
         let schema = catalog_reader.get_schema_by_name(db_name, &schema_name)?;
         let db_id = catalog_reader.get_database_by_name(db_name)?.id();
 
@@ -289,23 +290,33 @@ pub async fn handle_rename_database(
     let new_database_name = Binder::resolve_database_name(new_database_name)?;
 
     let database_id = {
-        let user_reader = session.env().user_info_reader().read_guard();
         let catalog_reader = session.env().catalog_reader().read_guard();
+        let user_reader = session.env().user_info_reader().read_guard();
         let database = catalog_reader.get_database_by_name(&database_name)?;
+        let current_user = user_reader
+            .get_user_by_name(&session.user_name())
+            .ok_or_else(|| ErrorCode::PermissionDenied("Session user is invalid".to_owned()))?;
+
+        // If the database owner is an admin, only admin users can rename it.
+        if let Some(database_owner) = user_reader.get_user_by_id(&database.owner())
+            && database_owner.is_admin
+            && !current_user.is_admin
+        {
+            return Err(ErrorCode::PermissionDenied(
+                "only admin users can rename databases owned by admin users".to_owned(),
+            )
+            .into());
+        }
 
         // The user should be super user or owner to alter the database.
         session.check_privilege_for_drop_alter_db_schema(database)?;
 
         // Non-superuser owners must also have the CREATEDB privilege.
-        if let Some(user) = user_reader.get_user_by_name(&session.user_name()) {
-            if !user.is_super && !user.can_create_db {
-                return Err(ErrorCode::PermissionDenied(
-                    "Non-superuser owners must also have the CREATEDB privilege".to_owned(),
-                )
-                .into());
-            }
-        } else {
-            return Err(ErrorCode::PermissionDenied("Session user is invalid".to_owned()).into());
+        if !current_user.is_super && !current_user.can_create_db {
+            return Err(ErrorCode::PermissionDenied(
+                "Non-superuser owners must also have the CREATEDB privilege".to_owned(),
+            )
+            .into());
         }
 
         // The current database cannot be renamed.
@@ -329,7 +340,10 @@ pub async fn handle_rename_database(
 
 #[cfg(test)]
 mod tests {
-    use risingwave_common::catalog::{DEFAULT_DATABASE_NAME, DEFAULT_SCHEMA_NAME};
+    use risingwave_common::catalog::{
+        DEFAULT_DATABASE_NAME, DEFAULT_SCHEMA_NAME, DEFAULT_SUPER_USER_FOR_ADMIN,
+        DEFAULT_SUPER_USER_FOR_ADMIN_ID,
+    };
 
     use crate::catalog::root_catalog::SchemaPath;
     use crate::test_utils::LocalFrontend;
@@ -363,5 +377,68 @@ mod tests {
             .name()
             .to_owned();
         assert_eq!(altered_table_name, "t1");
+    }
+
+    #[tokio::test]
+    async fn test_rename_admin_owned_database() {
+        let frontend = LocalFrontend::new(Default::default()).await;
+        let session = frontend.session_ref();
+        let catalog_reader = session.env().catalog_reader();
+
+        frontend
+            .run_user_sql(
+                "CREATE DATABASE admin_owned_database",
+                DEFAULT_DATABASE_NAME.to_owned(),
+                DEFAULT_SUPER_USER_FOR_ADMIN.to_owned(),
+                DEFAULT_SUPER_USER_FOR_ADMIN_ID,
+            )
+            .await
+            .unwrap();
+
+        let err = frontend
+            .run_sql("ALTER DATABASE admin_owned_database RENAME TO renamed_database")
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("only admin users can rename databases owned by admin users")
+        );
+        assert!(
+            catalog_reader
+                .read_guard()
+                .get_database_by_name("admin_owned_database")
+                .is_ok()
+        );
+
+        frontend
+            .run_user_sql(
+                "ALTER DATABASE admin_owned_database RENAME TO renamed_database",
+                DEFAULT_DATABASE_NAME.to_owned(),
+                DEFAULT_SUPER_USER_FOR_ADMIN.to_owned(),
+                DEFAULT_SUPER_USER_FOR_ADMIN_ID,
+            )
+            .await
+            .unwrap();
+        assert!(
+            catalog_reader
+                .read_guard()
+                .get_database_by_name("renamed_database")
+                .is_ok()
+        );
+
+        frontend
+            .run_sql("CREATE DATABASE regular_database")
+            .await
+            .unwrap();
+        frontend
+            .run_sql("ALTER DATABASE regular_database RENAME TO renamed_regular_database")
+            .await
+            .unwrap();
+        assert!(
+            catalog_reader
+                .read_guard()
+                .get_database_by_name("renamed_regular_database")
+                .is_ok()
+        );
     }
 }

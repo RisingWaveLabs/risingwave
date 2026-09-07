@@ -17,6 +17,7 @@ use std::sync::Arc;
 
 use anyhow::anyhow;
 use parking_lot::RwLock;
+use risingwave_common::id::PartialGraphId;
 use risingwave_connector::sink::catalog::SinkId;
 use risingwave_connector::sink::iceberg::IcebergConfig;
 use risingwave_pb::stream_service::barrier_complete_response::IcebergPkIndexSinkMetadata as PbIcebergPkIndexSinkMetadata;
@@ -24,6 +25,7 @@ use sea_orm::DatabaseConnection;
 use tokio::sync::Mutex;
 use tracing::warn;
 
+use super::committed_epoch::PartialGraphCommittedEpochs;
 use super::coordinator::IcebergPkIndexSinkCoordinator;
 
 type CoordinatorRef = Arc<Mutex<IcebergPkIndexSinkCoordinator>>;
@@ -36,9 +38,18 @@ pub struct IcebergPkIndexSinkManager {
 
 struct ManagerInner {
     db: DatabaseConnection,
-    /// Read on every pre-commit/commit (only to clone out the `CoordinatorRef`, never held across an await);
-    /// written only by register/unregister/reset, which are rare control-plane events.
-    coordinators: RwLock<HashMap<SinkId, CoordinatorRef>>,
+    /// `sink_id -> (partial_graph_id, coordinator)`. Read on every pre-commit/commit/wait (only to
+    /// clone out the ref / read the partial graph id, never held across an await); written only by
+    /// register/unregister/reset, which are rare control-plane events. The `partial_graph_id` is the
+    /// graph whose committed epoch the sink's merger waits on (its database main graph today; an
+    /// independent job's graph in the future — see `committed_epoch`).
+    coordinators: RwLock<HashMap<SinkId, (PartialGraphId, CoordinatorRef)>>,
+    /// Per-partial-graph committed-epoch cursor. A cursor entry exists exactly while a partial graph has
+    /// a registered pk-index sink: created by `ensure` in `register_sink` and dropped by `remove` in
+    /// `unregister_sinks` (and `clear` in `reset`), all under the `coordinators` write lock. Advanced on
+    /// every checkpoint completion via `advance_committed_epochs` (a no-op for partial graphs with no
+    /// registered sink).
+    committed_epochs: PartialGraphCommittedEpochs,
 }
 
 impl IcebergPkIndexSinkManager {
@@ -47,6 +58,7 @@ impl IcebergPkIndexSinkManager {
             inner: Arc::new(ManagerInner {
                 db,
                 coordinators: RwLock::new(HashMap::new()),
+                committed_epochs: PartialGraphCommittedEpochs::default(),
             }),
         }
     }
@@ -58,6 +70,7 @@ impl IcebergPkIndexSinkManager {
     pub async fn register_sink(
         &self,
         sink_id: SinkId,
+        partial_graph_id: PartialGraphId,
         iceberg_config: IcebergConfig,
     ) -> anyhow::Result<()> {
         // Initialize (load + recover + drain) outside the map lock; this is the slow, fallible part.
@@ -65,11 +78,18 @@ impl IcebergPkIndexSinkManager {
             IcebergPkIndexSinkCoordinator::init(sink_id, iceberg_config, self.inner.db.clone())
                 .await?;
 
-        let prev = self
-            .inner
-            .coordinators
-            .write()
-            .insert(sink_id, Arc::new(Mutex::new(coordinator)));
+        let prev = {
+            let mut coordinators = self.inner.coordinators.write();
+            let prev = coordinators.insert(
+                sink_id,
+                (partial_graph_id, Arc::new(Mutex::new(coordinator))),
+            );
+            // Start tracking this partial graph's committed epoch under the same write lock as the
+            // coordinator insert, so a cursor entry exists exactly while a sink is registered (and a
+            // `wait` racing an unregister can never observe a resurrected, never-advanced entry).
+            self.inner.committed_epochs.ensure(partial_graph_id);
+            prev
+        };
         if prev.is_some() {
             // Replacing an existing coordinator. Any in-flight commit on the old one keeps it alive via its
             // own `Arc` until it finishes; the snapshot_id idempotency check guards against double-commit.
@@ -101,18 +121,55 @@ impl IcebergPkIndexSinkManager {
         coordinator.lock().await.commit().await
     }
 
+    /// Advance the per-partial-graph committed epoch after a checkpoint completion.
+    pub fn advance_committed_epochs(
+        &self,
+        epochs: impl IntoIterator<Item = (PartialGraphId, u64)>,
+    ) {
+        self.inner.committed_epochs.advance_all(epochs);
+    }
+
+    /// Block until `sink_id`'s partial graph has committed through `target_epoch`, then return the
+    /// coordinator's committed iceberg snapshot id (a lower bound the caller must observe when it
+    /// reloads the table). Does NOT hold the coordinator lock while waiting.
+    pub async fn wait_epoch(
+        &self,
+        sink_id: SinkId,
+        target_epoch: u64,
+    ) -> anyhow::Result<Option<i64>> {
+        let partial_graph_id = self.partial_graph_of(sink_id)?;
+        self.inner
+            .committed_epochs
+            .wait(partial_graph_id, target_epoch)
+            .await;
+        let coordinator = self.coordinator(sink_id)?;
+        let snapshot_id = coordinator.lock().await.current_snapshot_id();
+        Ok(snapshot_id)
+    }
+
     /// Unregister the given `sink_id`(s)' coordinator(s) (e.g. at DROP SINK time). Unregistering an unknown
     /// `sink_id` is a no-op.
     pub fn unregister_sinks(&self, sink_ids: Vec<SinkId>) {
         let mut coordinators = self.inner.coordinators.write();
+        let mut touched_graphs = Vec::new();
         for sink_id in sink_ids {
-            coordinators.remove(&sink_id);
+            if let Some((partial_graph_id, _coord)) = coordinators.remove(&sink_id) {
+                touched_graphs.push(partial_graph_id);
+            }
+        }
+        // Drop a partial graph's committed-epoch cursor only once none of its sinks remain registered.
+        for partial_graph_id in touched_graphs {
+            if !coordinators.values().any(|(pg, _)| *pg == partial_graph_id) {
+                self.inner.committed_epochs.remove(partial_graph_id);
+            }
         }
     }
 
     /// Drop every coordinator. Used at recovery time.
     pub fn reset(&self) {
-        self.inner.coordinators.write().clear();
+        let mut coordinators = self.inner.coordinators.write();
+        coordinators.clear();
+        self.inner.committed_epochs.clear();
     }
 
     fn coordinator(&self, sink_id: SinkId) -> anyhow::Result<CoordinatorRef> {
@@ -120,7 +177,21 @@ impl IcebergPkIndexSinkManager {
             .coordinators
             .read()
             .get(&sink_id)
-            .cloned()
+            .map(|(_pg, coord)| coord.clone())
+            .ok_or_else(|| {
+                anyhow!(
+                    "iceberg pk-index sink coordinator for sink {} is not registered",
+                    sink_id
+                )
+            })
+    }
+
+    fn partial_graph_of(&self, sink_id: SinkId) -> anyhow::Result<PartialGraphId> {
+        self.inner
+            .coordinators
+            .read()
+            .get(&sink_id)
+            .map(|(pg, _coord)| *pg)
             .ok_or_else(|| {
                 anyhow!(
                     "iceberg pk-index sink coordinator for sink {} is not registered",

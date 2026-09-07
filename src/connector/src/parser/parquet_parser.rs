@@ -17,7 +17,8 @@ use std::sync::Arc;
 use futures_async_stream::try_stream;
 use prometheus::core::GenericCounter;
 use risingwave_common::array::arrow::arrow_array_iceberg::{ArrayRef, RecordBatch};
-use risingwave_common::array::arrow::{IcebergArrowConvert, is_parquet_schema_match_source_schema};
+use risingwave_common::array::arrow::arrow_schema_iceberg::FieldRef;
+use risingwave_common::array::arrow::{IcebergArrowConvert, is_parquet_field_match_source_schema};
 use risingwave_common::array::{ArrayBuilderImpl, DataChunk, StreamChunk};
 use risingwave_common::metrics::LabelGuardedMetric;
 use risingwave_common::types::{Datum, ScalarImpl};
@@ -121,13 +122,13 @@ impl ParquetParser {
                     let rw_data_type: &risingwave_common::types::DataType =
                         &source_column.data_type;
                     let rw_column_name = &source_column.name;
-                    if let Some(parquet_column) =
+                    if let Some((parquet_field, parquet_column)) =
                         self.find_parquet_column(&record_batch, rw_column_name)
-                        && is_parquet_schema_match_source_schema(
-                            parquet_column.data_type(),
-                            rw_data_type,
-                        )
+                        && is_parquet_field_match_source_schema(parquet_field, rw_data_type)
                     {
+                        // The match guard above verified this column converts to the
+                        // declared type; decode by the declared-side field, which for
+                        // variant carries the extension name that `from_array` routes on.
                         let arrow_field = IcebergArrowConvert
                             .to_arrow_field(rw_column_name, rw_data_type)
                             .map_err(|e| {
@@ -153,6 +154,22 @@ impl ParquetParser {
                                     )
                                 }
                             })?;
+                        // The schema match and the decode are maintained in parallel; a
+                        // diverging output type is a code bug — surface it instead of letting
+                        // a mistyped column corrupt the chunk downstream.
+                        if array_impl.data_type() != *rw_data_type {
+                            return Err(crate::parser::AccessError::ParquetParser {
+                                message: format!(
+                                    "converted array type diverges from the declared column type, column='{}', rw_type='{}', converted='{}', parquet_type='{}', offset={}",
+                                    rw_column_name,
+                                    rw_data_type,
+                                    array_impl.data_type(),
+                                    parquet_column.data_type(),
+                                    self.offset,
+                                ),
+                            }
+                            .into());
+                        }
                         chunk_columns.push(Arc::new(array_impl));
                     } else {
                         // Handle additional columns, for file source, the additional columns are offset and file name;
@@ -218,16 +235,16 @@ impl ParquetParser {
         &self,
         record_batch: &'a RecordBatch,
         column_name: &str,
-    ) -> Option<&'a ArrayRef> {
-        if let Some(column) = record_batch.column_by_name(column_name) {
-            return Some(column);
+    ) -> Option<(&'a FieldRef, &'a ArrayRef)> {
+        let fields = record_batch.schema_ref().fields();
+        if let Some(index) = fields.iter().position(|field| field.name() == column_name) {
+            return Some((&fields[index], record_batch.column(index)));
         }
         if !self.case_insensitive {
             return None;
         }
-        let schema = record_batch.schema();
         let mut matched_index: Option<usize> = None;
-        for (index, field) in schema.fields().iter().enumerate() {
+        for (index, field) in fields.iter().enumerate() {
             if field.name().eq_ignore_ascii_case(column_name) {
                 if matched_index.is_some() {
                     return None;
@@ -235,6 +252,6 @@ impl ParquetParser {
                 matched_index = Some(index);
             }
         }
-        matched_index.map(|index| record_batch.column(index))
+        matched_index.map(|index| (&fields[index], record_batch.column(index)))
     }
 }

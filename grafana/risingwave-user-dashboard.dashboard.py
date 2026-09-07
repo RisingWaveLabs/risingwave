@@ -140,6 +140,8 @@ node_json = {
     "sort": 6,
     "type": "query",
 }
+if NODE_VARIABLE_CUSTOM_ALL_VALUE is not None:
+    node_json["allValue"] = NODE_VARIABLE_CUSTOM_ALL_VALUE
 
 job_json = {
     "current": {"selected": False, "text": "All", "value": "__all"},

@@ -21,6 +21,7 @@ use itertools::Itertools;
 use risingwave_common::acl::AclMode;
 use risingwave_common::bail_not_implemented;
 use risingwave_common::catalog::INFORMATION_SCHEMA_SCHEMA_NAME;
+use risingwave_common::secret::LocalSecretManager;
 use risingwave_common::types::{DataType, MapType, StructType};
 use risingwave_common::util::iter_util::ZipEqFast;
 use risingwave_expr::aggregate::AggType;
@@ -38,7 +39,7 @@ use crate::catalog::function_catalog::FunctionCatalog;
 use crate::error::{ErrorCode, Result, RwError};
 use crate::expr::{
     Expr, ExprImpl, ExprType, FunctionCall, FunctionCallWithLambda, InputRef, TableFunction,
-    TableFunctionType, UserDefinedFunction,
+    TableFunctionType, UserDefinedFunction, expr_impl_to_string_fn,
 };
 use crate::handler::privilege::ObjectCheckItem;
 
@@ -56,6 +57,9 @@ const SYS_FUNCTION_WITHOUT_ARGS: &[&str] = &[
     "current_schema",
     "current_timestamp",
 ];
+
+const INLINE_QUERY_ARG_LEN: usize = 6;
+const CDC_SOURCE_QUERY_ARG_LEN: usize = 2;
 
 pub(super) fn is_sys_function_without_args(ident: &Ident) -> bool {
     SYS_FUNCTION_WITHOUT_ARGS
@@ -80,6 +84,84 @@ macro_rules! reject_syntax {
 }
 
 impl Binder {
+    fn bind_postgres_or_mysql_query_args(
+        &self,
+        schema_name: Option<&str>,
+        args: Vec<ExprImpl>,
+        expected_connector_name: &str,
+    ) -> Result<Vec<ExprImpl>> {
+        match args.len() {
+            INLINE_QUERY_ARG_LEN => {
+                let mut cast_args = Vec::with_capacity(INLINE_QUERY_ARG_LEN);
+                for arg in args {
+                    cast_args.push(arg.cast_implicit(&DataType::Varchar)?);
+                }
+                Ok(cast_args)
+            }
+            CDC_SOURCE_QUERY_ARG_LEN => {
+                let source_name = expr_impl_to_string_fn(&args[0])?;
+                let source_catalog = self
+                    .catalog
+                    .get_source_by_name(
+                        &self.db_name,
+                        self.bind_schema_path(schema_name),
+                        &source_name,
+                    )?
+                    .0;
+
+                self.check_privilege(
+                    ObjectCheckItem::new(
+                        source_catalog.owner,
+                        AclMode::Select,
+                        source_catalog.name.clone(),
+                        source_catalog.id,
+                    ),
+                    source_catalog.database_id,
+                )?;
+
+                if !source_catalog
+                    .connector_name()
+                    .eq_ignore_ascii_case(expected_connector_name)
+                {
+                    return Err(ErrorCode::BindError(format!(
+                        "TVF function only accepts `mysql-cdc` and `postgres-cdc` source. Expected: {}, but got: {}",
+                        expected_connector_name,
+                        source_catalog.connector_name()
+                    ))
+                    .into());
+                }
+
+                let (props, secret_refs) = source_catalog.with_properties.clone().into_parts();
+                let secret_resolved =
+                    LocalSecretManager::global().fill_secrets(props, secret_refs)?;
+
+                let mut args_vec = vec![
+                    ExprImpl::literal_varchar(secret_resolved["hostname"].clone()),
+                    ExprImpl::literal_varchar(secret_resolved["port"].clone()),
+                    ExprImpl::literal_varchar(secret_resolved["username"].clone()),
+                    ExprImpl::literal_varchar(secret_resolved["password"].clone()),
+                    ExprImpl::literal_varchar(secret_resolved["database.name"].clone()),
+                    args[1].clone().cast_implicit(&DataType::Varchar)?,
+                ];
+
+                if expected_connector_name.eq_ignore_ascii_case("postgres-cdc") {
+                    args_vec.push(ExprImpl::literal_varchar(
+                        secret_resolved.get("ssl.mode").cloned().unwrap_or_default(),
+                    ));
+                    args_vec.push(ExprImpl::literal_varchar(
+                        secret_resolved
+                            .get("ssl.root.cert")
+                            .cloned()
+                            .unwrap_or_default(),
+                    ));
+                }
+
+                Ok(args_vec)
+            }
+            _ => Err(ErrorCode::BindError("postgres_query function and mysql_query function accept either 2 arguments: (cdc_source_name varchar, query varchar) or 6 arguments: (hostname varchar, port varchar, username varchar, password varchar, database_name varchar, query varchar)".to_owned()).into()),
+        }
+    }
+
     pub(in crate::binder) fn bind_function(
         &mut self,
         Function {
@@ -392,14 +474,12 @@ impl Binder {
                     "`VARIADIC` is not allowed in table function call"
                 );
                 self.ensure_table_function_allowed()?;
-                return Ok(TableFunction::new_postgres_query(
-                    &self.catalog,
-                    &self.db_name,
-                    self.bind_schema_path(schema_name.as_deref()),
-                    args,
-                )
-                .context("postgres_query error")?
-                .into());
+                let args = self
+                    .bind_postgres_or_mysql_query_args(schema_name.as_deref(), args, "postgres-cdc")
+                    .context("postgres_query error")?;
+                return Ok(TableFunction::new_postgres_query(args)
+                    .context("postgres_query error")?
+                    .into());
             }
             // `mysql_query` table function
             if func_name.eq("mysql_query") {
@@ -408,14 +488,12 @@ impl Binder {
                     "`VARIADIC` is not allowed in table function call"
                 );
                 self.ensure_table_function_allowed()?;
-                return Ok(TableFunction::new_mysql_query(
-                    &self.catalog,
-                    &self.db_name,
-                    self.bind_schema_path(schema_name.as_deref()),
-                    args,
-                )
-                .context("mysql_query error")?
-                .into());
+                let args = self
+                    .bind_postgres_or_mysql_query_args(schema_name.as_deref(), args, "mysql-cdc")
+                    .context("mysql_query error")?;
+                return Ok(TableFunction::new_mysql_query(args)
+                    .context("mysql_query error")?
+                    .into());
             }
             // `internal_backfill_progress` table function
             if func_name.eq("internal_backfill_progress") {
@@ -869,19 +947,14 @@ impl Binder {
     fn bind_jsonb_agg_arg(&mut self, arg: &FunctionArg) -> Result<Vec<ExprImpl>> {
         match arg {
             FunctionArg::Unnamed(FunctionArgExpr::QualifiedWildcard(prefix, except)) => {
-                let relation_name = prefix.to_string();
                 let (schema_name, table_name) =
                     Binder::resolve_schema_qualified_name(&self.db_name, prefix)?;
                 let except_indices = self.generate_except_indices(except.as_deref())?;
                 let (begin, end) = self
                     .context
-                    .range_of
-                    .get(&(schema_name, table_name))
-                    .ok_or_else(|| {
-                        ErrorCode::ItemNotFound(format!("relation \"{}\"", relation_name))
-                    })?;
+                    .resolve_relation_range(&table_name, &schema_name)?;
                 let (exprs, names) = Self::iter_bound_columns(
-                    self.context.columns[*begin..*end]
+                    self.context.columns[begin..end]
                         .iter()
                         .filter(|c| !c.is_hidden && !except_indices.contains(&c.index)),
                 );

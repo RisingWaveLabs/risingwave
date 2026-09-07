@@ -189,6 +189,26 @@ pub(super) struct ConsumeUpstreamStream<'a, T: UpstreamTable> {
 }
 
 impl<T: UpstreamTable> ConsumeUpstreamStream<'_, T> {
+    pub(super) fn update_rate_limiter(&mut self, new_rate_limit: RateLimit) {
+        self.rate_limit = new_rate_limit;
+        let chunk_size = self.chunk_size;
+        match &mut self.state {
+            ConsumeUpstreamStreamState::ConsumingSnapshotStream { stream, .. } => {
+                stream.update_rate_limiter(new_rate_limit, chunk_size);
+            }
+            ConsumeUpstreamStreamState::ConsumingChangeLogStream { stream, .. } => {
+                stream.update_rate_limiter(new_rate_limit, chunk_size);
+            }
+            ConsumeUpstreamStreamState::ResolvingNextEpoch { .. }
+            | ConsumeUpstreamStreamState::CreatingChangeLogStream { .. }
+            | ConsumeUpstreamStreamState::CreatingSnapshotStream { .. } => {}
+            ConsumeUpstreamStreamState::StoppedOnRetentionMiss => {}
+            ConsumeUpstreamStreamState::Err => {
+                unreachable!("should not be accessed on Err")
+            }
+        }
+    }
+
     pub(super) fn consume_builder(&mut self) -> Option<StreamChunk> {
         match &mut self.state {
             ConsumeUpstreamStreamState::ConsumingSnapshotStream { stream, .. } => {
@@ -266,13 +286,16 @@ impl<T: UpstreamTable> Stream for ConsumeUpstreamStream<'_, T> {
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let result: Result<!, StreamExecutorError> = try {
             loop {
+                let rate_limit = self.rate_limit;
+                let chunk_size = self.chunk_size;
                 match &mut self.state {
                     ConsumeUpstreamStreamState::CreatingSnapshotStream {
                         future,
                         snapshot_epoch,
                         pre_finished_vnodes,
                     } => {
-                        let stream = ready!(future.as_mut().poll(cx))?;
+                        let mut stream = ready!(future.as_mut().poll(cx))?;
+                        stream.update_rate_limiter(rate_limit, chunk_size);
                         let snapshot_epoch = *snapshot_epoch;
                         let pre_finished_vnodes = take(pre_finished_vnodes);
                         self.state = ConsumeUpstreamStreamState::ConsumingSnapshotStream {
@@ -314,7 +337,8 @@ impl<T: UpstreamTable> Stream for ConsumeUpstreamStream<'_, T> {
                         pre_finished_vnodes,
                         ..
                     } => {
-                        let stream = ready!(future.as_mut().poll(cx))?;
+                        let mut stream = ready!(future.as_mut().poll(cx))?;
+                        stream.update_rate_limiter(rate_limit, chunk_size);
                         let epoch = *epoch;
                         let pre_finished_vnodes = take(pre_finished_vnodes);
                         self.state = ConsumeUpstreamStreamState::ConsumingChangeLogStream {

@@ -30,11 +30,10 @@ use risingwave_pb::common::WorkerNode;
 use risingwave_pb::hummock::HummockVersionStats;
 use risingwave_pb::source::{ConnectorSplit, ConnectorSplits};
 use risingwave_pb::stream_plan::barrier_mutation::{Mutation, PbMutation};
-use risingwave_pb::stream_plan::throttle_mutation::ThrottleConfig;
 use risingwave_pb::stream_plan::update_mutation::PbDispatcherUpdate;
 use risingwave_pb::stream_plan::{
     AddMutation, PbStartFragmentBackfillMutation, PbSubscriptionUpstreamInfo, PbUpdateMutation,
-    PbUpstreamSinkInfo, ThrottleMutation,
+    PbUpstreamSinkInfo,
 };
 use tracing::warn;
 
@@ -45,6 +44,7 @@ use crate::barrier::checkpoint::{
 };
 use crate::barrier::command::{
     CreateStreamingJobCommandInfo, PostCollectCommand, ReplaceSinkDrainInfo, ReschedulePlan,
+    ThrottleConfigMap,
 };
 use crate::barrier::context::CreateSnapshotBackfillJobCommandInfo;
 use crate::barrier::edge_builder::{EdgeBuilderFragmentInfo, FragmentEdgeBuilder};
@@ -52,7 +52,7 @@ use crate::barrier::info::{
     BarrierInfo, CreateStreamingJobStatus, InflightDatabaseInfo, InflightStreamingJobInfo,
     SubscriberType,
 };
-use crate::barrier::notifier::Notifier;
+use crate::barrier::notifier::NotifierStarter;
 use crate::barrier::partial_graph::{PartialGraphBarrierInfo, PartialGraphManager};
 use crate::barrier::rpc::to_partial_graph_id;
 use crate::barrier::{BarrierKind, Command, CreateStreamingJobType, TracedEpoch};
@@ -409,7 +409,7 @@ impl DatabaseCheckpointControl {
     pub(super) fn apply_command(
         &mut self,
         command: Option<Command>,
-        notifiers: &mut Vec<Notifier>,
+        notifier: &mut Option<NotifierStarter>,
         barrier_info: BarrierInfo,
         partial_graph_manager: &mut PartialGraphManager,
         hummock_version_stats: &HummockVersionStats,
@@ -474,11 +474,8 @@ impl DatabaseCheckpointControl {
             Ok(resolved)
         }
 
-        // Throttle data for creating jobs (set only in the Throttle arm)
-        let mut throttle_for_creating_jobs: Option<(
-            HashSet<JobId>,
-            HashMap<FragmentId, ThrottleConfig>,
-        )> = None;
+        let mut notify_database_graph = command.is_some();
+        let mut throttle_config: Option<ThrottleConfigMap> = None;
 
         // Each variant handles its own pre-apply, edge building, mutation generation,
         // collect base info, and post-apply. The match produces values consumed by the
@@ -500,6 +497,7 @@ impl DatabaseCheckpointControl {
                     },
                 cross_db_snapshot_backfill_info,
             }) => {
+                notify_database_graph = false;
                 let ensembles = resolve_no_shuffle_ensembles(
                     &info.stream_job_fragments,
                     &info.upstream_fragment_downstreams,
@@ -586,6 +584,7 @@ impl DatabaseCheckpointControl {
                         panic!("duplicated creating snapshot backfill job {job_id}");
                     };
 
+                    let term_id = self.term_id.as_str();
                     let job = CreatingStreamingJobControl::new(
                         entry,
                         CreateSnapshotBackfillJobCommandInfo {
@@ -595,11 +594,12 @@ impl DatabaseCheckpointControl {
                             resolved_split_assignment: resolved_split_assignment.clone(),
                             refresh_interval_sec: None,
                         },
-                        take(notifiers),
+                        notifier.as_mut(),
                         snapshot_backfill_upstream_tables,
                         snapshot_epoch,
                         since_timestamp_upstream_log_epochs,
                         hummock_version_stats,
+                        term_id,
                         partial_graph_manager,
                         &mut edges,
                         &resolved_split_assignment,
@@ -655,6 +655,7 @@ impl DatabaseCheckpointControl {
                 job_type: CreateStreamingJobType::BatchRefresh(mut batch_refresh_info),
                 cross_db_snapshot_backfill_info,
             }) => {
+                notify_database_graph = false;
                 {
                     if self.state.is_paused() {
                         bail!("cannot create batch refresh job while database barrier is paused");
@@ -768,10 +769,11 @@ impl DatabaseCheckpointControl {
                             resolved_split_assignment: Default::default(),
                             refresh_interval_sec: Some(refresh_interval_sec),
                         },
-                        take(notifiers),
+                        notifier.as_mut(),
                         snapshot_backfill_upstream_tables,
                         snapshot_epoch,
                         hummock_version_stats,
+                        self.term_id(),
                         partial_graph_manager,
                         &logical,
                         worker_nodes,
@@ -1011,13 +1013,10 @@ impl DatabaseCheckpointControl {
                 )
             }
 
-            Some(Command::Throttle { jobs, config }) => {
-                let mutation = Some(Command::throttle_to_mutation(&config));
-                for (fragment_id, throttle_config) in &config {
-                    self.database_info
-                        .pre_apply_throttle(*fragment_id, throttle_config);
-                }
-                throttle_for_creating_jobs = Some((jobs, config));
+            Some(Command::Throttle { mut config }) => {
+                let mutation = self.database_info.pre_apply_throttle(&mut config);
+                notify_database_graph = mutation.is_some();
+                throttle_config = Some(config);
                 self.apply_simple_command(mutation, "Throttle")
             }
 
@@ -1499,8 +1498,18 @@ impl DatabaseCheckpointControl {
                     for (&job_id, job) in &mut self.independent_checkpoint_job_controls {
                         if let IndependentCheckpointJobControl::CreatingStreamingJob(creating_job) =
                             job
-                            && creating_job.should_merge_to_upstream()
+                            && creating_job.should_merge_to_upstream(partial_graph_manager)
                         {
+                            // The independent actors will stop on this barrier. Apply throttle to
+                            // the in-memory plan used to create the database-graph actors, and let
+                            // the database barrier own the collection notification.
+                            if throttle_config
+                                .as_mut()
+                                .and_then(|config| creating_job.pre_apply_throttle(config))
+                                .is_some()
+                            {
+                                notify_database_graph = true;
+                            }
                             let info = creating_job
                                 .start_consume_upstream(partial_graph_manager, &barrier_info)?;
                             finished_snapshot_backfill_job_info
@@ -1731,48 +1740,44 @@ impl DatabaseCheckpointControl {
         for (job_id, job) in &mut self.independent_checkpoint_job_controls {
             match job {
                 IndependentCheckpointJobControl::CreatingStreamingJob(creating_job) => {
-                    if !finished_snapshot_backfill_jobs.contains(job_id) {
-                        let throttle_mutation = if let Some((ref jobs, ref config)) =
-                            throttle_for_creating_jobs
-                            && jobs.contains(job_id)
-                        {
-                            assert_eq!(
-                                jobs.len(),
-                                1,
-                                "should not alter rate limit of snapshot backfill job with other jobs"
-                            );
-                            Some((
-                                Mutation::Throttle(ThrottleMutation {
-                                    fragment_throttle: config
-                                        .iter()
-                                        .map(|(fragment_id, config)| (*fragment_id, *config))
-                                        .collect(),
-                                }),
-                                take(notifiers),
-                            ))
-                        } else {
-                            None
-                        };
-                        creating_job.on_new_upstream_barrier(
-                            partial_graph_manager,
-                            &barrier_info,
-                            throttle_mutation,
-                        )?;
+                    if finished_snapshot_backfill_jobs.contains(job_id) {
+                        continue;
                     }
+                    let throttle_mutation = throttle_config.as_mut().and_then(|config| {
+                        creating_job
+                            .pre_apply_throttle(config)
+                            .map(|mutation| (mutation, notifier.as_mut()))
+                    });
+                    creating_job.on_new_upstream_barrier(
+                        partial_graph_manager,
+                        &barrier_info,
+                        throttle_mutation,
+                    )?;
                 }
                 IndependentCheckpointJobControl::BatchRefresh(batch_refresh_job) => {
+                    let throttle_mutation = throttle_config.as_mut().and_then(|config| {
+                        batch_refresh_job
+                            .pre_apply_throttle(config)
+                            .map(|mutation| (mutation, notifier.as_mut()))
+                    });
                     batch_refresh_job.on_new_upstream_barrier(
                         partial_graph_manager,
                         &barrier_info,
-                        None, // no throttle mutation for batch refresh jobs
+                        throttle_mutation,
                     )?;
                 }
             }
         }
 
+        let database_notifier = if notify_database_graph {
+            notifier.as_mut()
+        } else {
+            None
+        };
         partial_graph_manager.inject_barrier(
             to_partial_graph_id(self.database_id, None),
             mutation,
+            None,
             &node_actors,
             InflightFragmentInfo::existing_table_ids(self.database_info.fragment_infos()),
             InflightFragmentInfo::workers(self.database_info.fragment_infos()),
@@ -1780,10 +1785,16 @@ impl DatabaseCheckpointControl {
             PartialGraphBarrierInfo::new(
                 post_collect_command,
                 barrier_info,
-                take(notifiers),
+                database_notifier,
                 table_ids_to_commit,
             ),
         )?;
+
+        // Publish the collection receivers only after all parts of a scheduled command have been
+        // dispatched successfully. Periodic barriers do not have a notifier.
+        if let Some(notifier) = notifier.take() {
+            notifier.started();
+        }
 
         Ok(ApplyCommandInfo {
             jobs_to_wait: finished_snapshot_backfill_jobs,

@@ -119,7 +119,7 @@ impl EnumeratorMetrics {
         let mysql_cdc_binlog_file_seq_min = register_guarded_int_gauge_vec_with_registry!(
             "mysql_cdc_binlog_file_seq_min",
             "MySQL CDC upstream binlog file sequence number (minimum/oldest)",
-            &["hostname", "port"],
+            &["source_id", "hostname", "port"],
             registry,
         )
         .unwrap();
@@ -127,7 +127,7 @@ impl EnumeratorMetrics {
         let mysql_cdc_binlog_file_seq_max = register_guarded_int_gauge_vec_with_registry!(
             "mysql_cdc_binlog_file_seq_max",
             "MySQL CDC upstream binlog file sequence number (maximum/newest)",
-            &["hostname", "port"],
+            &["source_id", "hostname", "port"],
             registry,
         )
         .unwrap();

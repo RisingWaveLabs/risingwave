@@ -13,11 +13,13 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+use std::sync::LazyLock;
 
 use anyhow::anyhow;
 use axum::Json;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
+use risingwave_common::log::LogSuppressor;
 use risingwave_common::row::OwnedRow;
 use risingwave_common::secret::LocalSecretManager;
 use risingwave_common::types::JsonbVal;
@@ -26,6 +28,9 @@ use serde_json::json;
 use thiserror_ext::AsReport;
 
 use crate::expr::ExprImpl;
+
+static WEBHOOK_ERROR_LOG_SUPPRESSOR: LazyLock<LogSuppressor> =
+    LazyLock::new(LogSuppressor::default);
 
 #[derive(Debug)]
 pub struct WebhookError {
@@ -68,6 +73,15 @@ impl std::error::Error for WebhookError {}
 
 impl IntoResponse for WebhookError {
     fn into_response(self) -> axum::response::Response {
+        if let Ok(suppressed_count) = WEBHOOK_ERROR_LOG_SUPPRESSOR.check() {
+            tracing::error!(
+                error = %self.err.as_report(),
+                status = self.code.as_u16(),
+                suppressed_count,
+                "webhook request failed",
+            );
+        }
+
         let mut resp = Json(json!({
             "error": format!("{}", self.err.as_report()),
         }))
@@ -136,10 +150,7 @@ pub(crate) async fn verify_signature(
     let result = signature_expr_impl
         .eval_row(&row)
         .await
-        .map_err(|e| {
-            tracing::error!(error = %e.as_report(), "Fail to validate for webhook events.");
-            err(e, StatusCode::INTERNAL_SERVER_ERROR)
-        })?
+        .map_err(|e| err(e, StatusCode::INTERNAL_SERVER_ERROR))?
         .ok_or_else(|| {
             err(
                 anyhow!("`SECURE_COMPARE()` failed"),
@@ -151,9 +162,26 @@ pub(crate) async fn verify_signature(
 
 #[cfg(test)]
 mod tests {
+    use axum::body::to_bytes;
     use axum::http::header::HeaderName;
 
     use super::*;
+
+    #[tokio::test]
+    async fn test_webhook_error_response() {
+        let response = err(
+            anyhow!("failed to decode webhook payload"),
+            StatusCode::UNPROCESSABLE_ENTITY,
+        )
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+            json!({"error": "failed to decode webhook payload"}),
+        );
+    }
 
     #[test]
     fn test_header_map_to_json_preserves_header_names() {

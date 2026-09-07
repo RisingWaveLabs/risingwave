@@ -79,8 +79,8 @@ pub async fn handle_refresh_schema(
                 // Finding the actual columns to drop requires generating `PbSource` from the sql definition
                 // and fetching schema from schema registry, which will cause a lot of unnecessary refactor.
                 // Here we match the error message to yield when failing to bind generated column exprs.
-                let re =
-                    Regex::new(r#"fail to bind expression in generated column "(.*?)""#).unwrap();
+                let re = Regex::new(r#"failed to bind the expression in generated column "(.*?)""#)
+                    .unwrap();
                 let captures = re.captures(&report).map_err(anyhow::Error::from)?;
                 if let Some(gen_col_name) = captures.and_then(|captures| captures.get(1)) {
                     Err(anyhow!(e).context(format!("failed to refresh schema because some of the columns to drop are referenced by a generated column \"{}\"",

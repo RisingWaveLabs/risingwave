@@ -20,7 +20,7 @@ use anyhow::anyhow;
 use futures::StreamExt;
 use risingwave_common::catalog::{DatabaseId, TableId};
 use risingwave_common::hash::VirtualNode;
-use risingwave_common::id::{JobId, SinkId};
+use risingwave_common::id::{JobId, PartialGraphId, SinkId};
 use risingwave_common::util::epoch::test_epoch;
 use risingwave_meta_model::fragment::DistributionType;
 use risingwave_meta_model::{
@@ -31,7 +31,7 @@ use risingwave_pb::catalog::Database;
 use risingwave_pb::common::{HostAddress, PbWorkerType, WorkerNode, worker_node};
 use risingwave_pb::hummock::HummockVersionStats;
 use risingwave_pb::stream_plan::PbStreamNode;
-use risingwave_pb::stream_service::streaming_control_stream_request::{PbInitRequest, Request};
+use risingwave_pb::stream_service::streaming_control_stream_request::Request;
 use risingwave_pb::stream_service::streaming_control_stream_response::Response;
 use risingwave_pb::stream_service::{
     BarrierCompleteResponse, StreamingControlStreamRequest, StreamingControlStreamResponse,
@@ -115,11 +115,7 @@ impl GlobalBarrierWorkerContext for MockBarrierWorkerContext {
         unreachable!()
     }
 
-    async fn new_control_stream(
-        &self,
-        node: &WorkerNode,
-        _init_request: &PbInitRequest,
-    ) -> MetaResult<StreamingControlHandle> {
+    async fn new_control_stream(&self, node: &WorkerNode) -> MetaResult<StreamingControlHandle> {
         let (tx, rx) = oneshot::channel();
         self.0
             .send(ContextRequest::NewControlStream(node.clone(), tx))
@@ -192,6 +188,13 @@ impl GlobalBarrierWorkerContext for MockBarrierWorkerContext {
         &self,
         _sink_ids: Vec<SinkId>,
     ) -> MetaResult<()> {
+        unimplemented!()
+    }
+
+    fn advance_iceberg_pk_index_sink_committed_epochs(
+        &self,
+        _epochs: impl IntoIterator<Item = (PartialGraphId, u64)>,
+    ) {
         unimplemented!()
     }
 }
@@ -354,7 +357,7 @@ async fn test_barrier_manager_worker_crash_no_early_commit() {
         ]),
         state_table_log_epochs: HashMap::new(),
         mv_depended_subscriptions: HashMap::new(),
-        background_jobs: HashSet::new(),
+        creating_jobs: HashSet::new(),
         hummock_version_stats: HummockVersionStats::default(),
         database_infos: vec![Database {
             id: database_id,

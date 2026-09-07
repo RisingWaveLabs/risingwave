@@ -65,10 +65,16 @@ pub struct MergeIterator<I: HummockIterator> {
 
     /// The heap for merge sort.
     heap: BinaryHeap<Node<I>>,
+
+    /// Statistics collected from iterators discarded after an error.
+    retired_stats: Option<Box<StoreLocalStatistic>>,
 }
 
 impl<I: HummockIterator> MergeIterator<I> {
     fn collect_local_statistic_impl(&self, stats: &mut StoreLocalStatistic) {
+        if let Some(retired_stats) = &self.retired_stats {
+            stats.add(retired_stats);
+        }
         for node in &self.heap {
             node.iter.collect_local_statistic(stats);
         }
@@ -91,6 +97,7 @@ impl<I: HummockIterator> MergeIterator<I> {
         Self {
             unused_iters: iterators.into_iter().map(|iter| Node { iter }).collect(),
             heap: BinaryHeap::new(),
+            retired_stats: None,
         }
     }
 }
@@ -202,9 +209,16 @@ where
             Ok(_) => {}
             Err(e) => {
                 // If the iterator returns error, we should clear the heap, so that this
-                // iterator becomes invalid.
-                node.pop();
-                self.heap.clear();
+                // iterator becomes invalid. Collect their work before dropping them, but do not
+                // retain the failed/current heap iterators for a later seek or rewind.
+                let node = node.pop();
+                let retired_stats = self
+                    .retired_stats
+                    .get_or_insert_with(|| Box::new(StoreLocalStatistic::default()));
+                node.iter.collect_local_statistic(retired_stats);
+                for node in self.heap.drain() {
+                    node.iter.collect_local_statistic(retired_stats);
+                }
                 return Err(e);
             }
         }

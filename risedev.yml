@@ -348,6 +348,25 @@ profile:
       - use: compute-node
       - use: frontend
 
+  ci-iceberg-compaction-round:
+    config-path: src/config/ci-iceberg-compaction-round.toml
+    steps:
+      - use: minio
+      - use: meta-node
+        id: meta-node-iceberg-round
+      - use: compute-node
+        id: compute-node-iceberg-round
+      - use: frontend
+        id: frontend-iceberg-round
+      - use: compactor
+        id: compactor-hummock-round
+      - use: compactor
+        id: compactor-iceberg-round
+        compactor-mode: "dedicated-iceberg"
+        compaction-worker-threads-number: 1
+        port: 6661
+        exporter-port: 1261
+
   ci-iceberg-test:
     config-path: src/config/ci.toml
     steps:
@@ -1280,6 +1299,21 @@ profile:
       - use: compactor
       - use: mongodb
 
+  local-redis-sink-test:
+    config-path: src/config/ci.toml
+    steps:
+      - use: minio
+        id: minio-local-redis-sink-test
+      - use: sqlite
+        id: sqlite-local-redis-sink-test
+      - use: meta-node
+        meta-backend: sqlite
+      - use: compute-node
+        enable-tiered-cache: true
+      - use: frontend
+      - use: compactor
+      - use: redis
+
   local-nats-test:
     config-path: src/config/ci-recovery.toml
     steps:
@@ -1801,6 +1835,13 @@ template:
 
     # address of redis
     address: "127.0.0.1"
+
+    user-managed: false
+
+    # Only effective when NOT user managed
+    image: "redis:7.2.14"
+
+    persist-data: false
 
   # MySQL service backed by docker.
   mysql:

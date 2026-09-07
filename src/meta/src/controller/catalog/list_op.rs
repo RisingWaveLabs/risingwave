@@ -96,34 +96,12 @@ impl CatalogController {
             .collect())
     }
 
-    pub async fn list_background_creating_jobs(
-        &self,
-        include_initial: bool,
-        database_id: Option<DatabaseId>,
-    ) -> MetaResult<HashSet<JobId>> {
-        Ok(self
-            .list_creating_jobs(include_initial, false, database_id)
-            .await?
-            .into_iter()
-            .map(|(job_id, _, _, create_type, _)| {
-                assert_eq!(create_type, CreateType::Background);
-                job_id
-            })
-            .collect())
-    }
-
     pub async fn list_creating_jobs(
         &self,
         include_initial: bool,
-        include_foreground: bool,
         database_id: Option<DatabaseId>,
     ) -> MetaResult<Vec<(JobId, String, DateTime, CreateType, bool)>> {
         let inner = self.inner.read().await;
-        let create_type_cond = if include_foreground {
-            SimpleExpr::from(true)
-        } else {
-            streaming_job::Column::CreateType.eq(CreateType::Background)
-        };
         let status_cond = if include_initial {
             streaming_job::Column::JobStatus.is_in([JobStatus::Initial, JobStatus::Creating])
         } else {
@@ -132,7 +110,7 @@ impl CatalogController {
         let database_cond = database_id
             .map(|database_id| object::Column::DatabaseId.eq(database_id))
             .unwrap_or_else(|| SimpleExpr::from(true));
-        let filter_cond = create_type_cond.and(status_cond).and(database_cond);
+        let filter_cond = status_cond.and(database_cond);
         let object_columns = [object::Column::InitializedAt];
         let streaming_job_columns = [
             streaming_job::Column::CreateType,

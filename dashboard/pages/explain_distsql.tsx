@@ -3,7 +3,6 @@ import { Fragment, SetStateAction, useState } from "react"
 import styled from "styled-components"
 import GraphvizComponent from "../components/GraphvizComponent"
 import Title from "../components/Title"
-import NodeType from "./node"
 
 const ContainerDiv = styled(Box)`
   font-family: sans-serif;
@@ -14,13 +13,6 @@ const DemoArea = styled(Box)`
   width: 100%;
   height: 80vh;
 `
-
-const position = {
-  x: 200,
-  y: 100,
-}
-
-const nodeTypes = { node: NodeType }
 
 export default function Explain() {
   const [input, setInput] = useState("")

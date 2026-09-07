@@ -87,15 +87,13 @@ pub struct MetaMetrics {
     pub barrier_latency: LabelGuardedHistogramVec,
     /// The duration from barrier complete to commit
     pub barrier_wait_commit_latency: Histogram,
-    /// Latency between each barrier send
-    pub barrier_send_latency: LabelGuardedHistogramVec,
     /// The number of all barriers. It is the sum of barriers that are in-flight or completed but
     /// waiting for other barriers
     pub all_barrier_nums: LabelGuardedIntGaugeVec,
     /// The number of in-flight barriers
     pub in_flight_barrier_nums: LabelGuardedIntGaugeVec,
     /// The timestamp (UNIX epoch seconds) of the last committed barrier's epoch time.
-    pub last_committed_barrier_time: IntGaugeVec,
+    pub last_committed_barrier_time: LabelGuardedIntGaugeVec,
     /// The barrier interval of each database
     pub barrier_interval_by_database: GaugeVec,
 
@@ -170,6 +168,10 @@ pub struct MetaMetrics {
     pub table_change_log_object_size: IntGaugeVec,
     /// Min epoch currently retained in table change log.
     pub table_change_log_min_epoch: IntGaugeVec,
+    /// Latency of serving table change log requests.
+    pub table_change_log_get_latency: Histogram,
+    /// Latency of truncating persisted table change logs.
+    pub table_change_log_truncate_latency: Histogram,
     /// The number of hummock version delta log.
     pub delta_log_count: IntGauge,
     /// latency of version checkpoint
@@ -208,6 +210,10 @@ pub struct MetaMetrics {
     // ********************************** Source ************************************
     /// supervisor for which source is still up.
     pub source_is_up: LabelGuardedIntGaugeVec,
+    /// Duration of a source worker `tick` execution (`list_splits` + `on_tick`), in seconds.
+    pub source_worker_tick_duration_seconds: LabelGuardedHistogramVec,
+    /// Number of source enumerator `on_tick` monitor round-trip failures.
+    pub source_enumerator_monitor_error_count: LabelGuardedIntCounterVec,
     pub source_enumerator_metrics: Arc<SourceEnumeratorMetrics>,
 
     // ********************************** Fragment ************************************
@@ -259,6 +265,16 @@ pub struct MetaMetrics {
 pub static GLOBAL_META_METRICS: LazyLock<MetaMetrics> =
     LazyLock::new(|| MetaMetrics::new(&GLOBAL_METRICS_REGISTRY));
 
+fn latency_buckets(max: f64, count: usize) -> Vec<f64> {
+    const MIN: f64 = 0.1;
+
+    assert!(count > 1);
+    let factor = (max / MIN).powf(1.0 / (count - 1) as f64);
+    let mut buckets = exponential_buckets(MIN, factor, count).unwrap();
+    *buckets.last_mut().unwrap() = max;
+    buckets
+}
+
 impl MetaMetrics {
     fn new(registry: &Registry) -> Self {
         let opts = histogram_opts!(
@@ -272,7 +288,7 @@ impl MetaMetrics {
         let opts = histogram_opts!(
             "meta_barrier_duration_seconds",
             "barrier latency",
-            exponential_buckets(0.1, 1.5, 20).unwrap() // max 221s
+            latency_buckets(600.0, 20)
         );
         let barrier_latency =
             register_guarded_histogram_vec_with_registry!(opts, &["database_id"], registry)
@@ -281,19 +297,11 @@ impl MetaMetrics {
         let opts = histogram_opts!(
             "meta_barrier_wait_commit_duration_seconds",
             "barrier_wait_commit_latency",
-            exponential_buckets(0.1, 1.5, 20).unwrap() // max 221s
+            latency_buckets(10.0, 10)
         );
         let barrier_wait_commit_latency =
             register_histogram_with_registry!(opts, registry).unwrap();
 
-        let opts = histogram_opts!(
-            "meta_barrier_send_duration_seconds",
-            "barrier send latency",
-            exponential_buckets(0.1, 1.5, 19).unwrap() // max 148s
-        );
-        let barrier_send_latency =
-            register_guarded_histogram_vec_with_registry!(opts, &["database_id"], registry)
-                .unwrap();
         let barrier_interval_by_database = register_gauge_vec_with_registry!(
             "meta_barrier_interval_by_database",
             "barrier interval of each database",
@@ -316,7 +324,7 @@ impl MetaMetrics {
             registry
         )
         .unwrap();
-        let last_committed_barrier_time = register_int_gauge_vec_with_registry!(
+        let last_committed_barrier_time = register_guarded_int_gauge_vec_with_registry!(
             "last_committed_barrier_time",
             "The timestamp (UNIX epoch seconds) of the last committed barrier's epoch time.",
             &["database_id"],
@@ -328,7 +336,7 @@ impl MetaMetrics {
         let opts = histogram_opts!(
             "meta_snapshot_backfill_barrier_duration_seconds",
             "snapshot backfill barrier latency",
-            exponential_buckets(0.1, 1.5, 20).unwrap() // max 221s
+            latency_buckets(600.0, 20)
         );
         let snapshot_backfill_barrier_latency = register_guarded_histogram_vec_with_registry!(
             opts,
@@ -562,6 +570,21 @@ impl MetaMetrics {
         )
         .unwrap();
 
+        let opts = histogram_opts!(
+            "storage_table_change_log_get_latency",
+            "latency of serving table change log requests",
+            exponential_buckets(0.001, 5.0, 7).unwrap()
+        );
+        let table_change_log_get_latency =
+            register_histogram_with_registry!(opts, registry).unwrap();
+
+        let table_change_log_truncate_latency = register_histogram_with_registry!(
+            "storage_table_change_log_truncate_latency",
+            "latency of truncating persisted table change logs",
+            registry
+        )
+        .unwrap();
+
         let time_travel_object_count = register_int_gauge_with_registry!(
             "storage_time_travel_object_count",
             "total number of objects that is referenced by time travel.",
@@ -712,6 +735,25 @@ impl MetaMetrics {
             registry
         )
         .unwrap();
+        let opts = histogram_opts!(
+            "source_worker_tick_duration_seconds",
+            "Duration of a source worker tick (list_splits + on_tick) in seconds",
+            exponential_buckets(0.1, 1.5, 20).unwrap() // max ~221s
+        );
+        let source_worker_tick_duration_seconds = register_guarded_histogram_vec_with_registry!(
+            opts,
+            &["source_id", "source_name"],
+            registry
+        )
+        .unwrap();
+        let source_enumerator_monitor_error_count =
+            register_guarded_int_counter_vec_with_registry!(
+                "source_enumerator_monitor_error_count",
+                "Number of source enumerator on_tick monitor round-trip failures",
+                &["source_id", "source_name"],
+                registry
+            )
+            .unwrap();
         let source_enumerator_metrics = Arc::new(SourceEnumeratorMetrics::default());
 
         let actor_info = register_int_gauge_vec_with_registry!(
@@ -965,7 +1007,6 @@ impl MetaMetrics {
             grpc_latency,
             barrier_latency,
             barrier_wait_commit_latency,
-            barrier_send_latency,
             all_barrier_nums,
             in_flight_barrier_nums,
             last_committed_barrier_time,
@@ -998,6 +1039,8 @@ impl MetaMetrics {
             table_change_log_object_count,
             table_change_log_object_size,
             table_change_log_min_epoch,
+            table_change_log_get_latency,
+            table_change_log_truncate_latency,
             delta_log_count,
             version_checkpoint_latency,
             current_version_id,
@@ -1018,6 +1061,8 @@ impl MetaMetrics {
             level_compact_task_cnt,
             object_store_metric,
             source_is_up,
+            source_worker_tick_duration_seconds,
+            source_enumerator_monitor_error_count,
             source_enumerator_metrics,
             actor_info,
             table_info,
@@ -1107,7 +1152,7 @@ pub fn start_worker_info_monitor(
             let node_map = match metadata_manager.count_worker_node().await {
                 Ok(node_map) => node_map,
                 Err(err) => {
-                    tracing::warn!(error = %err.as_report(), "fail to count worker node");
+                    tracing::warn!(error = %err.as_report(), "failed to count worker nodes");
                     continue;
                 }
             };
@@ -1153,35 +1198,35 @@ pub async fn refresh_fragment_info_metrics(
     {
         Ok(worker_nodes) => worker_nodes,
         Err(err) => {
-            tracing::warn!(error=%err.as_report(), "fail to list worker node");
+            tracing::warn!(error=%err.as_report(), "failed to list worker nodes");
             return;
         }
     };
     let actor_locations = match catalog_controller.list_actor_locations() {
         Ok(actor_locations) => actor_locations,
         Err(err) => {
-            tracing::warn!(error=%err.as_report(), "fail to get actor locations");
+            tracing::warn!(error=%err.as_report(), "failed to get actor locations");
             return;
         }
     };
     let sink_actor_mapping = match catalog_controller.list_sink_actor_mapping().await {
         Ok(sink_actor_mapping) => sink_actor_mapping,
         Err(err) => {
-            tracing::warn!(error=%err.as_report(), "fail to get sink actor mapping");
+            tracing::warn!(error=%err.as_report(), "failed to get sink actor mappings");
             return;
         }
     };
     let fragment_state_tables = match catalog_controller.list_fragment_state_tables().await {
         Ok(fragment_state_tables) => fragment_state_tables,
         Err(err) => {
-            tracing::warn!(error=%err.as_report(), "fail to get fragment state tables");
+            tracing::warn!(error=%err.as_report(), "failed to get fragment state tables");
             return;
         }
     };
     let table_name_and_type_mapping = match catalog_controller.get_table_name_type_mapping().await {
         Ok(mapping) => mapping,
         Err(err) => {
-            tracing::warn!(error=%err.as_report(), "fail to get table name mapping");
+            tracing::warn!(error=%err.as_report(), "failed to get the table name mapping");
             return;
         }
     };
@@ -1267,7 +1312,7 @@ pub async fn refresh_relation_info_metrics(
     let table_objects = match catalog_controller.list_table_objects().await {
         Ok(table_objects) => table_objects,
         Err(err) => {
-            tracing::warn!(error=%err.as_report(), "fail to get table objects");
+            tracing::warn!(error=%err.as_report(), "failed to get table objects");
             return;
         }
     };
@@ -1275,7 +1320,7 @@ pub async fn refresh_relation_info_metrics(
     let source_objects = match catalog_controller.list_source_objects().await {
         Ok(source_objects) => source_objects,
         Err(err) => {
-            tracing::warn!(error=%err.as_report(), "fail to get source objects");
+            tracing::warn!(error=%err.as_report(), "failed to get source objects");
             return;
         }
     };
@@ -1283,7 +1328,7 @@ pub async fn refresh_relation_info_metrics(
     let sink_objects = match catalog_controller.list_sink_objects().await {
         Ok(sink_objects) => sink_objects,
         Err(err) => {
-            tracing::warn!(error=%err.as_report(), "fail to get sink objects");
+            tracing::warn!(error=%err.as_report(), "failed to get sink objects");
             return;
         }
     };
@@ -1372,7 +1417,7 @@ pub async fn refresh_database_info_metrics(
     let databases = match catalog_controller.list_databases().await {
         Ok(databases) => databases,
         Err(err) => {
-            tracing::warn!(error=%err.as_report(), "fail to get databases");
+            tracing::warn!(error=%err.as_report(), "failed to get databases");
             return;
         }
     };
@@ -1455,7 +1500,7 @@ pub async fn refresh_backfill_progress_metrics(
     let fragment_descs = match catalog_controller.list_fragment_descs_with_node(true).await {
         Ok(fragment_descs) => fragment_descs,
         Err(err) => {
-            tracing::warn!(error=%err.as_report(), "fail to list creating fragment descs");
+            tracing::warn!(error=%err.as_report(), "failed to list fragment descriptions for creating jobs");
             return;
         }
     };
@@ -1469,7 +1514,7 @@ pub async fn refresh_backfill_progress_metrics(
     let fragment_progresses = match barrier_manager.get_fragment_backfill_progress().await {
         Ok(progress) => progress,
         Err(err) => {
-            tracing::warn!(error=%err.as_report(), "fail to get fragment backfill progress");
+            tracing::warn!(error=%err.as_report(), "failed to get fragment backfill progress");
             return;
         }
     };
@@ -1499,7 +1544,7 @@ pub async fn refresh_backfill_progress_metrics(
     {
         Ok(relation_objects) => relation_objects,
         Err(err) => {
-            tracing::warn!(error=%err.as_report(), "fail to get relation objects");
+            tracing::warn!(error=%err.as_report(), "failed to get relation objects");
             return;
         }
     };

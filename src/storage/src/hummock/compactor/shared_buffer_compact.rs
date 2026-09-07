@@ -166,7 +166,7 @@ async fn compact_shared_buffer<const IS_NEW_VALUE: bool>(
         let ret = existing_table_ids.contains(&imm.table_id);
         if !ret {
             error!(
-                "can not find table {:?}, it may be removed by meta-service",
+                "cannot find table {:?}; it may have been removed by the meta service",
                 imm.table_id
             );
         }
@@ -303,15 +303,12 @@ async fn compact_shared_buffer<const IS_NEW_VALUE: bool>(
                 None,
             );
             compaction_executor.spawn(async move {
-                match check_flush_result(
-                    left_iter,
-                    sst_infos,
-                    context,
-                )
-                .await
-                {
+                match check_flush_result(left_iter, sst_infos, context).await {
                     Err(e) => {
-                        tracing::warn!(error = %e.as_report(), "Failed check flush result of memtable");
+                        tracing::warn!(
+                            error = %e.as_report(),
+                            "failed to check the memtable flush result",
+                        );
                     }
                     Ok(true) => (),
                     Ok(false) => {

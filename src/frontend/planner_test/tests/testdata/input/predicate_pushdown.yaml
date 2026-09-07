@@ -60,6 +60,19 @@
   expected_outputs:
   - logical_plan
   - optimized_logical_plan_for_batch
+- name: impure filter should not transpose grouped agg
+  sql: |
+    create table t(g int);
+    select *
+    from (
+      select g, count(*) as n
+      from t
+      group by g
+    ) grouped
+    where g = 1 and random() < 0.5;
+  expected_outputs:
+  - logical_plan
+  - optimized_logical_plan_for_batch
 - name: filter project set transpose
   sql: |
     create table t(v1 int, v2 int, v3 int, arr int[]);

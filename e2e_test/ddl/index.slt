@@ -150,3 +150,17 @@ select * from idx;
 
 statement ok
 drop table t;
+
+statement ok
+create materialized view issue_26286_mc as select 1 as id, 'a' as val, 'x' as tag;
+
+statement ok
+create index issue_26286_mc_idx on issue_26286_mc (id) include (val);
+
+query I
+select 1 from issue_26286_mc where id = 1 and tag = 'x';
+----
+1
+
+statement ok
+drop materialized view issue_26286_mc;

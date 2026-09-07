@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering::SeqCst;
 
-use await_tree::SpanExt;
+use await_tree::{InstrumentAwait, SpanExt};
 use bytes::Bytes;
 use futures::StreamExt;
 use futures::stream::FuturesUnordered;
@@ -171,7 +171,11 @@ where
             if let Some(progress) = &self.task_progress {
                 progress.inc_num_pending_write_io()
             }
-            let builder = self.builder_factory.open_builder().await?;
+            let builder = self
+                .builder_factory
+                .open_builder()
+                .instrument_await("multi_builder_open_builder_for_raw_block".verbose())
+                .await?;
             self.current_builder = Some(builder);
         }
 
@@ -212,19 +216,28 @@ where
         }
 
         if need_seal_current {
-            self.seal_current().await?;
+            self.seal_current()
+                .instrument_await("multi_builder_seal_current".verbose())
+                .await?;
         }
 
         if self.current_builder.is_none() {
             if let Some(progress) = &self.task_progress {
                 progress.inc_num_pending_write_io();
             }
-            let builder = self.builder_factory.open_builder().await?;
+            let builder = self
+                .builder_factory
+                .open_builder()
+                .instrument_await("multi_builder_open_builder".verbose())
+                .await?;
             self.current_builder = Some(builder);
         }
 
         let builder = self.current_builder.as_mut().unwrap();
-        builder.add(full_key, value).await
+        builder
+            .add(full_key, value)
+            .instrument_await("sstable_builder_add".verbose())
+            .await
     }
 
     pub fn check_switch_builder(&mut self, user_key: &UserKey<&[u8]>) -> bool {
@@ -303,9 +316,11 @@ where
     /// If there's no builder created, or current one is already sealed before, then this function
     /// will be no-op.
     pub async fn seal_current(&mut self) -> HummockResult<()> {
-        use await_tree::InstrumentAwait;
         if let Some(builder) = self.current_builder.take() {
-            let builder_output = builder.finish().await?;
+            let builder_output = builder
+                .finish()
+                .instrument_await("sstable_builder_finish".verbose())
+                .await?;
             {
                 // report
                 if let Some(progress) = &self.task_progress {
@@ -336,8 +351,11 @@ where
     /// Finalizes all the tables to be ids, blocks and metadata.
     pub async fn finish(mut self) -> HummockResult<Vec<LocalSstableInfo>> {
         use futures::future::try_join_all;
-        self.seal_current().await?;
+        self.seal_current()
+            .instrument_await("multi_builder_finish_seal_current".verbose())
+            .await?;
         try_join_all(self.concurrent_upload_join_handle)
+            .instrument_await("multi_builder_wait_all_uploads".verbose())
             .await
             .map_err(HummockError::sstable_upload_error)?
             .into_iter()
@@ -381,7 +399,11 @@ impl TableBuilderFactory for LocalTableBuilderFactory {
         &mut self,
     ) -> HummockResult<SstableBuilder<BatchUploadWriter, Xor16FilterBuilder>> {
         let id = self.next_id.fetch_add(1, SeqCst);
-        let tracker = self.limiter.require_memory(1).await;
+        let tracker = self
+            .limiter
+            .require_memory(1)
+            .instrument_await("local_builder_require_memory".verbose())
+            .await;
         let writer_options = SstableWriterOptions {
             capacity_hint: Some(self.options.capacity),
             tracker: Some(tracker),

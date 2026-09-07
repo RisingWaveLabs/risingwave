@@ -2,12 +2,11 @@ from ..common import *
 from . import section
 
 cross_db_last_consumed_min_epoch = (
-    f"max({metric('crossdb_last_consumed_min_epoch', table_id_filter_enabled=True)} != 0) by (table_id, actor_id, fragment_id)"
+    f"min({metric('crossdb_last_consumed_min_epoch', node_filter_enabled=False, table_id_filter_enabled=True)} != 0) by (table_id)"
 )
 cross_db_log_expiry_headroom = (
     f"({epoch_to_unix_millis(cross_db_last_consumed_min_epoch)} / 1000"
-    f" + on(table_id) group_left max({metric('streaming_table_change_log_retention_seconds', node_filter_enabled=False, table_id_filter_enabled=True)} != 0) by (table_id)"
-    f" - time())"
+    f" - (time() - max({metric('streaming_table_change_log_retention_seconds', node_filter_enabled=False, table_id_filter_enabled=True)}) by (table_id)))"
 )
 
 @section
@@ -89,7 +88,7 @@ def _(outer_panels: Panels):
                     [
                         panels.target(
                             cross_db_log_expiry_headroom,
-                            "table {{table_id}} actor {{actor_id}} fragment {{fragment_id}}",
+                            "table {{table_id}}",
                         ),
                     ],
                 ),

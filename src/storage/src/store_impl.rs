@@ -19,13 +19,14 @@ use std::time::Duration;
 
 use enum_as_inner::EnumAsInner;
 use foyer::{
-    BlockEngineBuilder, CacheBuilder, DeviceBuilder, FifoPicker, FsDeviceBuilder,
-    HybridCacheBuilder,
+    BlockEngineConfig, CacheBuilder, DeviceBuilder, FifoPicker, FsDeviceBuilder, HybridCacheBuilder,
 };
 use futures::FutureExt;
 use futures::future::BoxFuture;
 use mixtrics::registry::prometheus::PrometheusMetricsRegistry;
 use risingwave_common::catalog::TableId;
+use risingwave_common::config::Role;
+use risingwave_common::config::storage::FileCacheRuntimeConfig;
 use risingwave_common::license::Feature;
 use risingwave_common::monitor::GLOBAL_METRICS_REGISTRY;
 use risingwave_common_service::RpcNotificationClient;
@@ -52,6 +53,104 @@ use crate::monitor::{
     ObjectStoreMetrics,
 };
 use crate::opts::StorageOpts;
+
+fn build_file_cache_spawner(
+    name: &str,
+    config: &FileCacheRuntimeConfig,
+) -> StorageResult<foyer::Spawner> {
+    let config = match config {
+        FileCacheRuntimeConfig::Disabled => return Ok(foyer::Spawner::current()),
+        FileCacheRuntimeConfig::Unified(config) => config.clone(),
+        FileCacheRuntimeConfig::Separated { .. } => {
+            return Err(HummockError::other(format!(
+                "{name} runtime_config.Separated is unsupported with Foyer 0.22; use runtime_config.Unified instead"
+            ))
+            .into());
+        }
+    };
+
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    #[cfg(madsim)]
+    let _ = &config;
+    #[cfg(not(madsim))]
+    if config.worker_threads != 0 {
+        builder.worker_threads(config.worker_threads);
+    }
+    #[cfg(not(madsim))]
+    if config.max_blocking_threads != 0 {
+        builder.max_blocking_threads(config.max_blocking_threads);
+    }
+    builder.thread_name(format!("{name}-unified"));
+    let runtime = builder.enable_all().build().map_err(|error| {
+        HummockError::other(format!(
+            "failed to build {name} dedicated runtime: {}",
+            error.as_report()
+        ))
+    })?;
+    Ok(runtime.into())
+}
+
+#[cfg(test)]
+mod tests {
+    use risingwave_common::config::storage::FileCacheTokioRuntimeConfig;
+
+    use super::*;
+
+    #[test]
+    fn test_build_file_cache_spawner_rejects_separated_runtime() {
+        let runtime_options = FileCacheTokioRuntimeConfig {
+            worker_threads: 1,
+            max_blocking_threads: 1,
+        };
+        let error = build_file_cache_spawner(
+            "foyer.test",
+            &FileCacheRuntimeConfig::Separated {
+                read_runtime_options: runtime_options.clone(),
+                write_runtime_options: runtime_options,
+            },
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("foyer.test runtime_config.Separated"));
+        assert!(error.contains("use runtime_config.Unified instead"));
+    }
+
+    #[cfg(not(madsim))]
+    #[tokio::test]
+    async fn test_build_file_cache_spawner_runtime_modes() {
+        let current_runtime_id = tokio::runtime::Handle::current().id();
+
+        let disabled =
+            build_file_cache_spawner("foyer.test", &FileCacheRuntimeConfig::Disabled).unwrap();
+        let disabled_runtime_id = disabled
+            .spawn(async { tokio::runtime::Handle::current().id() })
+            .await
+            .unwrap();
+        assert_eq!(disabled_runtime_id, current_runtime_id);
+
+        let unified = build_file_cache_spawner(
+            "foyer.test",
+            &FileCacheRuntimeConfig::Unified(FileCacheTokioRuntimeConfig {
+                worker_threads: 1,
+                max_blocking_threads: 1,
+            }),
+        )
+        .unwrap();
+        let (unified_runtime_id, thread_name) = unified
+            .spawn(async {
+                (
+                    tokio::runtime::Handle::current().id(),
+                    std::thread::current().name().map(str::to_owned),
+                )
+            })
+            .await
+            .unwrap();
+
+        assert_ne!(unified_runtime_id, current_runtime_id);
+        assert_eq!(thread_name.as_deref(), Some("foyer.test-unified"));
+    }
+}
 
 static FOYER_METRICS_REGISTRY: LazyLock<Box<PrometheusMetricsRegistry>> = LazyLock::new(|| {
     Box::new(PrometheusMetricsRegistry::new(
@@ -684,6 +783,7 @@ impl StateStoreImpl {
     #[expect(clippy::borrowed_box)]
     pub async fn new(
         s: &str,
+        role: Role,
         opts: Arc<StorageOpts>,
         hummock_meta_client: Arc<MonitoredHummockMetaClient>,
         state_store_metrics: Arc<HummockStateStoreMetrics>,
@@ -718,12 +818,15 @@ impl StateStoreImpl {
                         .with_throttle(opts.meta_file_cache_throttle.clone())
                         .build()
                         .map_err(HummockError::foyer_error)?;
-                    let engine_builder = BlockEngineBuilder::new(device)
+                    let engine_builder = BlockEngineConfig::new(device)
                         .with_block_size(opts.meta_file_cache_file_capacity_mb * MB)
                         .with_indexer_shards(opts.meta_file_cache_indexer_shards)
                         .with_flushers(opts.meta_file_cache_flushers)
                         .with_reclaimers(opts.meta_file_cache_reclaimers)
-                        .with_buffer_pool_size(opts.meta_file_cache_flush_buffer_threshold_mb * MB) // 128 MiB
+                        .with_buffer_pool_size(opts.meta_file_cache_flush_buffer_threshold_mb * MB)
+                        .with_submit_queue_size_threshold(
+                            opts.meta_file_cache_submit_queue_size_threshold_mb * MB,
+                        )
                         .with_clean_block_threshold(
                             opts.meta_file_cache_reclaimers + opts.meta_file_cache_reclaimers / 2,
                         )
@@ -735,8 +838,11 @@ impl StateStoreImpl {
                     builder = builder
                         .with_engine_config(engine_builder)
                         .with_recover_mode(opts.meta_file_cache_recover_mode)
-                        .with_compression(opts.meta_file_cache_compression)
-                        .with_runtime_options(opts.meta_file_cache_runtime_config.clone());
+                        .with_compression(opts.meta_file_cache_compression);
+                    builder = builder.with_spawner(build_file_cache_spawner(
+                        "foyer.meta",
+                        &opts.meta_file_cache_runtime_config,
+                    )?);
                 }
             }
 
@@ -767,12 +873,15 @@ impl StateStoreImpl {
                         .with_throttle(opts.data_file_cache_throttle.clone())
                         .build()
                         .map_err(HummockError::foyer_error)?;
-                    let engine_builder = BlockEngineBuilder::new(device)
+                    let engine_builder = BlockEngineConfig::new(device)
                         .with_block_size(opts.data_file_cache_file_capacity_mb * MB)
                         .with_indexer_shards(opts.data_file_cache_indexer_shards)
                         .with_flushers(opts.data_file_cache_flushers)
                         .with_reclaimers(opts.data_file_cache_reclaimers)
-                        .with_buffer_pool_size(opts.data_file_cache_flush_buffer_threshold_mb * MB) // 128 MiB
+                        .with_buffer_pool_size(opts.data_file_cache_flush_buffer_threshold_mb * MB)
+                        .with_submit_queue_size_threshold(
+                            opts.data_file_cache_submit_queue_size_threshold_mb * MB,
+                        )
                         .with_clean_block_threshold(
                             opts.data_file_cache_reclaimers + opts.data_file_cache_reclaimers / 2,
                         )
@@ -784,8 +893,11 @@ impl StateStoreImpl {
                     builder = builder
                         .with_engine_config(engine_builder)
                         .with_recover_mode(opts.data_file_cache_recover_mode)
-                        .with_compression(opts.data_file_cache_compression)
-                        .with_runtime_options(opts.data_file_cache_runtime_config.clone());
+                        .with_compression(opts.data_file_cache_compression);
+                    builder = builder.with_spawner(build_file_cache_spawner(
+                        "foyer.data",
+                        &opts.data_file_cache_runtime_config,
+                    )?);
                 }
             }
 
@@ -862,6 +974,7 @@ impl StateStoreImpl {
                     )));
 
                 let inner = HummockStorage::new(
+                    role,
                     opts.clone(),
                     sstable_store,
                     hummock_meta_client.clone(),

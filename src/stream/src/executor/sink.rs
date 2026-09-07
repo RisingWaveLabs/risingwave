@@ -12,7 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::time::{Duration, Instant};
 use std::{assert_matches, mem};
 
 use anyhow::anyhow;
@@ -24,6 +25,8 @@ use risingwave_common::array::stream_chunk::StreamChunkMut;
 use risingwave_common::bitmap::Bitmap;
 use risingwave_common::catalog::{ColumnCatalog, Field};
 use risingwave_common::metrics::{GLOBAL_ERROR_METRICS, LabelGuardedIntGauge};
+use risingwave_common::row::RowExt;
+use risingwave_common::util::retry::exponential_backoff;
 use risingwave_common_estimate_size::EstimateSize;
 use risingwave_common_estimate_size::collections::EstimatedVec;
 use risingwave_common_rate_limit::RateLimit;
@@ -44,6 +47,7 @@ use thiserror_ext::AsReport;
 use tokio::select;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::sync::oneshot;
+use tokio_retry::strategy::jitter;
 
 use crate::common::change_buffer::{OutputKind, output_kind};
 use crate::common::compact_chunk::{
@@ -63,6 +67,12 @@ pub struct SinkExecutor<F: LogStoreFactory> {
     input_data_types: Vec<DataType>,
     non_append_only_behavior: Option<NonAppendOnlyBehavior>,
     rate_limit: Option<u32>,
+}
+
+const SINK_RETRY_BACKOFF_RESET_INTERVAL: Duration = Duration::from_secs(60);
+
+fn sink_retry_backoff() -> impl Iterator<Item = Duration> {
+    exponential_backoff(Duration::from_secs(1), 2, Duration::from_secs(30)).map(jitter)
 }
 
 // Drop all the DELETE messages in this chunk and convert UPDATE INSERT into INSERT.
@@ -89,6 +99,32 @@ fn force_delete_only(c: StreamChunk) -> StreamChunk {
         }
     }
     c.into()
+}
+
+// Drop the DELETE messages whose downstream key is inserted again in the same barrier, since such
+// a key is updated rather than deleted from the downstream's perspective.
+fn drop_deletes_of_reinserted_keys(
+    delete_chunks: Vec<StreamChunk>,
+    insert_chunks: &[StreamChunk],
+    downstream_pk: &[usize],
+) -> Vec<StreamChunk> {
+    let inserted_keys: HashSet<_> = insert_chunks
+        .iter()
+        .flat_map(|c| c.rows())
+        .map(|(_, row)| row.project(downstream_pk))
+        .collect();
+    delete_chunks
+        .into_iter()
+        .map(|c| {
+            let mut c: StreamChunkMut = c.into();
+            for (row, mut r) in c.to_rows_mut() {
+                if inserted_keys.contains(&row.project(downstream_pk)) {
+                    r.set_vis(false);
+                }
+            }
+            c.into()
+        })
+        .collect()
 }
 
 /// When the sink is non-append-only, i.e. upsert or retract, we need to do some extra work for
@@ -492,9 +528,11 @@ impl<F: LogStoreFactory> SinkExecutor<F> {
                         let (tx, rx) = oneshot::channel();
                         rebuild_sink_tx
                             .send(RebuildSinkMessage::RebuildSink(new_vnode_bitmap, tx))
-                            .map_err(|_| anyhow!("fail to send rebuild sink to reader"))?;
+                            .map_err(|_| {
+                                anyhow!("failed to send the rebuild-sink request to the reader")
+                            })?;
                         rx.await
-                            .map_err(|_| anyhow!("fail to wait rebuild sink finish"))?;
+                            .map_err(|_| anyhow!("failed to wait for sink rebuild to finish"))?;
                     }
                     post_flush.post_yield_barrier().await?;
 
@@ -519,7 +557,7 @@ impl<F: LogStoreFactory> SinkExecutor<F> {
                                     if let Err(e) = rate_limit_tx.send(entry.rate_limit.into()) {
                                         error!(
                                             error = %e.as_report(),
-                                            "fail to send sink rate limit update"
+                                            "failed to send the sink rate limit update"
                                         );
                                         return Err(StreamExecutorError::from(
                                             e.to_report_string(),
@@ -534,7 +572,7 @@ impl<F: LogStoreFactory> SinkExecutor<F> {
                                 {
                                     error!(
                                         error = %e.as_report(),
-                                        "fail to send sink alter props"
+                                        "failed to send sink property updates"
                                     );
                                     return Err(StreamExecutorError::from(e.to_report_string()));
                                 }
@@ -599,11 +637,6 @@ impl<F: LogStoreFactory> SinkExecutor<F> {
                                 insert_chunks.push(chunk);
                             }
                         }
-                        let chunks = delete_chunks
-                            .into_iter()
-                            .chain(insert_chunks.into_iter())
-                            .collect();
-
                         // 2. If user specifies a primary key, compact the chunk based on the **downstream pk**
                         //    to eliminate any unnecessary updates to external systems. This also rewrites the
                         //    `DELETE` and `INSERT` operations on the same key into `UPDATE` operations, which
@@ -613,6 +646,10 @@ impl<F: LogStoreFactory> SinkExecutor<F> {
                         if let Some(downstream_pk) = &downstream_pk
                             && !preserve_row_level_changes
                         {
+                            let chunks = delete_chunks
+                                .into_iter()
+                                .chain(insert_chunks.into_iter())
+                                .collect();
                             let chunks = dispatch_output_kind!(sink_type, KIND, {
                                 StreamChunkCompactor::new(downstream_pk.clone(), chunks)
                                     .into_compacted_chunks_reconstructed::<KIND>(
@@ -627,9 +664,18 @@ impl<F: LogStoreFactory> SinkExecutor<F> {
                                 yield Message::Chunk(c);
                             }
                         } else {
+                            if let Some(downstream_pk) = &downstream_pk
+                                && compact_output_kind(sink_type) == output_kind::UPSERT
+                            {
+                                delete_chunks = drop_deletes_of_reinserted_keys(
+                                    delete_chunks,
+                                    &insert_chunks,
+                                    downstream_pk,
+                                );
+                            }
                             let mut chunk_builder =
                                 StreamChunkBuilder::new(chunk_size, input_data_types.clone());
-                            for chunk in chunks {
+                            for chunk in delete_chunks.into_iter().chain(insert_chunks) {
                                 for (op, row) in chunk.rows() {
                                     if let Some(c) = chunk_builder.append_row(op, row) {
                                         yield Message::Chunk(c);
@@ -705,11 +751,22 @@ impl<F: LogStoreFactory> SinkExecutor<F> {
         rate_limit_rx: UnboundedReceiver<RateLimit>,
         mut rebuild_sink_rx: UnboundedReceiver<RebuildSinkMessage>,
     ) -> StreamExecutorResult<!> {
-        let visible_columns = columns
+        let mut visible_columns = columns
             .iter()
             .enumerate()
             .filter_map(|(idx, column)| (!column.is_hidden).then_some(idx))
             .collect_vec();
+
+        let needs_projection = visible_columns.len() != columns.len();
+
+        if needs_projection
+            && let Some(extra_partition_col_idx) = sink_writer_param.extra_partition_col_idx
+        {
+            // The extra partition column is appended after all normal sink columns.
+            debug_assert_eq!(extra_partition_col_idx, columns.len());
+            sink_writer_param.extra_partition_col_idx = Some(visible_columns.len());
+            visible_columns.push(extra_partition_col_idx);
+        }
 
         let labels = [
             &actor_context.id.to_string(),
@@ -757,7 +814,7 @@ impl<F: LogStoreFactory> SinkExecutor<F> {
                 } else {
                     chunk
                 };
-                if visible_columns.len() != columns.len() {
+                if needs_projection {
                     // Do projection here because we may have columns that aren't visible to
                     // the downstream.
                     chunk.project(&visible_columns)
@@ -769,13 +826,17 @@ impl<F: LogStoreFactory> SinkExecutor<F> {
             .rate_limited(rate_limit_rx);
 
         log_reader.init().await?;
+        let mut retry_backoff = sink_retry_backoff();
         loop {
-            let future = async {
+            // Boxed so that `drop` below releases its borrows on `log_reader` and `sink`.
+            let mut future = Box::pin(async {
                 loop {
+                    let attempt_started_at = Instant::now();
                     let Err(e) = sink
                         .new_log_sinker(sink_writer_param.clone())
                         .and_then(|log_sinker| log_sinker.consume_log_and_sink(&mut log_reader))
                         .await;
+                    let attempt_duration = attempt_started_at.elapsed();
                     GLOBAL_ERROR_METRICS.user_sink_error.report([
                         "sink_executor_error".to_owned(),
                         sink_param.sink_id.to_string(),
@@ -797,18 +858,25 @@ impl<F: LogStoreFactory> SinkExecutor<F> {
                     if F::ALLOW_REWIND {
                         match log_reader.rewind().await {
                             Ok(()) => {
+                                if attempt_duration >= SINK_RETRY_BACKOFF_RESET_INTERVAL {
+                                    retry_backoff = sink_retry_backoff();
+                                }
+                                let retry_delay =
+                                    retry_backoff.next().expect("retry strategy is infinite");
                                 error!(
                                     error = %e.as_report(),
                                     executor_id = %sink_writer_param.executor_id,
                                     sink_id = %sink_param.sink_id,
-                                    "reset log reader stream successfully after sink error"
+                                    ?retry_delay,
+                                    "reset log reader stream successfully after sink error; retrying after backoff"
                                 );
+                                tokio::time::sleep(retry_delay).await;
                                 Ok(())
                             }
                             Err(rewind_err) => {
                                 error!(
                                     error = %rewind_err.as_report(),
-                                    "fail to rewind log reader"
+                                    "failed to rewind the log reader"
                                 );
                                 Err(e)
                             }
@@ -818,57 +886,67 @@ impl<F: LogStoreFactory> SinkExecutor<F> {
                     }
                     .map_err(|e| StreamExecutorError::from((e, sink_param.sink_id)))?;
                 }
-            };
-            select! {
-                result = future => {
-                    let Err(e): StreamExecutorResult<!> = result;
-                    return Err(e);
+            });
+            let message = loop {
+                select! {
+                    result = &mut future => {
+                        let Err(e): StreamExecutorResult<!> = result;
+                        return Err(e);
+                    }
+                    result = rebuild_sink_rx.recv() => {
+                        let message = result.ok_or_else(|| anyhow!("failed to receive rebuild sink notify"))?;
+                        // Dropping the consumer costs a rewind, or a recovery when the log
+                        // reader cannot rewind. Not worth it for an update that changes nothing.
+                        if let RebuildSinkMessage::UpdateConfig(config) = &message
+                            && !sink_config_has_changes(&sink_param.properties, config)
+                        {
+                            info!(
+                                executor_id = %sink_writer_param.executor_id,
+                                sink_id = %sink_param.sink_id,
+                                "skip alter sink config because properties are unchanged"
+                            );
+                            continue;
+                        }
+                        break message;
+                    }
                 }
-                result = rebuild_sink_rx.recv() => {
-                    match result.ok_or_else(|| anyhow!("failed to receive rebuild sink notify"))? {
-                        RebuildSinkMessage::RebuildSink(new_vnode, notify) => {
-                            sink_writer_param.vnode_bitmap = Some((*new_vnode).clone());
-                            if notify.send(()).is_err() {
-                                warn!("failed to notify rebuild sink");
-                            }
-                            log_reader.init().await?;
-                        },
-                        RebuildSinkMessage::UpdateConfig(config) => {
-                            if !sink_config_has_changes(&sink_param.properties, &config) {
+            };
+            drop(future);
+            match message {
+                RebuildSinkMessage::RebuildSink(new_vnode, notify) => {
+                    sink_writer_param.vnode_bitmap = Some((*new_vnode).clone());
+                    if notify.send(()).is_err() {
+                        warn!("failed to notify rebuild sink");
+                    }
+                    log_reader.init().await?;
+                }
+                RebuildSinkMessage::UpdateConfig(config) => {
+                    if F::ALLOW_REWIND {
+                        match log_reader.rewind().await {
+                            Ok(()) => {
+                                sink_param.properties.extend(config);
+                                sink = TryFrom::try_from(sink_param.clone()).map_err(|e| StreamExecutorError::from((e, sink_param.sink_id)))?;
                                 info!(
                                     executor_id = %sink_writer_param.executor_id,
                                     sink_id = %sink_param.sink_id,
-                                    "skip alter sink config because properties are unchanged"
+                                    "alter sink config successfully with rewind"
                                 );
                                 Ok(())
-                            } else if F::ALLOW_REWIND {
-                                match log_reader.rewind().await {
-                                    Ok(()) => {
-                                        sink_param.properties.extend(config.into_iter());
-                                        sink = TryFrom::try_from(sink_param.clone()).map_err(|e| StreamExecutorError::from((e, sink_param.sink_id)))?;
-                                        info!(
-                                            executor_id = %sink_writer_param.executor_id,
-                                            sink_id = %sink_param.sink_id,
-                                            "alter sink config successfully with rewind"
-                                        );
-                                        Ok(())
-                                    }
-                                    Err(rewind_err) => {
-                                        error!(
-                                            error = %rewind_err.as_report(),
-                                            "fail to rewind log reader for alter sink config "
-                                        );
-                                        Err(anyhow!("fail to rewind log after alter table").into())
-                                    }
-                                }
-                            } else {
-                                sink_param.properties.extend(config.into_iter());
-                                sink = TryFrom::try_from(sink_param.clone()).map_err(|e| StreamExecutorError::from((e, sink_param.sink_id)))?;
-                                Err(anyhow!("This is not an actual error condition. The system is intentionally triggering recovery procedures to ensure ALTER SINK CONFIG are fully applied.").into())
                             }
-                            .map_err(|e| StreamExecutorError::from((e, sink_param.sink_id)))?;
-                        },
+                            Err(rewind_err) => {
+                                error!(
+                                    error = %rewind_err.as_report(),
+                                    "failed to rewind the log reader for ALTER SINK CONFIG"
+                                );
+                                Err(anyhow!("failed to rewind the log after ALTER SINK CONFIG").into())
+                            }
+                        }
+                    } else {
+                        sink_param.properties.extend(config);
+                        sink = TryFrom::try_from(sink_param.clone()).map_err(|e| StreamExecutorError::from((e, sink_param.sink_id)))?;
+                        Err(anyhow!("This is not an actual error condition. The system is intentionally triggering recovery procedures to ensure ALTER SINK CONFIG are fully applied.").into())
                     }
+                    .map_err(|e| StreamExecutorError::from((e, sink_param.sink_id)))?;
                 }
             }
         }
@@ -897,13 +975,115 @@ impl<F: LogStoreFactory> Execute for SinkExecutor<F> {
 
 #[cfg(test)]
 mod test {
+    use std::future::pending;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
     use risingwave_common::catalog::{ColumnDesc, ColumnId};
     use risingwave_common::util::epoch::test_epoch;
     use risingwave_connector::sink::build_sink;
+    use risingwave_connector::sink::log_store::{LogStoreReadItem, LogStoreResult, TruncateOffset};
+    use risingwave_connector::sink::trivial::BlackHoleSink;
+    use tokio::sync::Notify;
 
     use super::*;
-    use crate::common::log_store_impl::in_mem::BoundedInMemLogStoreFactory;
+    use crate::common::log_store_impl::in_mem::{
+        BoundedInMemLogStoreFactory, BoundedInMemLogStoreWriter,
+    };
     use crate::executor::test_utils::*;
+
+    #[derive(Default)]
+    struct RewindRequiredLogReaderState {
+        start_count: AtomicUsize,
+        rewind_count: AtomicUsize,
+        started: Notify,
+    }
+
+    impl RewindRequiredLogReaderState {
+        async fn wait_for_start_count(&self, expected: usize) {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let started = self.started.notified();
+                    if self.start_count.load(Ordering::SeqCst) >= expected {
+                        break;
+                    }
+                    started.await;
+                }
+            })
+            .await
+            .unwrap_or_else(|_| panic!("log reader was not started {expected} times"));
+        }
+    }
+
+    struct RewindRequiredLogReader {
+        is_reset: bool,
+        state: Arc<RewindRequiredLogReaderState>,
+    }
+
+    impl LogReader for RewindRequiredLogReader {
+        async fn init(&mut self) -> LogStoreResult<()> {
+            self.is_reset = true;
+            Ok(())
+        }
+
+        async fn start_from(&mut self, _start_offset: Option<u64>) -> LogStoreResult<()> {
+            assert!(
+                self.is_reset,
+                "log reader must be rewound before restarting"
+            );
+            self.is_reset = false;
+            self.state.start_count.fetch_add(1, Ordering::SeqCst);
+            self.state.started.notify_waiters();
+            Ok(())
+        }
+
+        async fn next_item(&mut self) -> LogStoreResult<(u64, LogStoreReadItem)> {
+            pending().await
+        }
+
+        fn truncate(&mut self, _offset: TruncateOffset) -> LogStoreResult<()> {
+            Ok(())
+        }
+
+        async fn rewind(&mut self) -> LogStoreResult<()> {
+            self.is_reset = true;
+            self.state.rewind_count.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    struct TestLogStoreFactory<const CAN_REWIND: bool>;
+
+    impl<const CAN_REWIND: bool> LogStoreFactory for TestLogStoreFactory<CAN_REWIND> {
+        type Reader = RewindRequiredLogReader;
+        type Writer = BoundedInMemLogStoreWriter;
+
+        const ALLOW_REWIND: bool = CAN_REWIND;
+        const REBUILD_SINK_ON_UPDATE_VNODE_BITMAP: bool = false;
+
+        async fn build(self) -> (Self::Reader, Self::Writer) {
+            unreachable!()
+        }
+    }
+
+    fn sink_param_for_config_update_test() -> SinkParam {
+        SinkParam {
+            sink_id: 0.into(),
+            sink_name: "test".into(),
+            properties: BTreeMap::from([
+                ("connector".to_owned(), "blackhole".to_owned()),
+                ("commit_checkpoint_interval".to_owned(), "1".to_owned()),
+            ]),
+            columns: vec![],
+            downstream_pk: None,
+            sink_type: SinkType::AppendOnly,
+            ignore_delete: false,
+            format_desc: None,
+            db_name: "test".into(),
+            sink_from_name: "test".into(),
+        }
+    }
 
     #[test]
     fn test_sink_config_has_changes() {
@@ -924,6 +1104,169 @@ mod test {
             &current,
             &HashMap::from([("force_append_only".to_owned(), "true".to_owned())])
         ));
+    }
+
+    fn no_op_config_update() -> RebuildSinkMessage {
+        RebuildSinkMessage::UpdateConfig(HashMap::from([(
+            "commit_checkpoint_interval".to_owned(),
+            "1".to_owned(),
+        )]))
+    }
+
+    fn changed_config_update() -> RebuildSinkMessage {
+        RebuildSinkMessage::UpdateConfig(HashMap::from([(
+            "commit_checkpoint_interval".to_owned(),
+            "2".to_owned(),
+        )]))
+    }
+
+    async fn assert_no_op_config_update_keeps_consuming<const CAN_REWIND: bool>() {
+        let sink_param = sink_param_for_config_update_test();
+        let sink = BlackHoleSink::try_from(sink_param.clone()).unwrap();
+        let state = Arc::new(RewindRequiredLogReaderState::default());
+        let log_reader = RewindRequiredLogReader {
+            is_reset: false,
+            state: state.clone(),
+        };
+        let (rate_limit_tx, rate_limit_rx) = unbounded_channel();
+        let (rebuild_sink_tx, rebuild_sink_rx) = unbounded_channel();
+
+        let consume_log = SinkExecutor::<TestLogStoreFactory<CAN_REWIND>>::execute_consume_log(
+            sink,
+            log_reader,
+            vec![],
+            sink_param,
+            SinkWriterParam::for_test(),
+            None,
+            ActorContext::for_test(0),
+            rate_limit_rx,
+            rebuild_sink_rx,
+        );
+        tokio::pin!(consume_log);
+
+        tokio::select! {
+            result = &mut consume_log => panic!("log consumer exited unexpectedly: {result:?}"),
+            () = state.wait_for_start_count(1) => {},
+        }
+
+        rebuild_sink_tx.send(no_op_config_update()).unwrap();
+
+        // Messages are handled in order, so an acknowledged rebuild proves the consumer survived
+        // the no-op update.
+        let (notify_tx, notify_rx) = oneshot::channel();
+        rebuild_sink_tx
+            .send(RebuildSinkMessage::RebuildSink(
+                Arc::new(Bitmap::ones(1)),
+                notify_tx,
+            ))
+            .unwrap();
+        tokio::select! {
+            result = &mut consume_log => panic!("log consumer exited unexpectedly: {result:?}"),
+            result = notify_rx => result.expect("rebuild sink should be acknowledged"),
+        }
+
+        assert_eq!(state.rewind_count.load(Ordering::SeqCst), 0);
+        drop(rate_limit_tx);
+    }
+
+    #[tokio::test]
+    async fn test_no_op_sink_config_update_keeps_consuming_with_rewind() {
+        assert_no_op_config_update_keeps_consuming::<true>().await;
+    }
+
+    #[tokio::test]
+    async fn test_no_op_sink_config_update_keeps_consuming_without_rewind() {
+        assert_no_op_config_update_keeps_consuming::<false>().await;
+    }
+
+    #[tokio::test]
+    async fn test_sink_config_update_rewinds_log_reader() {
+        let sink_param = sink_param_for_config_update_test();
+        let sink = BlackHoleSink::try_from(sink_param.clone()).unwrap();
+        let state = Arc::new(RewindRequiredLogReaderState::default());
+        let log_reader = RewindRequiredLogReader {
+            is_reset: false,
+            state: state.clone(),
+        };
+        let (rate_limit_tx, rate_limit_rx) = unbounded_channel();
+        let (rebuild_sink_tx, rebuild_sink_rx) = unbounded_channel();
+
+        let consume_log = SinkExecutor::<TestLogStoreFactory<true>>::execute_consume_log(
+            sink,
+            log_reader,
+            vec![],
+            sink_param,
+            SinkWriterParam::for_test(),
+            None,
+            ActorContext::for_test(0),
+            rate_limit_rx,
+            rebuild_sink_rx,
+        );
+        tokio::pin!(consume_log);
+
+        tokio::select! {
+            result = &mut consume_log => panic!("log consumer exited unexpectedly: {result:?}"),
+            () = state.wait_for_start_count(1) => {},
+        }
+
+        rebuild_sink_tx.send(changed_config_update()).unwrap();
+
+        tokio::select! {
+            result = &mut consume_log => panic!("log consumer exited unexpectedly: {result:?}"),
+            () = state.wait_for_start_count(2) => {},
+        }
+
+        assert_eq!(state.rewind_count.load(Ordering::SeqCst), 1);
+        drop(rate_limit_tx);
+    }
+
+    #[tokio::test]
+    async fn test_sink_config_update_triggers_recovery_without_rewind() {
+        let sink_param = sink_param_for_config_update_test();
+        let sink = BlackHoleSink::try_from(sink_param.clone()).unwrap();
+        let state = Arc::new(RewindRequiredLogReaderState::default());
+        let log_reader = RewindRequiredLogReader {
+            is_reset: false,
+            state: state.clone(),
+        };
+        let (rate_limit_tx, rate_limit_rx) = unbounded_channel();
+        let (rebuild_sink_tx, rebuild_sink_rx) = unbounded_channel();
+
+        let consume_log = SinkExecutor::<TestLogStoreFactory<false>>::execute_consume_log(
+            sink,
+            log_reader,
+            vec![],
+            sink_param,
+            SinkWriterParam::for_test(),
+            None,
+            ActorContext::for_test(0),
+            rate_limit_rx,
+            rebuild_sink_rx,
+        );
+        tokio::pin!(consume_log);
+
+        tokio::select! {
+            result = &mut consume_log => panic!("log consumer exited unexpectedly: {result:?}"),
+            () = state.wait_for_start_count(1) => {},
+        }
+
+        rebuild_sink_tx.send(changed_config_update()).unwrap();
+
+        tokio::time::timeout(Duration::from_secs(5), consume_log)
+            .await
+            .expect("log consumer should trigger recovery")
+            .expect_err("log consumer should return an error");
+        assert_eq!(state.start_count.load(Ordering::SeqCst), 1);
+        assert_eq!(state.rewind_count.load(Ordering::SeqCst), 0);
+        drop(rate_limit_tx);
+    }
+
+    #[test]
+    fn test_sink_retry_backoff_is_bounded() {
+        let mut retry_backoff = sink_retry_backoff();
+        for max_delay in [1, 2, 4, 8, 16, 30, 30].map(Duration::from_secs) {
+            assert!(retry_backoff.next().expect("retry strategy is infinite") <= max_delay);
+        }
     }
 
     #[tokio::test]
@@ -1236,6 +1579,15 @@ mod test {
                   + 1 20  2",
             )),
             Message::Barrier(Barrier::new_test_barrier(test_epoch(2))),
+            // Downstream key 1 moves to a new stream key, while downstream key 2 is really deleted.
+            Message::Chunk(StreamChunk::from_pretty(
+                " I  I  I
+                  - 1 10  1
+                  - 1 20  2
+                  + 1 30  3
+                  - 2 50  5",
+            )),
+            Message::Barrier(Barrier::new_test_barrier(test_epoch(3))),
         ])
         .into_executor(schema.clone(), vec![0, 2]);
 
@@ -1281,6 +1633,18 @@ mod test {
                 " I  I  I
                   + 1 10  1
                   + 1 20  2",
+            )
+        );
+
+        executor.next().await.unwrap().unwrap();
+
+        let chunk_msg = executor.next().await.unwrap().unwrap();
+        assert_eq!(
+            chunk_msg.into_chunk().unwrap().compact_vis(),
+            StreamChunk::from_pretty(
+                " I  I  I
+                  - 2 50  5
+                  + 1 30  3",
             )
         );
 

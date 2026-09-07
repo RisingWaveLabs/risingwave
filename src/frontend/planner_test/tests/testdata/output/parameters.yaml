@@ -11,7 +11,7 @@
     explain select * from t where id in($1)
   explain_output: |
     BatchExchange { order: [], dist: Single }
-    └─BatchFilter { predicate: (t.id = Parameter(index: 1, type: Some(Int32))) }
+    └─BatchFilter { predicate: In(t.id, Parameter(index: 1, type: Some(Int32))) }
       └─BatchScan { table: t, columns: [id, a] }
 - id: explain parameters in in-expr
   sql: |
@@ -19,5 +19,13 @@
     explain select * from t where id in($1, 123)
   explain_output: |
     BatchExchange { order: [], dist: Single }
-    └─BatchFilter { predicate: (In(t.id, 123:Int32) OR (t.id = Parameter(index: 1, type: Some(Int32)))) }
+    └─BatchFilter { predicate: In(t.id, Parameter(index: 1, type: Some(Int32)), 123:Int32) }
+      └─BatchScan { table: t, columns: [id, a] }
+- id: explain multiple parameters in in-expr
+  sql: |
+    create table t (id int primary key, a int);
+    explain select * from t where id in($1, $2, $3, 123)
+  explain_output: |
+    BatchExchange { order: [], dist: Single }
+    └─BatchFilter { predicate: In(t.id, Parameter(index: 1, type: Some(Int32)), Parameter(index: 2, type: Some(Int32)), Parameter(index: 3, type: Some(Int32)), 123:Int32) }
       └─BatchScan { table: t, columns: [id, a] }

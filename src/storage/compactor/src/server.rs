@@ -80,6 +80,7 @@ pub async fn prepare_start_parameters(
     let compactor_metrics = Arc::new(GLOBAL_COMPACTOR_METRICS.clone());
 
     let state_store_url = system_params_reader.state_store();
+    let state_store_url = state_store_url.expose();
 
     let storage_memory_config = extract_storage_memory_config(&config);
     let storage_opts: Arc<StorageOpts> = Arc::new(StorageOpts::from((
@@ -182,6 +183,26 @@ pub async fn prepare_start_parameters(
     )
 }
 
+/// Resolves the memory budget dedicated to Iceberg compaction.
+fn resolve_iceberg_compaction_memory_budget(
+    configured_limit_mb: Option<usize>,
+    compactor_total_memory_bytes: usize,
+    available_proportion: f64,
+) -> usize {
+    const MB: usize = 1 << 20;
+    let budget = match configured_limit_mb {
+        Some(limit_mb) => limit_mb
+            .checked_mul(MB)
+            .expect("Iceberg compaction memory limit overflows usize"),
+        None => (compactor_total_memory_bytes as f64 * available_proportion) as usize,
+    };
+    assert!(
+        budget > 0,
+        "Iceberg compaction memory limit must be positive"
+    );
+    budget
+}
+
 /// Fetches and runs compaction tasks.
 ///
 /// Returns when the `shutdown` token is triggered.
@@ -250,6 +271,14 @@ pub async fn compactor_serve(
         system_params_reader.clone(),
     ))
     .await;
+    let iceberg_memory_budget_bytes = matches!(compactor_mode, CompactorMode::DedicatedIceberg)
+        .then(|| {
+            resolve_iceberg_compaction_memory_budget(
+                config.storage.iceberg_compaction_memory_limit_mb,
+                opts.compactor_total_memory_bytes,
+                config.storage.compactor_memory_available_proportion,
+            )
+        });
 
     let compaction_catalog_manager_ref = Arc::new(CompactionCatalogManager::new(Box::new(
         RemoteTableAccessor::new(meta_client.clone()),
@@ -304,6 +333,8 @@ pub async fn compactor_serve(
                 risingwave_storage::hummock::compactor::start_iceberg_compactor(
                     compactor_context.clone(),
                     hummock_meta_client.clone(),
+                    iceberg_memory_budget_bytes
+                        .expect("Iceberg memory budget must be resolved for dedicated startup"),
                 )
             }
             CompactorMode::SharedIceberg => unreachable!(),

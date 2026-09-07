@@ -102,7 +102,7 @@ impl LakekeeperService {
             rt.block_on(async move {
                 use sqlx::postgres::*;
                 use tokio::time::{sleep, Duration};
-                let options = PgConnectOptions::new()
+                let options = PgConnectOptions::new_without_pgpass()
                     .host(&host)
                     .port(port)
                     .username(&username)

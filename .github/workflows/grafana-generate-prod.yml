@@ -1,5 +1,8 @@
 name: Grafana Generate Production Dashboard
 
+permissions:
+  contents: read
+
 on:
   push:
     branches: [main]

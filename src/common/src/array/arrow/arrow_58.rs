@@ -20,4 +20,6 @@ pub use arrow_58_array as arrow_array;
 pub use arrow_58_buffer as arrow_buffer;
 pub use arrow_58_cast as arrow_cast;
 pub use arrow_58_schema as arrow_schema;
-pub use arrow_impl::{FromArrow, ToArrow, is_parquet_schema_match_source_schema};
+pub use arrow_impl::{
+    FromArrow, ToArrow, is_parquet_field_match_source_schema, is_parquet_schema_match_source_schema,
+};

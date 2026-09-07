@@ -20,9 +20,8 @@ use futures::{FutureExt, TryStreamExt};
 use futures_async_stream::try_stream;
 use risingwave_common::catalog::TableId;
 use risingwave_common::metrics::LabelGuardedIntGauge;
-use risingwave_common_rate_limit::{
-    MonitoredRateLimiter, RateLimit, RateLimiter, RateLimiterTrait,
-};
+use risingwave_common_rate_limit::{MonitoredRateLimiter, RateLimit, RateLimiter};
+use risingwave_pb::common::ThrottleType;
 use risingwave_storage::StateStore;
 use rw_futures_util::drop_either_future;
 use tokio::sync::mpsc::UnboundedReceiver;
@@ -32,11 +31,13 @@ use crate::executor::backfill::snapshot_backfill::consume_upstream::upstream_tab
 use crate::executor::backfill::snapshot_backfill::receive_next_barrier;
 use crate::executor::backfill::snapshot_backfill::state::{BackfillState, EpochBackfillProgress};
 use crate::executor::backfill::utils::mapping_message;
+use crate::executor::monitor::BackfillMetrics;
 use crate::executor::prelude::{StateTable, *};
-use crate::executor::{Barrier, Message, StreamExecutorError};
+use crate::executor::{Barrier, Message, Mutation, StreamExecutorError};
 use crate::task::CreateMviewProgressReporter;
 
 pub struct UpstreamTableExecutor<T: UpstreamTable, S: StateStore> {
+    upstream_table_id: TableId,
     upstream_table: T,
     progress_state_table: StateTable<S>,
     snapshot_epoch: u64,
@@ -48,6 +49,7 @@ pub struct UpstreamTableExecutor<T: UpstreamTable, S: StateStore> {
     barrier_rx: UnboundedReceiver<Barrier>,
     progress: CreateMviewProgressReporter,
     crossdb_last_consumed_min_epoch: LabelGuardedIntGauge,
+    metrics: BackfillMetrics,
 }
 
 impl<T: UpstreamTable, S: StateStore> UpstreamTableExecutor<T, S> {
@@ -77,7 +79,11 @@ impl<T: UpstreamTable, S: StateStore> UpstreamTableExecutor<T, S> {
                 actor_id_label.as_str(),
                 fragment_id_label.as_str(),
             ]);
+        let metrics = actor_ctx
+            .streaming_metrics
+            .new_backfill_metrics(upstream_table_id, actor_ctx.id);
         Self {
+            upstream_table_id,
             upstream_table,
             progress_state_table,
             snapshot_epoch,
@@ -88,6 +94,7 @@ impl<T: UpstreamTable, S: StateStore> UpstreamTableExecutor<T, S> {
             barrier_rx,
             progress,
             crossdb_last_consumed_min_epoch,
+            metrics,
         }
     }
 
@@ -137,12 +144,12 @@ impl<T: UpstreamTable, S: StateStore> UpstreamTableExecutor<T, S> {
         'on_new_stream: loop {
             loop {
                 let barrier = {
-                    let rate_limited_stream = rate_limit_stream(&mut stream, &self.rate_limiter);
-                    pin_mut!(rate_limited_stream);
-
                     loop {
+                        if self.rate_limiter.rate_limit().is_paused() {
+                            break receive_next_barrier(&mut self.barrier_rx).await?;
+                        }
                         let future1 = receive_next_barrier(&mut self.barrier_rx);
-                        let future2 = rate_limited_stream.try_next().map(|result| {
+                        let future2 = stream.try_next().map(|result| {
                             result
                                 .and_then(|opt| opt.ok_or_else(|| anyhow!("end of stream").into()))
                         });
@@ -153,6 +160,8 @@ impl<T: UpstreamTable, S: StateStore> UpstreamTableExecutor<T, S> {
                                 break barrier;
                             }
                             Either::Right(Ok(chunk)) => {
+                                assert!(!self.rate_limiter.rate_limit().is_paused());
+                                self.rate_limiter.wait(chunk.cardinality() as _).await;
                                 yield Message::Chunk(chunk);
                             }
                             Either::Left(Err(e)) | Either::Right(Err(e)) => {
@@ -163,6 +172,7 @@ impl<T: UpstreamTable, S: StateStore> UpstreamTableExecutor<T, S> {
                 };
 
                 if let Some(chunk) = stream.consume_builder() {
+                    self.rate_limiter.wait(chunk.cardinality() as _).await;
                     yield Message::Chunk(chunk);
                 }
                 stream
@@ -198,6 +208,9 @@ impl<T: UpstreamTable, S: StateStore> UpstreamTableExecutor<T, S> {
                     }
                     // ensure that the reported row count is non-decreasing.
                     let row_count_to_report = std::cmp::max(prev_reported_row_count, row_count);
+                    self.metrics
+                        .backfill_snapshot_read_row_count
+                        .inc_by(row_count_to_report.saturating_sub(prev_reported_row_count) as _);
                     prev_reported_row_count = row_count_to_report;
 
                     if is_finished {
@@ -215,6 +228,29 @@ impl<T: UpstreamTable, S: StateStore> UpstreamTableExecutor<T, S> {
 
                 let post_commit = progress_state.commit(barrier.epoch).await?;
                 let update_vnode_bitmap = barrier.as_update_vnode_bitmap(self.actor_ctx.id);
+                if let Some(new_rate_limit) = barrier.mutation.as_ref().and_then(|mutation| {
+                    if let Mutation::Throttle(config) = &**mutation
+                        && let Some(config) = config.get(&self.actor_ctx.fragment_id)
+                        && config.throttle_type() == ThrottleType::Backfill
+                    {
+                        Some(config.rate_limit)
+                    } else {
+                        None
+                    }
+                }) {
+                    let new_rate_limit = new_rate_limit.into();
+                    let old_rate_limit = self.rate_limiter.update(new_rate_limit);
+                    if old_rate_limit != new_rate_limit {
+                        stream.update_rate_limiter(new_rate_limit);
+                        tracing::info!(
+                            old_rate_limit = ?old_rate_limit,
+                            new_rate_limit = ?new_rate_limit,
+                            upstream_table_id = %self.upstream_table_id,
+                            actor_id = %self.actor_ctx.id,
+                            "cross-db backfill rate limit changed",
+                        );
+                    }
+                }
                 yield Message::Barrier(barrier);
                 if let Some(new_vnode_bitmap) =
                     post_commit.post_yield_barrier(update_vnode_bitmap).await?
@@ -234,20 +270,6 @@ impl<T: UpstreamTable, S: StateStore> UpstreamTableExecutor<T, S> {
                 }
             }
         }
-    }
-}
-
-// The future returned by `.next()` is cancellation safe even if the whole stream is dropped.
-#[try_stream(ok = StreamChunk, error = StreamExecutorError)]
-async fn rate_limit_stream<'a>(
-    stream: &'a mut (impl Stream<Item = StreamExecutorResult<StreamChunk>> + Unpin),
-    rate_limiter: &'a RateLimiter,
-) {
-    while let Some(chunk) = stream.try_next().await? {
-        let quota = chunk.cardinality();
-        // the chunk is yielded immediately without any await point breaking in, so the stream is cancellation safe.
-        yield chunk;
-        rate_limiter.wait(quota as _).await;
     }
 }
 

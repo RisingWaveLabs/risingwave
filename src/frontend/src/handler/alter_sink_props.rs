@@ -38,7 +38,7 @@ pub async fn handle_alter_sink_props(
             Binder::resolve_schema_qualified_name(db_name, &sink_name)?;
         let schema_path = SchemaPath::new(schema_name.as_deref(), &search_path, user_name);
         let (sink, schema_name) =
-            reader.get_created_sink_by_name(db_name, schema_path, &real_table_name)?;
+            reader.get_any_sink_by_name(db_name, schema_path, &real_table_name)?;
 
         if sink.target_table.is_some() {
             return Err(ErrorCode::InvalidInputSyntax(

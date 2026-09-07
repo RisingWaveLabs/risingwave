@@ -203,7 +203,9 @@ impl<LS: LocalStateStore> LogWriter for KvLogStoreWriter<LS> {
                     if let Some(new_vnodes) = new_vnodes {
                         update_vnode_bitmap_tx
                             .send((new_vnodes, next_epoch))
-                            .map_err(|_| anyhow!("fail to send update vnode bitmap to reader"))?;
+                            .map_err(|_| {
+                                anyhow!("failed to send the updated vnode bitmap to the reader")
+                            })?;
                         tx.clear();
                     }
                     Ok(())

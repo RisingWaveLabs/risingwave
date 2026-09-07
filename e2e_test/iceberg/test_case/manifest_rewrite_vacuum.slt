@@ -1,0 +1,57 @@
+statement ok
+set sink_decouple = false;
+
+statement ok
+set streaming_parallelism = 1;
+
+statement ok
+create table manifest_rewrite_source (id int);
+
+statement ok
+create sink manifest_rewrite_sink as
+select * from manifest_rewrite_source
+with (
+    connector = 'iceberg',
+    type = 'append-only',
+    force_append_only = 'true',
+    database.name = 'demo_db',
+    table.name = 'manifest_rewrite_vacuum_table',
+    catalog.name = 'demo',
+    catalog.type = 'storage',
+    warehouse.path = 's3a://icebergdata/demo',
+    s3.endpoint = 'http://127.0.0.1:9301',
+    s3.region = 'us-east-1',
+    s3.access.key = 'hummockadmin',
+    s3.secret.key = 'hummockadmin',
+    enable_manifest_rewrite = 'true',
+    manifest_rewrite_min_count_to_merge = '2'
+);
+
+statement ok
+insert into manifest_rewrite_source values (1);
+
+statement ok
+flush;
+
+statement ok
+insert into manifest_rewrite_source values (2);
+
+statement ok
+flush;
+
+statement ok
+insert into manifest_rewrite_source values (3);
+
+statement ok
+flush;
+
+# The same min-count rule applies to both periodic maintenance and VACUUM.
+# VACUUM triggers the eligible rewrite immediately.
+statement ok
+vacuum manifest_rewrite_sink;
+
+statement ok
+drop sink manifest_rewrite_sink;
+
+statement ok
+drop table manifest_rewrite_source;

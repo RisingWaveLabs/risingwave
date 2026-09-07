@@ -16,11 +16,14 @@ use std::collections::HashSet;
 use std::str::FromStr;
 use std::sync::LazyLock;
 
-use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
+use anyhow::{Context, bail};
+use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 use risingwave_common::catalog::Schema;
 use risingwave_common::log::LogSuppressor;
 use risingwave_common::row::OwnedRow;
-use risingwave_common::types::{DataType, Date, Decimal, ScalarImpl, Time, Timestamp, Timestamptz};
+use risingwave_common::types::{
+    DataType, Date, Datum, Decimal, ScalarImpl, Time, Timestamp, Timestamptz,
+};
 use rust_decimal::Decimal as RustDecimal;
 use thiserror_ext::AsReport;
 use tiberius::Row;
@@ -32,40 +35,84 @@ use crate::parser::utils::log_error;
 static LOG_SUPPRESSOR: LazyLock<LogSuppressor> = LazyLock::new(LogSuppressor::default);
 
 pub fn sql_server_row_to_owned_row(row: &mut Row, schema: &Schema) -> OwnedRow {
-    let mut datums: Vec<Option<ScalarImpl>> = vec![];
-    let mut money_fields: HashSet<&str> = HashSet::new();
-    // Special handling of the money field, as the third-party library Tiberius converts the money type to i64.
-    for (column, _) in row.cells() {
-        if column.column_type() == tiberius::ColumnType::Money {
-            money_fields.insert(column.name());
-        }
-    }
-    for i in 0..schema.fields.len() {
-        let rw_field = &schema.fields[i];
+    let money_fields = sql_server_money_fields(row);
+    let mut datums = Vec::with_capacity(schema.fields.len());
+    for (i, rw_field) in schema.fields.iter().enumerate() {
         let name = rw_field.name.as_str();
-        let datum = match money_fields.contains(name) {
-            true => match row.try_get::<i64, usize>(i) {
-                Ok(Some(value)) => Some(convert_money_i64_to_type(value, &rw_field.data_type)),
-                Ok(None) => None,
-                Err(err) => {
-                    log_error!(name, err, "parse column failed");
-                    None
-                }
-            },
-            false => match row.try_get::<ScalarImplTiberiusWrapper, usize>(i) {
-                Ok(datum) => datum
-                    .map(|d| d.0)
-                    .map(|scalar| coerce_scalar_to_target_type(scalar, &rw_field.data_type)),
-                Err(err) => {
-                    log_error!(name, err, "parse column failed");
-                    None
-                }
-            },
+        let datum = match sql_server_cell_to_rw_datum(
+            row,
+            i,
+            name,
+            &rw_field.data_type,
+            money_fields.contains(name),
+        ) {
+            Ok(datum) => datum,
+            Err(err) => {
+                log_error!(name, err, "parse column failed");
+                None
+            }
         };
-
         datums.push(datum);
     }
     OwnedRow::new(datums)
+}
+
+/// Decode primary-key columns strictly while preserving the legacy lenient behavior for all
+/// other columns in a SQL Server CDC snapshot row.
+pub fn sql_server_row_to_owned_row_with_strict_pk(
+    row: &mut Row,
+    schema: &Schema,
+    pk_indices: &[usize],
+) -> anyhow::Result<OwnedRow> {
+    let money_fields = sql_server_money_fields(row);
+    super::decode_row_with_strict_pk(
+        "SQL Server",
+        schema,
+        pk_indices,
+        |index, field| {
+            sql_server_cell_to_rw_datum(
+                row,
+                index,
+                &field.name,
+                &field.data_type,
+                money_fields.contains(&field.name),
+            )
+        },
+        |name, err| log_error!(name, err, "parse column failed"),
+    )
+}
+
+fn sql_server_money_fields(row: &Row) -> HashSet<String> {
+    let mut money_fields = HashSet::new();
+    // Special handling of the money field, as the third-party library Tiberius converts the money type to i64.
+    for (column, _) in row.cells() {
+        if column.column_type() == tiberius::ColumnType::Money {
+            money_fields.insert(column.name().to_owned());
+        }
+    }
+    money_fields
+}
+
+fn sql_server_cell_to_rw_datum(
+    row: &Row,
+    index: usize,
+    name: &str,
+    data_type: &DataType,
+    is_money: bool,
+) -> anyhow::Result<Datum> {
+    if is_money {
+        return row
+            .try_get::<i64, usize>(index)
+            .with_context(|| format!("failed to decode SQL Server money column `{name}`"))?
+            .map(|value| try_convert_money_i64_to_type(value, data_type))
+            .transpose();
+    }
+
+    Ok(row
+        .try_get::<ScalarImplTiberiusWrapper, usize>(index)
+        .with_context(|| format!("failed to decode SQL Server snapshot column `{name}`"))?
+        .map(|datum| datum.0)
+        .map(|scalar| coerce_scalar_to_target_type(scalar, data_type)))
 }
 
 fn coerce_scalar_to_target_type(scalar: ScalarImpl, target_type: &DataType) -> ScalarImpl {
@@ -81,17 +128,12 @@ fn coerce_scalar_to_target_type(scalar: ScalarImpl, target_type: &DataType) -> S
     }
 }
 
-pub fn convert_money_i64_to_type(value: i64, data_type: &DataType) -> ScalarImpl {
+fn try_convert_money_i64_to_type(value: i64, data_type: &DataType) -> anyhow::Result<ScalarImpl> {
     match data_type {
-        DataType::Decimal => {
-            ScalarImpl::Decimal(Decimal::from(value) / Decimal::from_str("10000").unwrap())
-        }
-        _ => {
-            panic!(
-                "Conversion of Money type to {:?} is not supported",
-                data_type
-            );
-        }
+        DataType::Decimal => Ok(ScalarImpl::Decimal(
+            Decimal::from(value) / Decimal::from_str("10000").unwrap(),
+        )),
+        _ => bail!("conversion of SQL Server money to {data_type} is not supported"),
     }
 }
 
@@ -199,11 +241,22 @@ impl<'a> tiberius::IntoSql<'a> for TimestamptzTiberiusWrapper {
 
 impl<'a> tiberius::FromSql<'a> for TimestamptzTiberiusWrapper {
     fn from_sql(value: &'a tiberius::ColumnData<'static>) -> tiberius::Result<Option<Self>> {
-        let instant = DateTime::<Utc>::from_sql(value)?;
-        let time = instant
-            .map(Timestamptz::from)
-            .map(TimestamptzTiberiusWrapper::from);
-        tiberius::Result::Ok(time)
+        let instant = time::OffsetDateTime::from_sql(value)?;
+        instant
+            .map(|instant| {
+                let timestamptz = instant
+                    .unix_timestamp_nanos()
+                    .checked_div(1000)
+                    .and_then(|micros| i64::try_from(micros).ok())
+                    .and_then(Timestamptz::from_micros)
+                    .ok_or_else(|| {
+                        tiberius::error::Error::Conversion(
+                            "datetimeoffset is out of range for RisingWave timestamptz".into(),
+                        )
+                    })?;
+                Ok(TimestamptzTiberiusWrapper::from(timestamptz))
+            })
+            .transpose()
     }
 }
 

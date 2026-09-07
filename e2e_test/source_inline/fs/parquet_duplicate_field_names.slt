@@ -1,0 +1,41 @@
+# Regression test for parquet structs with duplicate sibling field names.
+#
+# The parquet format does not require sibling field names to be unique, and
+# parquet-rs reads such files without complaint. Schema validation used to
+# consult the first name match while decoding consulted the last, so a
+# duplicate of a different type could put a mistyped array into the chunk with
+# no error. Now a declared field name matching multiple siblings is ambiguous:
+# the column is treated as non-matching and reads as NULL, and decoding binds
+# the first occurrence, agreeing with validation.
+#
+# RisingWave DDL cannot express duplicate struct field names, so the committed
+# fixture `data/duplicate_field_names/data.parquet` was generated with
+# parquet-rs 58.1.0 (ArrowWriter):
+#   id: int32                          = [1, 2]
+#   s:  struct<v: int64, v: utf8>      = [{42, "dup"}, {7, "x"}]
+
+statement ok
+create table parquet_duplicate_field_names (
+    id int,
+    s struct<v bigint>
+) with (
+    connector = 'posix_fs',
+    posix_fs.root = 'e2e_test/source_inline/fs/data/duplicate_field_names'
+) format plain encode parquet;
+
+# Wait until the reader has discovered and ingested the file.
+query I retry 60 backoff 1s
+select count(*) from parquet_duplicate_field_names;
+----
+2
+
+# `s` declares `v`, which matches two file-side siblings (int64 and utf8): the
+# match is ambiguous, so the whole column reads as NULL while `id` decodes.
+query IT
+select id, s from parquet_duplicate_field_names order by id;
+----
+1 NULL
+2 NULL
+
+statement ok
+drop table parquet_duplicate_field_names;

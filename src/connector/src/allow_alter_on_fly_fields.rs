@@ -18,9 +18,10 @@
 // `UPDATE_EXPECT=1`.
 // To update content, change source/sink/connection WITH options definitions (for example,
 // `#[with_option(allow_alter_on_fly)]` on struct fields), then run `./risedev generate-with-options`.
-// `./risedev generate-with-options` runs two UPDATE_EXPECT tests:
+// `./risedev generate-with-options` runs three UPDATE_EXPECT tests:
 // 1) refresh `with_options_{source,sink,connection}.yaml`;
-// 2) regenerate this file from those YAML files.
+// 2) regenerate this file from those YAML files;
+// 3) regenerate the Iceberg Engine option classifier.
 
 #![rustfmt::skip]
 
@@ -191,6 +192,8 @@ pub static SOURCE_ALLOW_ALTER_ON_FLY_FIELDS: LazyLock<HashMap<String, HashSet<St
         std::any::type_name::<PubsubProperties>().to_owned(),
         [
             "pubsub.ack_deadline_seconds".to_owned(),
+            "pubsub.max_outstanding_messages".to_owned(),
+            "pubsub.max_outstanding_bytes".to_owned(),
         ].into_iter().collect(),
     ).unwrap();
     // PulsarProperties
@@ -229,6 +232,15 @@ pub static SINK_ALLOW_ALTER_ON_FLY_FIELDS: LazyLock<HashMap<String, HashSet<Stri
             "doris.stream_load.http.timeout.ms".to_owned(),
         ].into_iter().collect(),
     ).unwrap();
+    // ElasticSearchConfig
+    map.try_insert(
+        std::any::type_name::<ElasticSearchConfig>().to_owned(),
+        [
+            "batch_num_messages".to_owned(),
+            "batch_size_kb".to_owned(),
+            "concurrent_requests".to_owned(),
+        ].into_iter().collect(),
+    ).unwrap();
     // IcebergConfig
     map.try_insert(
         std::any::type_name::<IcebergConfig>().to_owned(),
@@ -241,6 +253,9 @@ pub static SINK_ALLOW_ALTER_ON_FLY_FIELDS: LazyLock<HashMap<String, HashSet<Stri
             "snapshot_expiration_retain_last".to_owned(),
             "snapshot_expiration_clear_expired_files".to_owned(),
             "snapshot_expiration_clear_expired_meta_data".to_owned(),
+            "enable_manifest_rewrite".to_owned(),
+            "manifest_rewrite_target_size_bytes".to_owned(),
+            "manifest_rewrite_min_count_to_merge".to_owned(),
             "compaction.max_snapshots_num".to_owned(),
             "compaction.small_files_threshold_mb".to_owned(),
             "compaction.delete_files_count_threshold".to_owned(),
@@ -292,6 +307,28 @@ pub static SINK_ALLOW_ALTER_ON_FLY_FIELDS: LazyLock<HashMap<String, HashSet<Stri
             "properties.request.required.acks".to_owned(),
         ].into_iter().collect(),
     ).unwrap();
+    // OpenSearchConfig
+    map.try_insert(
+        std::any::type_name::<OpenSearchConfig>().to_owned(),
+        [
+            "batch_num_messages".to_owned(),
+            "batch_size_kb".to_owned(),
+            "concurrent_requests".to_owned(),
+        ].into_iter().collect(),
+    ).unwrap();
+    // PulsarConfig
+    map.try_insert(
+        std::any::type_name::<PulsarConfig>().to_owned(),
+        [
+            "properties.routing.mode".to_owned(),
+            "properties.routing_mode".to_owned(),
+            "routing_mode".to_owned(),
+            "pulsar.routing_mode".to_owned(),
+            "pulsar.routing.mode".to_owned(),
+            "pulsar.properties.routing.mode".to_owned(),
+            "pulsar.properties.routing_mode".to_owned(),
+        ].into_iter().collect(),
+    ).unwrap();
     // SnowflakeV2Config
     map.try_insert(
         std::any::type_name::<SnowflakeV2Config>().to_owned(),
@@ -305,6 +342,7 @@ pub static SINK_ALLOW_ALTER_ON_FLY_FIELDS: LazyLock<HashMap<String, HashSet<Stri
         [
             "starrocks.stream_load.http.timeout.ms".to_owned(),
             "commit_checkpoint_interval".to_owned(),
+            "starrocks.max_batch_size_bytes".to_owned(),
         ].into_iter().collect(),
     ).unwrap();
     // TurbopufferConfig

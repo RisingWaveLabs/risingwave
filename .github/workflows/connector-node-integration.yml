@@ -1,5 +1,9 @@
 name: Connector Node Integration Tests
 
+permissions:
+  contents: read
+  pull-requests: read
+
 on:
   push:
     branches: [ main ]

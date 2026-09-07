@@ -356,12 +356,15 @@ ElasticSearchConfig:
   - name: batch_num_messages
     field_type: usize
     required: true
+    allow_alter_on_fly: true
   - name: batch_size_kb
     field_type: usize
     required: true
+    allow_alter_on_fly: true
   - name: concurrent_requests
     field_type: usize
     required: true
+    allow_alter_on_fly: true
   - name: r#type
     field_type: String
     required: false
@@ -452,7 +455,11 @@ HttpConfig:
   fields:
   - name: url
     field_type: String
-    comments: The endpoint URL to POST data to.
+    comments: The endpoint URL to send data to.
+    required: false
+  - name: method
+    field_type: String
+    comments: HTTP request method. Supported values are `POST` and `PUT`. Defaults to `POST`.
     required: false
   - name: content_type
     field_type: String
@@ -676,16 +683,19 @@ IcebergConfig:
     field_type: String
     required: false
     default: Default::default
+    iceberg_engine: true
   - name: order_key
     field_type: String
     required: false
     default: Default::default
+    iceberg_engine: true
   - name: commit_checkpoint_interval
     field_type: u64
     comments: Commit every n(>0) checkpoints, default is 60.
     required: false
     default: ICEBERG_DEFAULT_COMMIT_CHECKPOINT_INTERVAL
     allow_alter_on_fly: true
+    iceberg_engine: true
   - name: create_table_if_not_exists
     field_type: bool
     required: false
@@ -705,28 +715,33 @@ IcebergConfig:
     required: false
     default: Default::default
     allow_alter_on_fly: true
+    iceberg_engine: true
   - name: compaction_interval_sec
     field_type: u64
     comments: The interval of iceberg compaction
     required: false
     default: Default::default
     allow_alter_on_fly: true
+    iceberg_engine: true
   - name: enable_snapshot_expiration
     field_type: bool
     comments: Whether to enable iceberg expired snapshots.
     required: false
     default: 'true'
     allow_alter_on_fly: true
+    iceberg_engine: true
   - name: write_mode
     field_type: IcebergWriteMode
     comments: The iceberg write mode, can be `merge-on-read` or `copy-on-write`.
     required: false
     default: 'IcebergWriteMode :: MergeOnRead'
+    iceberg_engine: true
   - name: format_version
     field_type: FormatVersion
     comments: Iceberg format version for table creation.
     required: false
     default: 'FormatVersion :: V2'
+    iceberg_engine: true
   - name: snapshot_expiration_max_age_millis
     field_type: i64
     comments: |-
@@ -735,22 +750,47 @@ IcebergConfig:
     required: false
     default: Default::default
     allow_alter_on_fly: true
+    iceberg_engine: true
   - name: snapshot_expiration_retain_last
     field_type: i32
     comments: The number of snapshots to retain
     required: false
     default: Default::default
     allow_alter_on_fly: true
+    iceberg_engine: true
   - name: snapshot_expiration_clear_expired_files
     field_type: bool
     required: false
     default: 'true'
     allow_alter_on_fly: true
+    iceberg_engine: true
   - name: snapshot_expiration_clear_expired_meta_data
     field_type: bool
     required: false
     default: 'true'
     allow_alter_on_fly: true
+    iceberg_engine: true
+  - name: enable_manifest_rewrite
+    field_type: bool
+    comments: Whether to periodically rewrite fragmented Iceberg data manifests.
+    required: false
+    default: Default::default
+    allow_alter_on_fly: true
+    iceberg_engine: true
+  - name: manifest_rewrite_target_size_bytes
+    field_type: u64
+    comments: Target size in bytes for rewritten Iceberg data manifests.
+    required: false
+    default: Default::default
+    allow_alter_on_fly: true
+    iceberg_engine: true
+  - name: manifest_rewrite_min_count_to_merge
+    field_type: usize
+    comments: Minimum number of manifests required to rewrite an under-filled batch.
+    required: false
+    default: Default::default
+    allow_alter_on_fly: true
+    iceberg_engine: true
   - name: compaction.max_snapshots_num
     field_type: usize
     comments: |-
@@ -760,34 +800,40 @@ IcebergConfig:
     required: false
     default: Default::default
     allow_alter_on_fly: true
+    iceberg_engine: true
   - name: compaction.small_files_threshold_mb
     field_type: u64
     required: false
     default: Default::default
     allow_alter_on_fly: true
+    iceberg_engine: true
   - name: compaction.delete_files_count_threshold
     field_type: usize
     required: false
     default: Default::default
     allow_alter_on_fly: true
+    iceberg_engine: true
   - name: compaction.trigger_snapshot_count
     field_type: usize
     required: false
     default: Default::default
     allow_alter_on_fly: true
+    iceberg_engine: true
   - name: compaction.target_file_size_mb
     field_type: u64
     required: false
     default: Default::default
     allow_alter_on_fly: true
+    iceberg_engine: true
   - name: compaction.type
     field_type: CompactionType
     comments: |-
-      Compaction type: `full`, `small-files`, or `files-with-delete`
-      If not set, will default to `full`
+      Compaction type: `auto`, `full`, `small-files`, or `files-with-delete`
+      If not set, defaults to `auto` when Iceberg compaction is licensed, otherwise `full`
     required: false
     default: Default::default
     allow_alter_on_fly: true
+    iceberg_engine: true
   - name: compaction.write_parquet_compression
     field_type: String
     comments: |-
@@ -797,6 +843,7 @@ IcebergConfig:
     required: false
     default: Default::default
     allow_alter_on_fly: true
+    iceberg_engine: true
   - name: compaction.write_parquet_max_row_group_rows
     field_type: usize
     comments: |-
@@ -805,6 +852,7 @@ IcebergConfig:
     required: false
     default: Default::default
     allow_alter_on_fly: true
+    iceberg_engine: true
   - name: compaction.write_parquet_max_row_group_bytes
     field_type: usize
     comments: |-
@@ -813,6 +861,7 @@ IcebergConfig:
     required: false
     default: Default::default
     allow_alter_on_fly: true
+    iceberg_engine: true
   - name: enable_pk_index
     field_type: bool
     comments: |-
@@ -821,6 +870,7 @@ IcebergConfig:
       position deletes instead of equality deletes.
     required: false
     default: Default::default
+    iceberg_engine: true
 KafkaConfig:
   fields:
   - name: topic
@@ -1404,16 +1454,73 @@ OpenSearchConfig:
   - name: batch_num_messages
     field_type: usize
     required: true
+    allow_alter_on_fly: true
   - name: batch_size_kb
     field_type: usize
     required: true
+    allow_alter_on_fly: true
   - name: concurrent_requests
     field_type: usize
     required: true
+    allow_alter_on_fly: true
   - name: r#type
     field_type: String
     required: false
     default: '"upsert" . to_owned ()'
+PostgresConfig:
+  fields:
+  - name: host
+    field_type: String
+    required: true
+  - name: port
+    field_type: u16
+    required: true
+  - name: user
+    field_type: String
+    required: true
+  - name: password
+    field_type: String
+    required: true
+  - name: database
+    field_type: String
+    required: true
+  - name: table
+    field_type: String
+    required: true
+  - name: schema
+    field_type: String
+    required: false
+    default: '"public" . to_owned ()'
+  - name: ssl_mode
+    field_type: SslMode
+    required: false
+    default: Default::default
+  - name: ssl.root.cert
+    field_type: String
+    required: false
+  - name: max_batch_rows
+    field_type: usize
+    required: false
+    default: '1024'
+  - name: r#type
+    field_type: String
+    required: true
+  - name: tcp.keepalive.enable
+    field_type: bool
+    required: false
+    default: Default::default
+  - name: tcp.keepalive.idle
+    field_type: u32
+    required: false
+    default: 10 * 60
+  - name: tcp.keepalive.interval
+    field_type: u32
+    required: false
+    default: '10'
+  - name: tcp.keepalive.count
+    field_type: u32
+    required: false
+    default: '3'
 PulsarConfig:
   fields:
   - name: properties.retry.max
@@ -1507,6 +1614,17 @@ PulsarConfig:
     field_type: usize
     required: false
     default: 1 << 20
+  - name: properties.routing.mode
+    field_type: PulsarRoutingMode
+    required: false
+    alias:
+    - properties.routing_mode
+    - routing_mode
+    - pulsar.routing_mode
+    - pulsar.routing.mode
+    - pulsar.properties.routing.mode
+    - pulsar.properties.routing_mode
+    allow_alter_on_fly: true
 RedShiftConfig:
   fields:
   - name: jdbc.url
@@ -1865,6 +1983,13 @@ StarrocksConfig:
     field_type: String
     comments: Enable partial update
     required: false
+  - name: starrocks.max_batch_size_bytes
+    field_type: u64
+    comments: |-
+      The maximum size in bytes for each `StarRocks` stream load request payload.
+      Defaults to unlimited.
+    required: false
+    allow_alter_on_fly: true
   - name: r#type
     field_type: String
     required: true
@@ -1887,6 +2012,9 @@ TurbopufferConfig:
     required: false
   - name: disable_backpressure
     field_type: bool
+    required: false
+  - name: num_shards
+    field_type: usize
     required: false
   - name: full_text_search_columns
     field_type: String

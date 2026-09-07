@@ -109,6 +109,7 @@ impl BatchEnvironment {
                 BatchConfig::default(),
                 BatchManagerMetrics::for_test(),
                 u64::MAX,
+                None,
             )),
             server_addr: "127.0.0.1:2333".parse().unwrap(),
             config: Arc::new(BatchConfig::default()),

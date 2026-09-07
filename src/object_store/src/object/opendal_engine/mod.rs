@@ -14,9 +14,8 @@
 
 pub mod opendal_object_store;
 
-use opendal::layers::{ConcurrentLimitLayer, LoggingLayer};
-use opendal::raw::Access;
-use opendal::{Operator, OperatorBuilder};
+use opendal::Operator;
+use opendal::layers::ConcurrentLimitLayer;
 pub use opendal_object_store::*;
 use risingwave_common::config::ObjectStoreConfig;
 
@@ -37,7 +36,7 @@ pub mod fs;
 // To make sure the the operation is consistent, we should specially set `atomic_write_dir` for fs, hdfs and webhdfs services.
 const ATOMIC_WRITE_DIR: &str = "atomic_write_dir/";
 
-fn new_operator(config: &ObjectStoreConfig, builder: OperatorBuilder<impl Access>) -> Operator {
+fn new_operator(config: &ObjectStoreConfig, op: Operator) -> Operator {
     // Tokio semaphore rejects values above `usize::MAX >> 3`.
     const UNLIMITED_OPERATION_CONCURRENCY: usize = usize::MAX >> 3;
 
@@ -52,8 +51,8 @@ fn new_operator(config: &ObjectStoreConfig, builder: OperatorBuilder<impl Access
             concurrent_limit_layer =
                 concurrent_limit_layer.with_http_concurrent_limit(config.http_concurrent_limit);
         }
-        builder.layer(concurrent_limit_layer).finish()
+        op.layer(concurrent_limit_layer)
     } else {
-        builder.layer(LoggingLayer::default()).finish()
+        op
     }
 }

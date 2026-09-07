@@ -119,15 +119,13 @@ async fn fetch_pgvector_dimensions_for_table(
 /// time.
 ///
 /// Right now the answer is "yes iff the array's element type is a user-defined
-/// enum". Debezium does not expose element enum metadata on the array column
-/// (the `enumValues` field is only set for scalar enum columns), so we ask the
-/// upstream catalog directly: follow the array type's `typelem` to its element
-/// type and check `typtype = 'e'`. Enum values are plain text, hence `varchar[]`.
-///
-/// TODO(composite): arrays of composite types (`typtype = 'c'`) should likewise
-/// map to `varchar[]`. That is deferred to a follow-up PR — the snapshot/streaming
-/// side for composite arrays is handled in #25818, and this predicate should be
-/// extended to `typtype IN ('e', 'c')` once that lands.
+/// enum or composite". Debezium does not expose element enum/composite metadata
+/// on the array column (the `enumValues` field is only set for scalar enum
+/// columns, and `jdbcType == STRUCT` is only set for scalar composite columns),
+/// so we ask the upstream catalog directly: follow the array type's `typelem`
+/// to its element type and check `typtype IN ('e', 'c')`. Enum values are plain
+/// text, and composite values are converted to text by our `CustomConverter`,
+/// hence `varchar[]`.
 async fn can_fallback_array_to_varchar(
     connector_props: &ConnectorProperties,
     array_type_name: &str,
@@ -147,7 +145,7 @@ async fn can_fallback_array_to_varchar(
 
     let row = client
         .query_opt(
-            "SELECT t_elem.typtype = 'e' \
+            "SELECT t_elem.typtype IN ('e', 'c') \
              FROM pg_type t \
              JOIN pg_type t_elem ON t.typelem = t_elem.oid \
              WHERE t.typname = $1 \

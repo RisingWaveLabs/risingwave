@@ -16,13 +16,8 @@ use std::collections::{HashMap, HashSet};
 
 use risingwave_common::catalog::TableId;
 use risingwave_common::util::epoch::INVALID_EPOCH;
-use risingwave_pb::hummock::hummock_version_delta::PbChangeLogDelta;
-use risingwave_pb::hummock::{
-    PbEpochNewChangeLog, PbHummockVersion, PbHummockVersionDelta, PbSstableInfo,
-    StateTableInfoDelta,
-};
+use risingwave_pb::hummock::{PbHummockVersion, PbHummockVersionDelta, StateTableInfoDelta};
 
-use crate::change_log::{ChangeLogDeltaCommon, EpochNewChangeLogCommon, resolve_pb_log_epochs};
 use crate::version::{HummockVersion, HummockVersionDelta, HummockVersionStateTableInfo};
 use crate::{HummockVersionId, INVALID_VERSION_ID};
 
@@ -75,7 +70,6 @@ pub struct FrontendHummockVersionDelta {
     pub id: HummockVersionId,
     pub removed_table_id: HashSet<TableId>,
     pub state_table_info_delta: HashMap<TableId, StateTableInfoDelta>,
-    pub change_log_delta: HashMap<TableId, ChangeLogDeltaCommon<()>>,
 }
 
 impl FrontendHummockVersionDelta {
@@ -85,28 +79,6 @@ impl FrontendHummockVersionDelta {
             id: delta.id,
             removed_table_id: delta.removed_table_ids.clone(),
             state_table_info_delta: delta.state_table_info_delta.clone(),
-            change_log_delta: delta
-                .change_log_delta
-                .iter()
-                .map(|(table_id, change_log_delta)| {
-                    (
-                        *table_id,
-                        ChangeLogDeltaCommon {
-                            truncate_epoch: change_log_delta.truncate_epoch,
-                            new_log: EpochNewChangeLogCommon {
-                                // Here we need to determine if value is null but don't care what the value is, so we fill him in using `()`
-                                new_value: vec![(); change_log_delta.new_log.new_value.len()],
-                                old_value: vec![(); change_log_delta.new_log.old_value.len()],
-                                non_checkpoint_epochs: change_log_delta
-                                    .new_log
-                                    .non_checkpoint_epochs
-                                    .clone(),
-                                checkpoint_epoch: change_log_delta.new_log.checkpoint_epoch,
-                            },
-                        },
-                    )
-                })
-                .collect(),
         }
     }
 
@@ -120,30 +92,7 @@ impl FrontendHummockVersionDelta {
             trivial_move: false,
             new_table_watermarks: Default::default(),
             removed_table_ids: self.removed_table_id.iter().copied().collect(),
-            change_log_delta: self
-                .change_log_delta
-                .iter()
-                .map(|(table_id, delta)| {
-                    (
-                        *table_id,
-                        PbChangeLogDelta {
-                            new_log: Some(PbEpochNewChangeLog {
-                                // Here we need to determine if value is null but don't care what the value is, so we fill him in using `PbSstableInfo::default()`
-                                old_value: vec![
-                                    PbSstableInfo::default();
-                                    delta.new_log.old_value.len()
-                                ],
-                                new_value: vec![
-                                    PbSstableInfo::default();
-                                    delta.new_log.new_value.len()
-                                ],
-                                epochs: delta.new_log.epochs().collect(),
-                            }),
-                            truncate_epoch: delta.truncate_epoch,
-                        },
-                    )
-                })
-                .collect(),
+            change_log_delta: Default::default(),
             state_table_info_delta: self.state_table_info_delta.clone(),
             vector_index_delta: Default::default(),
         }
@@ -158,33 +107,6 @@ impl FrontendHummockVersionDelta {
                 .state_table_info_delta
                 .iter()
                 .map(|(table_id, delta)| ((*table_id), *delta))
-                .collect(),
-            change_log_delta: delta
-                .change_log_delta
-                .iter()
-                .map(|(table_id, change_log_delta)| {
-                    (
-                        *table_id,
-                        ChangeLogDeltaCommon {
-                            truncate_epoch: change_log_delta.truncate_epoch,
-                            new_log: change_log_delta
-                                .new_log
-                                .as_ref()
-                                .map(|new_log| {
-                                    let (non_checkpoint_epochs, checkpoint_epoch) =
-                                        resolve_pb_log_epochs(&new_log.epochs);
-                                    EpochNewChangeLogCommon {
-                                        // Here we need to determine if value is null but don't care what the value is, so we fill him in using `()`
-                                        new_value: vec![(); new_log.new_value.len()],
-                                        old_value: vec![(); new_log.old_value.len()],
-                                        non_checkpoint_epochs,
-                                        checkpoint_epoch,
-                                    }
-                                })
-                                .unwrap(),
-                        },
-                    )
-                })
                 .collect(),
         }
     }

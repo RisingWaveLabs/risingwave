@@ -364,13 +364,9 @@ impl Binder {
                     let except_indices = self.generate_except_indices(except.as_deref())?;
                     let (begin, end) = self
                         .context
-                        .range_of
-                        .get(&(schema_name, table_name.clone()))
-                        .ok_or_else(|| {
-                            ErrorCode::ItemNotFound(format!("relation \"{}\"", table_name))
-                        })?;
+                        .resolve_relation_range(&table_name, &schema_name)?;
                     let (exprs, names) = Self::iter_bound_columns(
-                        self.context.columns[*begin..*end]
+                        self.context.columns[begin..end]
                             .iter()
                             .filter(|c| !c.is_hidden && !except_indices.contains(&c.index)),
                     );
@@ -751,6 +747,7 @@ fn data_type_to_alias(data_type: &AstDataType) -> Option<String> {
         AstDataType::Text => "text".to_owned(),
         AstDataType::Bytea => "bytea".to_owned(),
         AstDataType::Jsonb => "jsonb".to_owned(),
+        AstDataType::Variant => "variant".to_owned(),
         AstDataType::Array(ty) => return data_type_to_alias(ty),
         AstDataType::Custom(ty) => format!("{}", ty),
         AstDataType::Vector(_) => "vector".to_owned(),

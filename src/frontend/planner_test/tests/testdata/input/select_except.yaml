@@ -26,6 +26,31 @@
   expected_outputs:
   - batch_plan
   - stream_plan
+- name: qualified wildcard on schema-qualified relation
+  sql: |
+    create schema s;
+    create table s.t (v1 int, v2 int, v3 int);
+    select t.* except (t.v2) from s.t;
+  expected_outputs:
+  - batch_plan
+  - stream_plan
+- name: qualified wildcard on schema-qualified relation with join using
+  sql: |
+    create schema s;
+    create table s.names (id int, name varchar);
+    create table s.people (id int, version int, age int);
+    select names.name, people.* except (people.version) from s.names join s.people using (id);
+  expected_outputs:
+  - batch_plan
+  - stream_plan
+- name: qualified wildcard argument on schema-qualified relation
+  sql: |
+    create schema s;
+    create table s.t (v1 int, v2 int);
+    select jsonb_agg(t.*) from s.t;
+  expected_outputs:
+  - batch_plan
+  - stream_plan
 - name: except with unknown column
   sql: |
     create table t (v1 int, v2 int, v3 int);

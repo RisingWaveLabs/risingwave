@@ -21,10 +21,10 @@ use risingwave_pb::compactor::{
 use risingwave_pb::monitor_service::monitor_service_server::MonitorService;
 use risingwave_pb::monitor_service::{
     AnalyzeHeapRequest, AnalyzeHeapResponse, GetProfileStatsRequest, GetProfileStatsResponse,
-    GetStreamingStatsRequest, GetStreamingStatsResponse, HeapProfilingRequest,
-    HeapProfilingResponse, ListHeapProfilingRequest, ListHeapProfilingResponse, ProfilingRequest,
-    ProfilingResponse, StackTraceRequest, StackTraceResponse, TieredCacheTracingRequest,
-    TieredCacheTracingResponse,
+    GetStreamingStatsRequest, GetStreamingStatsResponse, GetTableCacheRefillStatsRequest,
+    GetTableCacheRefillStatsResponse, HeapProfilingRequest, HeapProfilingResponse,
+    ListHeapProfilingRequest, ListHeapProfilingResponse, ProfilingRequest, ProfilingResponse,
+    StackTraceRequest, StackTraceResponse, TieredCacheTracingRequest, TieredCacheTracingResponse,
 };
 use risingwave_storage::hummock::compactor::CompactionAwaitTreeRegRef;
 use risingwave_storage::hummock::compactor::await_tree_key::Compaction;
@@ -60,7 +60,7 @@ impl CompactorService for CompactorServiceImpl {
             }
             None => {
                 tracing::error!(
-                    "fail to send DispatchCompactionTaskRequest, sender has not been initialized."
+                    "failed to send DispatchCompactionTaskRequest: the sender has not been initialized"
                 );
             }
         }
@@ -160,6 +160,15 @@ impl MonitorService for MonitorServiceImpl {
     ) -> Result<Response<GetProfileStatsResponse>, Status> {
         Err(Status::unimplemented(
             "Get Profile Stats unimplemented in compactor",
+        ))
+    }
+
+    async fn get_table_cache_refill_stats(
+        &self,
+        _request: Request<GetTableCacheRefillStatsRequest>,
+    ) -> Result<Response<GetTableCacheRefillStatsResponse>, Status> {
+        Err(Status::unimplemented(
+            "Get Table Cache Refill Stats unimplemented in compactor",
         ))
     }
 }

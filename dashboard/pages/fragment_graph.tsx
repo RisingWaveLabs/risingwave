@@ -125,7 +125,7 @@ function buildPlanNodeDependency(
     actors: [],
   }
 
-  return d3.hierarchy({
+  return d3.hierarchy<PlanNodeDatum>({
     name: dispatcherName,
     actorIds: fragment.actors.map((a) => a.actorId.toString()),
     children: fragment.nodes ? [hierarchyActorNode(fragment.nodes)] : [],

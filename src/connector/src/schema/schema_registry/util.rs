@@ -45,9 +45,9 @@ pub fn handle_sr_list(addr: &str) -> Result<Vec<Url>, InvalidOptionError> {
 
 #[derive(Debug, thiserror::Error)]
 pub enum WireFormatError {
-    #[error("fail to match a magic byte of 0")]
+    #[error("failed to match the magic byte 0")]
     NoMagic,
-    #[error("fail to read 4-byte schema ID")]
+    #[error("failed to read the 4-byte schema ID")]
     NoSchemaId,
     #[error("failed to parse message indexes")]
     ParseMessageIndexes,

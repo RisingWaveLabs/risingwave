@@ -269,22 +269,23 @@ impl Binder {
         negated: bool,
     ) -> Result<ExprImpl> {
         let left = self.bind_expr_inner(expr)?;
-        let mut bound_expr_list = vec![left.clone()];
+        let mut in_list_exprs = vec![left.clone()];
         let mut non_const_exprs = vec![];
         for elem in list {
             let expr = self.bind_expr_inner(elem)?;
-            match expr.is_const() {
-                true => bound_expr_list.push(expr),
+            match expr.is_const() || matches!(&expr, ExprImpl::Parameter(_)) {
+                true => in_list_exprs.push(expr),
                 false => non_const_exprs.push(expr),
             }
         }
 
-        let mut ret = if bound_expr_list.len() == 1 {
+        let mut ret = if in_list_exprs.len() == 1 {
             None
         } else {
-            Some(FunctionCall::new(ExprType::In, bound_expr_list)?.into())
+            Some(FunctionCall::new(ExprType::In, in_list_exprs)?.into())
         };
-        // Non-const exprs are not part of IN-expr in backend and rewritten into OR-Equal-exprs.
+        // Row-dependent list items are not part of IN-expr in backend and rewritten into
+        // OR-Equal-exprs.
         for expr in non_const_exprs {
             if let Some(inner_ret) = ret {
                 ret = Some(
@@ -1132,6 +1133,7 @@ pub fn bind_data_type(data_type: &AstDataType) -> Result<DataType> {
         }
         AstDataType::Bytea => DataType::Bytea,
         AstDataType::Jsonb => DataType::Jsonb,
+        AstDataType::Variant => DataType::Variant,
         AstDataType::Vector(size) => match (1..=DataType::VEC_MAX_SIZE).contains(&(*size as _)) {
             true => DataType::Vector(*size as _),
             false => {

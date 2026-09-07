@@ -1,5 +1,9 @@
 # To test: gh workflow run 'Build Docker Image' --ref kwannoel/workflow-update-branch
 name: Build Docker Image
+
+permissions:
+  contents: read
+
 on:
   workflow_dispatch:
     inputs:
@@ -15,6 +19,11 @@ on:
         default: false
       push_dockerhub:
         description: 'Whether to push to DockerHub'
+        required: false
+        type: boolean
+        default: false
+      run_main_cron:
+        description: 'Whether to trigger Buildkite main-cron'
         required: false
         type: boolean
         default: false
@@ -78,6 +87,7 @@ jobs:
           echo "PUSH_DOCKERHUB=$PUSH_DOCKERHUB"
           echo "PUSH_DOCKERHUB=$PUSH_DOCKERHUB" >> $GITHUB_ENV
       - name: 'Trigger Docker build Workflow via Buildkite'
+        id: trigger_docker
         uses: buildkite/trigger-pipeline-action@v2.3.0
         with:
           buildkite_api_access_token: ${{ secrets.BUILDKITE_TOKEN }}
@@ -86,3 +96,35 @@ jobs:
           commit: HEAD
           message: ':github: Triggering Docker build with image tag: ${{ env.IMAGE_TAG }}'
           build_env_vars: '{ "IMAGE_TAG": "${{ env.IMAGE_TAG }}", "PUSH_DOCKERHUB": "${{ env.PUSH_DOCKERHUB }}", "SKIP_TARGET_AMD64": "${{ env.SKIP_TARGET_AMD64 }}", "CARGO_PROFILE": "${{ env.CARGO_PROFILE }}" }'
+      - name: 'Trigger main-cron Workflow via Buildkite'
+        id: trigger_main_cron
+        if: ${{ inputs.run_main_cron }}
+        uses: buildkite/trigger-pipeline-action@v2.3.0
+        with:
+          buildkite_api_access_token: ${{ secrets.BUILDKITE_TOKEN }}
+          pipeline: 'risingwavelabs/main-cron'
+          branch: ${{ env.BRANCH_NAME }}
+          commit: HEAD
+          message: ':github: Triggering main-cron for branch: ${{ env.BRANCH_NAME }}'
+          ignore_pipeline_branch_filter: true
+          wait: false
+      - name: 'Summarize Buildkite builds'
+        if: ${{ always() }}
+        env:
+          DOCKER_BUILD_URL: ${{ steps.trigger_docker.outputs.url }}
+          RUN_MAIN_CRON: ${{ inputs.run_main_cron }}
+          MAIN_CRON_BUILD_URL: ${{ steps.trigger_main_cron.outputs.url }}
+        run: |
+          if [[ -n "$DOCKER_BUILD_URL" ]]; then
+            echo "- [Docker build]($DOCKER_BUILD_URL)" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "- Docker build: URL unavailable (trigger failed before returning one)." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          if [[ "$RUN_MAIN_CRON" == "true" ]]; then
+            if [[ -n "$MAIN_CRON_BUILD_URL" ]]; then
+              echo "- [Main-cron build]($MAIN_CRON_BUILD_URL)" >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "- Main-cron build: URL unavailable (trigger failed before returning one)." >> "$GITHUB_STEP_SUMMARY"
+            fi
+          fi

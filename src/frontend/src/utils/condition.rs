@@ -857,7 +857,7 @@ impl Condition {
         let mut other_conds = vec![];
 
         // analyze exprs in the group. scan_range is not updated
-        for expr in group {
+        'group_loop: for expr in group {
             if let Some((input_ref, const_expr)) = expr.as_eq_const() {
                 let new_expr = if let Ok(expr) =
                     const_expr.clone().cast_implicit(&input_ref.data_type)
@@ -889,13 +889,32 @@ impl Condition {
                     return Ok(None);
                 }
                 eq_conds = vec![None];
-            } else if let Some((input_ref, in_const_list)) = expr.as_in_const_list() {
+            } else if let Some((input_ref, in_const_list)) = expr
+                .as_in_const_list()
+                .or_else(|| expr.as_some_eq_const_list())
+            {
                 let mut scalars = HashSet::new();
                 for const_expr in in_const_list {
-                    // The cast should succeed, because otherwise the input_ref is casted
-                    // and thus `as_in_const_list` returns None.
-                    let const_expr = const_expr.cast_implicit(&input_ref.data_type).unwrap();
-                    let value = const_expr.fold_const()?;
+                    let new_expr =
+                        if let Ok(expr) = const_expr.clone().cast_implicit(&input_ref.data_type) {
+                            expr
+                        } else {
+                            match self::cast_compare::cast_compare_for_eq(
+                                const_expr,
+                                input_ref.data_type.clone(),
+                            ) {
+                                Ok(ResultForEq::Success(expr)) => expr,
+                                Ok(ResultForEq::NeverEqual) => {
+                                    continue;
+                                }
+                                Err(_) => {
+                                    other_conds.push(expr);
+                                    continue 'group_loop;
+                                }
+                            }
+                        };
+
+                    let value = new_expr.fold_const()?;
                     let Some(value) = value else {
                         continue;
                     };

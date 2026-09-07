@@ -111,4 +111,11 @@ impl MonitorService for MonitorServiceImpl {
     ) -> Result<Response<monitor_service::GetProfileStatsResponse>, Status> {
         Err(Status::unimplemented("not implemented in meta node"))
     }
+
+    async fn get_table_cache_refill_stats(
+        &self,
+        _request: Request<monitor_service::GetTableCacheRefillStatsRequest>,
+    ) -> Result<Response<monitor_service::GetTableCacheRefillStatsResponse>, Status> {
+        Err(Status::unimplemented("not implemented in meta node"))
+    }
 }

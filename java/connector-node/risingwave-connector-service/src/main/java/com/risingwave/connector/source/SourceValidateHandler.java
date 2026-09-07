@@ -217,7 +217,7 @@ public class SourceValidateHandler {
                 ensurePropNotBlank(props, DbzConnectorConfig.MongoDb.MONGO_URL);
                 ensurePropNotBlank(props, DbzConnectorConfig.MongoDb.MONGO_COLLECTION_NAME);
                 validateQueueMemoryRatio(props);
-                try (var validator = new MongoDbValidator(props)) {
+                try (var validator = new MongoDbValidator(props, request.getSourceId())) {
                     validator.validateAll();
                 }
                 break;

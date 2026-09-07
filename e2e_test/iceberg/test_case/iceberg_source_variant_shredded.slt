@@ -1,0 +1,60 @@
+# Shredded variant columns cannot be reconstructed yet: the whole variant column
+# reads as NULL (with a warning) while the sibling columns stay readable.
+
+system ok
+poetry run python test_utils/add_shredded_files.py
+
+statement ok
+DROP SOURCE IF EXISTS iceberg_variant_shredded_source;
+
+statement ok
+CREATE SOURCE iceberg_variant_shredded_source
+WITH (
+    connector = 'iceberg',
+    s3.endpoint = 'http://127.0.0.1:9301',
+    s3.region = 'us-east-1',
+    s3.access.key = 'hummockadmin',
+    s3.secret.key = 'hummockadmin',
+    catalog.type = 'storage',
+    warehouse.path = 's3a://icebergdata/demo',
+    database.name = 'demo_db',
+    table.name = 'test_variant_shredded',
+);
+
+# The shredded variant column reads as NULL; sibling columns keep their values.
+query ITT
+select id, v, s from iceberg_variant_shredded_source order by id;
+----
+1 NULL one
+2 NULL two
+3 NULL three
+
+# Row counts survive even when only the shredded variant column is projected.
+query I
+select count(v) from iceberg_variant_shredded_source;
+----
+0
+
+query I
+select count(*) from iceberg_variant_shredded_source;
+----
+3
+
+# Streaming ingestion of shredded files goes through the same NULL fallback (the
+# fetch executor must not error or stall on them).
+statement ok
+create materialized view shredded_streaming_mv as
+select id, v, s from iceberg_variant_shredded_source;
+
+query ITT retry 11 backoff 1s
+select id, v, s from shredded_streaming_mv order by id;
+----
+1 NULL one
+2 NULL two
+3 NULL three
+
+statement ok
+drop materialized view shredded_streaming_mv;
+
+statement ok
+DROP SOURCE iceberg_variant_shredded_source;

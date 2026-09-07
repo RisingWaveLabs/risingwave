@@ -17,7 +17,7 @@ use risingwave_common::catalog::max_column_id;
 use risingwave_connector::source::{SourceEncode, SourceStruct, extract_source_struct};
 use risingwave_sqlparser::ast::{AlterSourceOperation, ObjectName};
 
-use super::create_source::generate_stream_graph_for_source;
+use super::create_source::{generate_stream_graph_for_source, reject_variant_columns};
 use super::create_table::bind_sql_columns;
 use super::{HandlerArgs, RwPgResponse};
 use crate::Binder;
@@ -101,6 +101,14 @@ pub async fn handle_alter_source_column(
 
             // add column name is from user, so we still have check for reserved column name
             let mut bound_column = bind_sql_columns(&[column_def], false)?.remove(0);
+            // PARQUET reads variant via the extension type; other alterable encodings cannot
+            // produce variant values, and this path bypasses the CREATE-time gate.
+            if encode != SourceEncode::Parquet {
+                reject_variant_columns(
+                    std::slice::from_ref(&bound_column),
+                    "for this source encoding",
+                )?;
+            }
             bound_column.column_desc.column_id = max_column_id(columns).next();
             columns.push(bound_column);
             // No need to update the definition here. It will be done by purification later.

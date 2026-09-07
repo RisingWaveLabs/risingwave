@@ -18,6 +18,7 @@ use iceberg::spec::{
     FormatVersion, NestedField, NullOrder, PrimitiveType, Schema as IcebergSchema, SortDirection,
     Type,
 };
+use iceberg::transaction::{MANIFEST_MIN_MERGE_COUNT_DEFAULT, MANIFEST_TARGET_SIZE_BYTES_DEFAULT};
 use risingwave_common::array::arrow::arrow_schema_iceberg::{
     DataType as ArrowDataType, Field as ArrowField, FieldRef as ArrowFieldRef,
     Fields as ArrowFields, Schema as ArrowSchema,
@@ -28,13 +29,9 @@ use risingwave_common::types::{DataType, MapType, StructType};
 use crate::connector_common::{IcebergCommon, IcebergTableIdentifier};
 use crate::sink::decouple_checkpoint_log_sink::ICEBERG_DEFAULT_COMMIT_CHECKPOINT_INTERVAL;
 use crate::sink::iceberg::{
-    COMPACTION_INTERVAL_SEC, COMPACTION_MAX_SNAPSHOTS_NUM,
-    COMPACTION_WRITE_PARQUET_MAX_ROW_GROUP_BYTES, CompactionType,
-    DEFAULT_COMPACTION_MAX_SNAPSHOTS_NUM, ENABLE_COMPACTION, ENABLE_SNAPSHOT_EXPIRATION,
+    CompactionType, DEFAULT_COMPACTION_MAX_SNAPSHOTS_NUM,
     ICEBERG_DEFAULT_WRITE_PARQUET_MAX_ROW_GROUP_BYTES, IcebergConfig, IcebergOrderKeyField,
-    IcebergWriteMode, ORDER_KEY, SNAPSHOT_EXPIRATION_CLEAR_EXPIRED_FILES,
-    SNAPSHOT_EXPIRATION_CLEAR_EXPIRED_META_DATA, SNAPSHOT_EXPIRATION_MAX_AGE_MILLIS,
-    SNAPSHOT_EXPIRATION_RETAIN_LAST, WRITE_MODE, parse_order_key_exprs, validate_order_key_columns,
+    IcebergWriteMode, parse_order_key_exprs, validate_order_key_columns,
 };
 
 pub const DEFAULT_ICEBERG_COMPACTION_INTERVAL: u64 = 3600; // 1 hour
@@ -391,6 +388,9 @@ fn test_parse_iceberg_config() {
             snapshot_expiration_retain_last: None,
             snapshot_expiration_clear_expired_files: true,
             snapshot_expiration_clear_expired_meta_data: true,
+            enable_manifest_rewrite: false,
+            manifest_rewrite_target_size_bytes: None,
+            manifest_rewrite_min_count_to_merge: None,
             max_snapshots_num_before_compaction: Some(DEFAULT_COMPACTION_MAX_SNAPSHOTS_NUM),
             small_files_threshold_mb: None,
             delete_files_count_threshold: None,
@@ -401,6 +401,7 @@ fn test_parse_iceberg_config() {
             write_parquet_max_row_group_rows: None,
             write_parquet_max_row_group_bytes: None,
             enable_pk_index: false,
+            unknown_fields: Default::default(),
         };
 
     assert_eq!(iceberg_config, expected_iceberg_config);
@@ -409,117 +410,6 @@ fn test_parse_iceberg_config() {
         &iceberg_config.full_table_name().unwrap().to_string(),
         "demo_db.demo_table"
     );
-}
-
-async fn test_create_catalog(configs: BTreeMap<String, String>) {
-    let iceberg_config = IcebergConfig::from_btreemap(configs).unwrap();
-
-    let _table = iceberg_config.load_table().await.unwrap();
-}
-
-#[tokio::test]
-#[ignore]
-async fn test_storage_catalog() {
-    let values = [
-        ("connector", "iceberg"),
-        ("type", "append-only"),
-        ("force_append_only", "true"),
-        ("s3.endpoint", "http://127.0.0.1:9301"),
-        ("s3.access.key", "hummockadmin"),
-        ("s3.secret.key", "hummockadmin"),
-        ("s3.region", "us-east-1"),
-        ("s3.path.style.access", "true"),
-        ("catalog.name", "demo"),
-        ("catalog.type", "storage"),
-        ("warehouse.path", "s3://icebergdata/demo"),
-        ("database.name", "s1"),
-        ("table.name", "t1"),
-    ]
-    .into_iter()
-    .map(|(k, v)| (k.to_owned(), v.to_owned()))
-    .collect();
-
-    test_create_catalog(values).await;
-}
-
-#[tokio::test]
-#[ignore]
-async fn test_rest_catalog() {
-    let values = [
-        ("connector", "iceberg"),
-        ("type", "append-only"),
-        ("force_append_only", "true"),
-        ("s3.endpoint", "http://127.0.0.1:9301"),
-        ("s3.access.key", "hummockadmin"),
-        ("s3.secret.key", "hummockadmin"),
-        ("s3.region", "us-east-1"),
-        ("s3.path.style.access", "true"),
-        ("catalog.name", "demo"),
-        ("catalog.type", "rest"),
-        ("catalog.uri", "http://192.168.167.4:8181"),
-        ("warehouse.path", "s3://icebergdata/demo"),
-        ("database.name", "s1"),
-        ("table.name", "t1"),
-    ]
-    .into_iter()
-    .map(|(k, v)| (k.to_owned(), v.to_owned()))
-    .collect();
-
-    test_create_catalog(values).await;
-}
-
-#[tokio::test]
-#[ignore]
-async fn test_jdbc_catalog() {
-    let values = [
-        ("connector", "iceberg"),
-        ("type", "append-only"),
-        ("force_append_only", "true"),
-        ("s3.endpoint", "http://127.0.0.1:9301"),
-        ("s3.access.key", "hummockadmin"),
-        ("s3.secret.key", "hummockadmin"),
-        ("s3.region", "us-east-1"),
-        ("s3.path.style.access", "true"),
-        ("catalog.name", "demo"),
-        ("catalog.type", "jdbc"),
-        ("catalog.uri", "jdbc:postgresql://localhost:5432/iceberg"),
-        ("catalog.jdbc.user", "admin"),
-        ("catalog.jdbc.password", "123456"),
-        ("warehouse.path", "s3://icebergdata/demo"),
-        ("database.name", "s1"),
-        ("table.name", "t1"),
-    ]
-    .into_iter()
-    .map(|(k, v)| (k.to_owned(), v.to_owned()))
-    .collect();
-
-    test_create_catalog(values).await;
-}
-
-#[tokio::test]
-#[ignore]
-async fn test_hive_catalog() {
-    let values = [
-        ("connector", "iceberg"),
-        ("type", "append-only"),
-        ("force_append_only", "true"),
-        ("s3.endpoint", "http://127.0.0.1:9301"),
-        ("s3.access.key", "hummockadmin"),
-        ("s3.secret.key", "hummockadmin"),
-        ("s3.region", "us-east-1"),
-        ("s3.path.style.access", "true"),
-        ("catalog.name", "demo"),
-        ("catalog.type", "hive"),
-        ("catalog.uri", "thrift://localhost:9083"),
-        ("warehouse.path", "s3://icebergdata/demo"),
-        ("database.name", "s1"),
-        ("table.name", "t1"),
-    ]
-    .into_iter()
-    .map(|(k, v)| (k.to_owned(), v.to_owned()))
-    .collect();
-
-    test_create_catalog(values).await;
 }
 
 /// Test parsing Google Lakehouse Iceberg REST authentication configuration.
@@ -686,38 +576,6 @@ fn test_parse_custom_io_impl_config() {
     );
 }
 
-#[test]
-fn test_config_constants_consistency() {
-    // This test ensures our constants match the expected configuration names
-    // If you change a constant, this test will remind you to update both places
-    assert_eq!(ENABLE_COMPACTION, "enable_compaction");
-    assert_eq!(COMPACTION_INTERVAL_SEC, "compaction_interval_sec");
-    assert_eq!(ENABLE_SNAPSHOT_EXPIRATION, "enable_snapshot_expiration");
-    assert_eq!(WRITE_MODE, "write_mode");
-    assert_eq!(
-        SNAPSHOT_EXPIRATION_RETAIN_LAST,
-        "snapshot_expiration_retain_last"
-    );
-    assert_eq!(
-        SNAPSHOT_EXPIRATION_MAX_AGE_MILLIS,
-        "snapshot_expiration_max_age_millis"
-    );
-    assert_eq!(
-        SNAPSHOT_EXPIRATION_CLEAR_EXPIRED_FILES,
-        "snapshot_expiration_clear_expired_files"
-    );
-    assert_eq!(
-        SNAPSHOT_EXPIRATION_CLEAR_EXPIRED_META_DATA,
-        "snapshot_expiration_clear_expired_meta_data"
-    );
-    assert_eq!(COMPACTION_MAX_SNAPSHOTS_NUM, "compaction.max_snapshots_num");
-    assert_eq!(
-        COMPACTION_WRITE_PARQUET_MAX_ROW_GROUP_BYTES,
-        "compaction.write_parquet_max_row_group_bytes"
-    );
-    assert_eq!(ORDER_KEY, "order_key");
-}
-
 /// Test parsing all compaction.* prefix configs and their default values.
 #[test]
 fn test_parse_compaction_config() {
@@ -741,10 +599,13 @@ fn test_parse_compaction_config() {
         ("compaction.delete_files_count_threshold", "50"),
         ("compaction.trigger_snapshot_count", "10"),
         ("compaction.target_file_size_mb", "256"),
-        ("compaction.type", "full"),
+        ("compaction.type", "auto"),
         ("compaction.write_parquet_compression", "zstd"),
         ("compaction.write_parquet_max_row_group_rows", "50000"),
         ("compaction.write_parquet_max_row_group_bytes", "67108864"),
+        ("enable_manifest_rewrite", "true"),
+        ("manifest_rewrite_target_size_bytes", "16777216"),
+        ("manifest_rewrite_min_count_to_merge", "12"),
     ]
     .into_iter()
     .map(|(k, v)| (k.to_owned(), v.to_owned()))
@@ -757,11 +618,16 @@ fn test_parse_compaction_config() {
     assert_eq!(config.delete_files_count_threshold, Some(50));
     assert_eq!(config.trigger_snapshot_count, Some(10));
     assert_eq!(config.target_file_size_mb, Some(256));
-    assert_eq!(config.compaction_type, Some(CompactionType::Full));
+    assert_eq!(config.compaction_type, Some(CompactionType::Auto));
     assert_eq!(config.target_file_size_mb(), 256);
     assert_eq!(config.write_parquet_compression(), "zstd");
     assert_eq!(config.write_parquet_max_row_group_rows(), Some(50000));
     assert_eq!(config.write_parquet_max_row_group_bytes(), Some(67_108_864));
+    assert!(config.enable_manifest_rewrite);
+    assert_eq!(config.manifest_rewrite_target_size_bytes, Some(16_777_216));
+    assert_eq!(config.manifest_rewrite_min_count_to_merge, Some(12));
+    assert_eq!(config.manifest_rewrite_target_size_bytes(), 16_777_216);
+    assert_eq!(config.manifest_rewrite_min_count_to_merge(), 12);
 
     // Test default values (no compaction configs specified)
     let values: BTreeMap<String, String> = [
@@ -783,7 +649,19 @@ fn test_parse_compaction_config() {
     assert!(config.enable_snapshot_expiration);
     assert_eq!(config.snapshot_expiration_max_age_millis, None);
     assert_eq!(config.snapshot_expiration_retain_last, None);
+    assert!(!config.enable_manifest_rewrite);
+    assert_eq!(config.manifest_rewrite_target_size_bytes, None);
+    assert_eq!(config.manifest_rewrite_min_count_to_merge, None);
+    assert_eq!(
+        config.manifest_rewrite_target_size_bytes(),
+        MANIFEST_TARGET_SIZE_BYTES_DEFAULT as u64
+    );
+    assert_eq!(
+        config.manifest_rewrite_min_count_to_merge(),
+        MANIFEST_MIN_MERGE_COUNT_DEFAULT as usize
+    );
     assert_eq!(config.max_snapshots_num_before_compaction, None);
+    assert_eq!(config.compaction_type, None);
     assert_eq!(config.target_file_size_mb(), 1024); // Default
     assert_eq!(config.write_parquet_compression(), "zstd"); // Default
     assert_eq!(config.write_parquet_max_row_group_rows(), None); // Default
@@ -810,6 +688,60 @@ fn test_parse_compaction_config() {
     let config = IcebergConfig::from_btreemap(values).unwrap();
     assert!(!config.enable_compaction);
     assert_eq!(config.max_snapshots_num_before_compaction, Some(1000));
+}
+
+#[test]
+fn test_reject_manifest_rewrite_for_v3() {
+    let values: BTreeMap<String, String> = [
+        ("connector", "iceberg"),
+        ("type", "append-only"),
+        ("force_append_only", "true"),
+        ("catalog.name", "test-catalog"),
+        ("catalog.type", "storage"),
+        ("warehouse.path", "s3://my-bucket/warehouse"),
+        ("database.name", "test_db"),
+        ("table.name", "test_table"),
+        ("format_version", "3"),
+        ("enable_manifest_rewrite", "true"),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.to_owned(), v.to_owned()))
+    .collect();
+
+    let err = IcebergConfig::from_btreemap(values).unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("`enable_manifest_rewrite` is not supported for Iceberg format version 3")
+    );
+}
+
+#[test]
+fn test_reject_zero_manifest_rewrite_settings() {
+    for option in [
+        "manifest_rewrite_target_size_bytes",
+        "manifest_rewrite_min_count_to_merge",
+    ] {
+        let values: BTreeMap<String, String> = [
+            ("connector", "iceberg"),
+            ("type", "append-only"),
+            ("force_append_only", "true"),
+            ("catalog.name", "test-catalog"),
+            ("catalog.type", "storage"),
+            ("warehouse.path", "s3://my-bucket/warehouse"),
+            ("database.name", "test_db"),
+            ("table.name", "test_table"),
+            (option, "0"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_owned(), v.to_owned()))
+        .collect();
+
+        let err = IcebergConfig::from_btreemap(values).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains(&format!("`{option}` must be greater than 0"))
+        );
+    }
 }
 
 #[test]
@@ -858,6 +790,39 @@ fn test_reject_zero_max_snapshots_num() {
         err.to_string()
             .contains("`compaction.max_snapshots_num` must be greater than 0")
     );
+}
+
+#[test]
+fn test_reject_zero_compaction_size_settings() {
+    for option in [
+        "compaction_interval_sec",
+        "compaction.small_files_threshold_mb",
+        "compaction.delete_files_count_threshold",
+        "compaction.target_file_size_mb",
+        "compaction.write_parquet_max_row_group_rows",
+        "compaction.write_parquet_max_row_group_bytes",
+    ] {
+        let mut values: BTreeMap<String, String> = [
+            ("connector", "iceberg"),
+            ("type", "append-only"),
+            ("catalog.name", "test-catalog"),
+            ("catalog.type", "storage"),
+            ("warehouse.path", "s3://my-bucket/warehouse"),
+            ("database.name", "test_db"),
+            ("table.name", "test_table"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_owned(), v.to_owned()))
+        .collect();
+        values.insert(option.to_owned(), "0".to_owned());
+
+        let err = IcebergConfig::from_btreemap(values).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains(&format!("`{option}` must be greater than 0")),
+            "unexpected error for {option}: {err}"
+        );
+    }
 }
 
 /// Test parquet compression parsing.
@@ -1017,6 +982,67 @@ fn test_upsert_accepts_copy_on_write() {
     assert!(result.is_ok());
     let config = result.unwrap();
     assert_eq!(config.write_mode, IcebergWriteMode::CopyOnWrite);
+}
+
+fn iceberg_compaction_alter_config(
+    write_mode: &str,
+    compaction_type: &str,
+    enable_compaction: bool,
+) -> BTreeMap<String, String> {
+    BTreeMap::from([
+        ("connector".to_owned(), "iceberg".to_owned()),
+        ("type".to_owned(), "upsert".to_owned()),
+        ("primary_key".to_owned(), "id".to_owned()),
+        ("warehouse.path".to_owned(), "s3://iceberg".to_owned()),
+        ("catalog.type".to_owned(), "storage".to_owned()),
+        ("catalog.name".to_owned(), "demo".to_owned()),
+        ("database.name".to_owned(), "test_db".to_owned()),
+        ("table.name".to_owned(), "test_table".to_owned()),
+        ("write_mode".to_owned(), write_mode.to_owned()),
+        ("compaction.type".to_owned(), compaction_type.to_owned()),
+        (
+            "enable_compaction".to_owned(),
+            enable_compaction.to_string(),
+        ),
+    ])
+}
+
+#[test]
+fn test_alter_allows_legacy_copy_on_write_compaction_type() {
+    use crate::sink::Sink;
+    use crate::sink::iceberg::IcebergSink;
+
+    let mut values = iceberg_compaction_alter_config("copy-on-write", "full", false);
+    values.insert("compaction_interval_sec".to_owned(), "120".to_owned());
+    let alter_props = BTreeMap::from([("compaction_interval_sec".to_owned(), "120".to_owned())]);
+
+    IcebergSink::validate_alter_config_change(&values, &alter_props).unwrap();
+
+    values.insert("enable_compaction".to_owned(), "true".to_owned());
+    let alter_props = BTreeMap::from([("enable_compaction".to_owned(), "true".to_owned())]);
+    IcebergSink::validate_alter_config_change(&values, &alter_props).unwrap();
+}
+
+#[test]
+fn test_alter_merge_on_read_compaction_checks_explicit_type_license() {
+    use crate::sink::Sink;
+    use crate::sink::iceberg::IcebergSink;
+
+    let values = iceberg_compaction_alter_config("merge-on-read", "auto", false);
+    let alter_props = BTreeMap::from([("compaction.type".to_owned(), "auto".to_owned())]);
+    let error = IcebergSink::validate_alter_config_change(&values, &alter_props).unwrap_err();
+    assert!(
+        error.to_string().contains("feature IcebergCompaction"),
+        "unexpected error: {error}"
+    );
+
+    let values = iceberg_compaction_alter_config("merge-on-read", "auto", true);
+    let alter_props = BTreeMap::from([("enable_compaction".to_owned(), "true".to_owned())]);
+    let error = IcebergSink::validate_alter_config_change(&values, &alter_props).unwrap_err();
+    assert!(
+        error.to_string().contains("feature IcebergCompaction"),
+        "unexpected error: {error}"
+    );
 }
 
 // Regression: an upsert sink whose pk column has upper-case letters must resolve.

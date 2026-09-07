@@ -78,6 +78,7 @@ def main():
     )
     assert_equal(schema_body["distance_metric"], "cosine_distance", "distance metric")
     assert_equal(schema_body["disable_backpressure"], True, "disable_backpressure")
+    assert_equal(schema_body["sharding"]["num_shards"], 8, "num_shards")
 
     schema = schema_body["schema"]
     assert_equal(schema["body"]["type"], "string", "body type")

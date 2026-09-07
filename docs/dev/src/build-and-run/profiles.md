@@ -15,6 +15,8 @@ RisingWave tweaks some settings of the built-in profiles to better fit its needs
 - `dev`: for local development and testing
 
   - completely disables [LTO](https://doc.rust-lang.org/cargo/reference/profiles.html#lto) to speed up the build time
+  - emits line tables only instead of full debug information, which keeps `file:line` and inlined
+    frames in backtraces while cutting the size of `target/` by several times
 
 - `release`: for local testing with near-production performance
 
@@ -52,7 +54,7 @@ To give a better idea of the differences between the profiles, here is a matrix 
 
 | Profile      | Debug Info     | `cfg(debug_assertions)` | Performance | Build Time |
 | ------------ | -------------- | ----------------------- | ----------- | ---------- |
-| `dev`        | Full           | `true`                  | Bad         | Fastest    |
+| `dev`        | Backtrace only | `true`                  | Bad         | Fastest    |
 | `release`    | Full           | `false`                 | Good        | Slow       |
 | `production` | Full           | `false`                 | Best        | Slowest    |
 | `ci-dev`     | Backtrace only | `true`                  | Medium      | Fast       |

@@ -22,7 +22,7 @@
 - sql: |
     create table t (v1 bigint, v2 double precision);
     select t2.* from t;
-  binder_error: 'Item not found: relation "t2"'
+  binder_error: 'Item not found: missing FROM-clause entry for table "t2"'
 - sql: |
     create table t ();
     select * from t where 1>2 and 1=1 and 3<1 and 4<>1 or 1=1 and 2>=1 and 1<=2;
@@ -165,6 +165,14 @@
   logical_plan: |-
     LogicalProject { exprs: [] }
     └─LogicalScan { table: t, columns: [t._row_id, t._rw_timestamp] }
+- name: qualified wildcard on zero-column subquery
+  sql: |
+    create table t ();
+    select q.* from (select * from t) q;
+  logical_plan: |-
+    LogicalProject { exprs: [] }
+    └─LogicalProject { exprs: [] }
+      └─LogicalScan { table: t, columns: [t._row_id, t._rw_timestamp] }
 - name: disallow subquery in values
   sql: |
     values(1, (select 1));

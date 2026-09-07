@@ -122,30 +122,32 @@ pub async fn handle_vacuum(
     let mut shutdown_rx = session.reset_cancel_query_flag();
 
     if full {
-        // VACUUM FULL: perform compaction followed by snapshot expiration
+        // VACUUM FULL compacts data files before rewriting the resulting manifests.
         await_cancelable(
             &mut shutdown_rx,
             session.env().meta_client().compact_iceberg_table(sink_id),
         )
         .await?;
-        await_cancelable(
-            &mut shutdown_rx,
-            session
-                .env()
-                .meta_client()
-                .expire_iceberg_table_snapshots(sink_id),
-        )
-        .await?;
-    } else {
-        // Regular VACUUM: only expire snapshots
-        await_cancelable(
-            &mut shutdown_rx,
-            session
-                .env()
-                .meta_client()
-                .expire_iceberg_table_snapshots(sink_id),
-        )
-        .await?;
     }
+
+    // Run the same eligibility check as periodic manifest maintenance immediately,
+    // then expire snapshots so replaced manifests can be cleaned up.
+    await_cancelable(
+        &mut shutdown_rx,
+        session
+            .env()
+            .meta_client()
+            .rewrite_iceberg_table_manifests(sink_id),
+    )
+    .await?;
+    await_cancelable(
+        &mut shutdown_rx,
+        session
+            .env()
+            .meta_client()
+            .expire_iceberg_table_snapshots(sink_id),
+    )
+    .await?;
+
     Ok(PgResponse::builder(StatementType::VACUUM).into())
 }

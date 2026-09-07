@@ -19,11 +19,13 @@ use std::time::Duration;
 use anyhow::anyhow;
 use futures::{FutureExt, TryFuture, TryFutureExt};
 use pulsar::producer::{Message, SendFuture};
+use pulsar::routing_policy::RoutingPolicy;
 use pulsar::{Producer, ProducerOptions, Pulsar, TokioExecutor};
 use risingwave_common::array::StreamChunk;
 use risingwave_common::catalog::Schema;
 use serde::Deserialize;
 use serde_with::{DisplayFromStr, serde_as};
+use strum_macros::{Display, EnumString};
 use with_options::WithOptions;
 
 use super::catalog::{SinkFormat, SinkFormatDesc};
@@ -77,6 +79,9 @@ async fn build_pulsar_producer(
             .with_options(ProducerOptions {
                 batch_size: Some(config.producer_properties.batch_size),
                 batch_byte_size: Some(config.producer_properties.batch_byte_size),
+                routing_policy: pulsar_producer_routing_policy(
+                    config.producer_properties.routing_mode,
+                ),
                 ..Default::default()
             })
             .with_topic(&config.common.topic)
@@ -84,6 +89,44 @@ async fn build_pulsar_producer(
             .map_err(pulsar_to_sink_err),
     )
     .await
+}
+
+fn pulsar_producer_routing_policy(
+    routing_mode: Option<PulsarRoutingMode>,
+) -> Option<RoutingPolicy> {
+    routing_mode.map(Into::into)
+}
+
+#[derive(Debug, Copy, Clone, Display, Deserialize, EnumString)]
+#[strum(serialize_all = "snake_case", ascii_case_insensitive)]
+pub enum PulsarRoutingMode {
+    #[strum(
+        serialize = "round_robin",
+        serialize = "roundrobin",
+        serialize = "roundrobinpartition",
+        serialize = "round_robin_partition",
+        serialize = "round-robin",
+        serialize = "round-robin-partition",
+        serialize = "RoundRobinPartition"
+    )]
+    RoundRobin,
+    #[strum(
+        serialize = "single",
+        serialize = "singlepartition",
+        serialize = "single_partition",
+        serialize = "single-partition",
+        serialize = "SinglePartition"
+    )]
+    Single,
+}
+
+impl From<PulsarRoutingMode> for RoutingPolicy {
+    fn from(mode: PulsarRoutingMode) -> Self {
+        match mode {
+            PulsarRoutingMode::RoundRobin => RoutingPolicy::RoundRobin,
+            PulsarRoutingMode::Single => RoutingPolicy::Single,
+        }
+    }
 }
 
 #[serde_as]
@@ -99,6 +142,19 @@ pub struct PulsarPropertiesProducer {
     )]
     #[serde_as(as = "DisplayFromStr")]
     batch_byte_size: usize,
+
+    #[serde(
+        rename = "properties.routing.mode",
+        alias = "properties.routing_mode",
+        alias = "routing_mode",
+        alias = "pulsar.routing_mode",
+        alias = "pulsar.routing.mode",
+        alias = "pulsar.properties.routing.mode",
+        alias = "pulsar.properties.routing_mode"
+    )]
+    #[serde_as(as = "Option<DisplayFromStr>")]
+    #[with_option(allow_alter_on_fly)]
+    routing_mode: Option<PulsarRoutingMode>,
 }
 
 #[serde_as]
@@ -126,7 +182,12 @@ pub struct PulsarConfig {
 
     #[serde(flatten)]
     pub producer_properties: PulsarPropertiesProducer,
+
+    #[serde(flatten)]
+    pub unknown_fields: std::collections::HashMap<String, String>,
 }
+
+crate::impl_sink_unknown_fields!(PulsarConfig);
 
 impl EnforceSecret for PulsarConfig {
     fn enforce_one(prop: &str) -> crate::error::ConnectorResult<()> {
@@ -189,6 +250,8 @@ impl Sink for PulsarSink {
     type LogSinker = AsyncTruncateLogSinkerOf<PulsarSinkWriter>;
 
     const SINK_NAME: &'static str = PULSAR_SINK;
+
+    crate::impl_validate_sink_unknown_fields!();
 
     async fn new_log_sinker(&self, _writer_param: SinkWriterParam) -> Result<Self::LogSinker> {
         // Reduce async state machine size (see `clippy::large_futures`).
@@ -306,7 +369,7 @@ impl PulsarPayloadWriter<'_> {
 
         for retry_num in 0..self.config.max_retry_num {
             if retry_num > 0 {
-                tracing::warn!("Failed to send message, at retry no. {retry_num}");
+                tracing::warn!("failed to send the message; retry {retry_num}");
             }
             match Box::pin(self.producer.send_non_blocking(message.clone())).await {
                 // If the message is sent successfully,
@@ -417,5 +480,83 @@ impl AsyncTruncateSinkWriter for PulsarSinkWriter {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use super::*;
+
+    fn base_properties() -> BTreeMap<String, String> {
+        BTreeMap::from([
+            (
+                "service.url".to_owned(),
+                "pulsar://localhost:6650".to_owned(),
+            ),
+            ("topic".to_owned(), "test-topic".to_owned()),
+        ])
+    }
+
+    fn parse_config_with(
+        extra: impl IntoIterator<Item = (&'static str, &'static str)>,
+    ) -> PulsarConfig {
+        let mut props = base_properties();
+        props.extend(
+            extra
+                .into_iter()
+                .map(|(key, value)| (key.to_owned(), value.to_owned())),
+        );
+        PulsarConfig::from_btreemap(props).unwrap()
+    }
+
+    #[test]
+    fn test_pulsar_routing_mode_default_is_unset() {
+        let config = parse_config_with([]);
+
+        assert!(config.producer_properties.routing_mode.is_none());
+    }
+
+    #[test]
+    fn test_pulsar_producer_routing_policy_preserves_unset_default() {
+        let config = parse_config_with([]);
+
+        assert!(pulsar_producer_routing_policy(config.producer_properties.routing_mode).is_none());
+    }
+
+    #[test]
+    fn test_pulsar_producer_routing_policy_preserves_configured_mode() {
+        let config = parse_config_with([("properties.routing.mode", "SinglePartition")]);
+
+        assert!(matches!(
+            pulsar_producer_routing_policy(config.producer_properties.routing_mode),
+            Some(RoutingPolicy::Single)
+        ));
+    }
+
+    #[test]
+    fn test_parse_pulsar_routing_mode() {
+        let config = parse_config_with([("properties.routing.mode", "round_robin")]);
+        assert!(matches!(
+            config.producer_properties.routing_mode,
+            Some(PulsarRoutingMode::RoundRobin)
+        ));
+
+        let config = parse_config_with([("properties.routing.mode", "SinglePartition")]);
+        assert!(matches!(
+            config.producer_properties.routing_mode,
+            Some(PulsarRoutingMode::Single)
+        ));
+    }
+
+    #[test]
+    fn test_parse_pulsar_routing_mode_alias() {
+        let config = parse_config_with([("routing_mode", "single")]);
+
+        assert!(matches!(
+            config.producer_properties.routing_mode,
+            Some(PulsarRoutingMode::Single)
+        ));
     }
 }

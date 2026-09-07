@@ -69,7 +69,7 @@ strum_macros = "0.28"
 thiserror = { workspace = true }
 thiserror-ext = { workspace = true }
 tokio = { workspace = true, features = ["fs"] }
-tokio-metrics = "0.4.0"
+tokio-metrics = "0.5.1"
 tokio-retry = "0.3"
 tokio-stream = { workspace = true }
 tonic = { workspace = true }

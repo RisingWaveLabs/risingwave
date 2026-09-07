@@ -22,9 +22,9 @@ use super::ApplyResult;
 #[cfg(debug_assertions)]
 use crate::Explain;
 use crate::error::Result;
-use crate::optimizer::plan_node::ConventionMarker;
+use crate::optimizer::plan_node::{ConventionMarker, ShareNode};
 use crate::optimizer::rule::BoxedRule;
-use crate::optimizer::{PlanRef, PlanTreeNode};
+use crate::optimizer::{PlanRef, PlanTreeNode, ShareId};
 
 /// Traverse order of [`HeuristicOptimizer`]
 pub enum ApplyOrder {
@@ -39,6 +39,7 @@ pub struct HeuristicOptimizer<'a, C: ConventionMarker> {
     apply_order: &'a ApplyOrder,
     rules: &'a [BoxedRule<C>],
     stats: Stats,
+    share_cache: HashMap<ShareId, (PlanRef<C>, bool)>,
 }
 
 impl<'a, C: ConventionMarker> HeuristicOptimizer<'a, C> {
@@ -47,10 +48,12 @@ impl<'a, C: ConventionMarker> HeuristicOptimizer<'a, C> {
             apply_order,
             rules,
             stats: Stats::new(),
+            share_cache: HashMap::new(),
         }
     }
 
-    fn optimize_node(&mut self, mut plan: PlanRef<C>) -> Result<PlanRef<C>> {
+    fn optimize_node(&mut self, mut plan: PlanRef<C>) -> Result<(PlanRef<C>, bool)> {
+        let mut changed = false;
         for rule in self.rules {
             match rule.apply(plan.clone()) {
                 ApplyResult::Ok(applied) => {
@@ -58,41 +61,67 @@ impl<'a, C: ConventionMarker> HeuristicOptimizer<'a, C> {
                     Self::check_equivalent_plan(rule.description(), &plan, &applied);
 
                     plan = applied;
+                    changed = true;
                     self.stats.count_rule(rule);
                 }
                 ApplyResult::NotApplicable => {}
                 ApplyResult::Err(error) => return Err(error),
             }
         }
-        Ok(plan)
+        Ok((plan, changed))
     }
 
-    fn optimize_inputs(&mut self, plan: PlanRef<C>) -> Result<PlanRef<C>> {
-        let pre_applied = self.stats.total_applied();
-        let inputs: Vec<_> = plan
+    fn optimize_inputs(&mut self, plan: PlanRef<C>) -> Result<(PlanRef<C>, bool)> {
+        let optimized_inputs: Vec<_> = plan
             .inputs()
             .into_iter()
-            .map(|sub_tree| self.optimize(sub_tree))
+            .map(|sub_tree| self.optimize_recursively(sub_tree))
             .try_collect()?;
+        let changed = optimized_inputs.iter().any(|(_, changed)| *changed);
 
-        Ok(if pre_applied != self.stats.total_applied() {
-            plan.clone_root_with_inputs(&inputs)
+        if changed {
+            let inputs = optimized_inputs
+                .into_iter()
+                .map(|(input, _)| input)
+                .collect_vec();
+            Ok((plan.clone_root_with_inputs(&inputs), true))
         } else {
-            plan
-        })
+            Ok((plan, false))
+        }
     }
 
-    pub fn optimize(&mut self, mut plan: PlanRef<C>) -> Result<PlanRef<C>> {
+    fn optimize_recursively(&mut self, plan: PlanRef<C>) -> Result<(PlanRef<C>, bool)> {
+        if let Some(share_id) = plan.as_share_node().map(ShareNode::share_id) {
+            if let Some((cached, changed)) = self.share_cache.get(&share_id) {
+                return Ok((cached.clone(), *changed));
+            }
+            let (optimized, changed) = self.optimize_uncached(plan)?;
+            self.share_cache
+                .insert(share_id, (optimized.clone(), changed));
+            return Ok((optimized, changed));
+        }
+
+        self.optimize_uncached(plan)
+    }
+
+    fn optimize_uncached(&mut self, plan: PlanRef<C>) -> Result<(PlanRef<C>, bool)> {
         match self.apply_order {
             ApplyOrder::TopDown => {
-                plan = self.optimize_node(plan)?;
-                self.optimize_inputs(plan)
+                let (plan, node_changed) = self.optimize_node(plan)?;
+                let (plan, inputs_changed) = self.optimize_inputs(plan)?;
+                Ok((plan, node_changed || inputs_changed))
             }
             ApplyOrder::BottomUp => {
-                plan = self.optimize_inputs(plan)?;
-                self.optimize_node(plan)
+                let (plan, inputs_changed) = self.optimize_inputs(plan)?;
+                let (plan, node_changed) = self.optimize_node(plan)?;
+                Ok((plan, inputs_changed || node_changed))
             }
         }
+    }
+
+    pub fn optimize(&mut self, plan: PlanRef<C>) -> Result<PlanRef<C>> {
+        self.share_cache.clear();
+        self.optimize_recursively(plan).map(|(plan, _)| plan)
     }
 
     pub fn get_stats(&self) -> &Stats {

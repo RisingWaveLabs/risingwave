@@ -16,6 +16,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::Context;
+use await_tree::InstrumentAwait;
 use enum_as_inner::EnumAsInner;
 use futures::StreamExt;
 use futures::future::{Either, select};
@@ -107,11 +108,15 @@ pub async fn barrier_align(
             Either::Left((Some(msg), _)) => match msg? {
                 Message::Watermark(watermark) => yield AlignedMessage::WatermarkLeft(watermark),
                 Message::Chunk(chunk) => yield AlignedMessage::Left(chunk),
-                Message::Barrier(_) => loop {
+                Message::Barrier(barrier) => loop {
                     let start_time = Instant::now();
                     // received left barrier, waiting for right barrier
                     match right
                         .next()
+                        .instrument_await(await_tree::span!(
+                            "barrier_align_wait_right epoch={}",
+                            barrier.epoch.curr
+                        ))
                         .await
                         .context("failed to poll right message, stream closed unexpectedly")??
                     {
@@ -131,11 +136,15 @@ pub async fn barrier_align(
             Either::Right((Some(msg), _)) => match msg? {
                 Message::Watermark(watermark) => yield AlignedMessage::WatermarkRight(watermark),
                 Message::Chunk(chunk) => yield AlignedMessage::Right(chunk),
-                Message::Barrier(_) => loop {
+                Message::Barrier(barrier) => loop {
                     let start_time = Instant::now();
                     // received right barrier, waiting for left barrier
                     match left
                         .next()
+                        .instrument_await(await_tree::span!(
+                            "barrier_align_wait_left epoch={}",
+                            barrier.epoch.curr
+                        ))
                         .await
                         .context("failed to poll left message, stream closed unexpectedly")??
                     {

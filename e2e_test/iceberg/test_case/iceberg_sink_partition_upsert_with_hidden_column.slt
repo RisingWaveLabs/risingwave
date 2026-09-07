@@ -1,0 +1,78 @@
+statement ok
+set sink_decouple = false;
+
+statement ok
+set streaming_parallelism = 4;
+
+statement ok
+DROP SINK IF EXISTS events_sink;
+
+statement ok
+DROP MATERIALIZED VIEW IF EXISTS source_view;
+
+statement ok
+DROP TABLE IF EXISTS source_events;
+
+statement ok
+CREATE TABLE source_events (
+    category varchar NOT NULL,
+    event_id varchar NOT NULL,
+    event_time timestamp NOT NULL,
+    snapshot_time timestamp NOT NULL,
+    data varchar,
+    PRIMARY KEY (category, event_id, snapshot_time)
+);
+
+statement ok
+CREATE MATERIALIZED VIEW source_view AS
+SELECT * FROM source_events;
+
+statement ok
+CREATE SINK events_sink AS
+SELECT
+    category,
+    event_id,
+    event_time AT TIME ZONE 'UTC' AS event_time,
+    snapshot_time AT TIME ZONE 'UTC' AS snapshot_time,
+    data
+FROM source_view
+WITH (
+    connector = 'iceberg',
+    type = 'upsert',
+    force_append_only = 'false',
+    catalog.name = 'demo',
+    catalog.type = 'storage',
+    warehouse.path = 's3a://icebergdata/demo',
+    database.name = 'demo_db',
+    table.name = 'partition_upsert_with_hidden_column_table',
+    primary_key = 'category,event_id,snapshot_time',
+    s3.endpoint = 'http://127.0.0.1:9301',
+    s3.region = 'us-east-1',
+    s3.access.key = 'hummockadmin',
+    s3.secret.key = 'hummockadmin'
+);
+
+statement ok
+INSERT INTO source_events VALUES (
+    'click',
+    'e1',
+    '2025-11-07 10:00:00',
+    '2025-11-07 10:00:00',
+    'payload'
+);
+
+sleep 15s
+
+statement ok
+FLUSH;
+
+sleep 5s
+
+statement ok
+DROP SINK events_sink;
+
+statement ok
+DROP MATERIALIZED VIEW source_view;
+
+statement ok
+DROP TABLE source_events;

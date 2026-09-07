@@ -567,18 +567,22 @@ impl TestCase {
                     if result.is_some() {
                         panic!("two queries in one test case");
                     }
-                    let rsp = Box::pin(explain::handle_explain(
+                    let ret = match Box::pin(explain::handle_explain(
                         handler_args,
                         *statement,
                         options,
                         analyze,
                     ))
-                    .await?;
-
-                    let explain_output = get_explain_output(rsp).await;
-                    let ret = TestCaseResult {
-                        explain_output: Some(explain_output),
-                        ..Default::default()
+                    .await
+                    {
+                        Ok(rsp) => TestCaseResult {
+                            explain_output: Some(get_explain_output(rsp).await),
+                            ..Default::default()
+                        },
+                        Err(error) => TestCaseResult {
+                            planner_error: Some(error.to_report_string()),
+                            ..Default::default()
+                        },
                     };
                     if do_check_result {
                         check_result(self, &ret)?;

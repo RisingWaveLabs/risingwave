@@ -34,8 +34,7 @@ impl<Src: OpendalSource> OpendalEnumerator<Src> {
         let builder = Fs::default().root(&posix_fs_properties.root);
         let op: Operator = Operator::new(builder)?
             .layer(LoggingLayer::default())
-            .layer(RetryLayer::default())
-            .finish();
+            .layer(RetryLayer::default());
 
         let (prefix, matcher) = if let Some(pattern) = posix_fs_properties.match_pattern.as_ref() {
             // TODO(Kexiang): Currently, FsListnenr in opendal does not support a prefix. (Seems a bug in opendal)

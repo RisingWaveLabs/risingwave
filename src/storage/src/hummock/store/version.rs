@@ -1042,9 +1042,9 @@ impl HummockVersionReader {
             .as_ref()
             .map(|hint| Sstable::hash_for_filter(hint, table_id.as_raw_id()));
         let mut sst_read_options = SstableIteratorReadOptions::from_read_options(&read_options);
-        if read_options.prefetch_options.prefetch {
-            sst_read_options.must_iterated_end_user_key =
-                Some(user_key_range.1.map(|key| key.cloned()));
+        sst_read_options.scan_end_user_key = Some(user_key_range.1.map(|key| key.cloned()));
+        sst_read_options.prefetch = read_options.prefetch_options.prefetch;
+        if sst_read_options.prefetch {
             sst_read_options.max_preload_retry_times = self.preload_retry_times;
         }
         let sst_read_options = Arc::new(sst_read_options);
@@ -1212,9 +1212,9 @@ impl HummockVersionReader {
         }
         let read_options = Arc::new(SstableIteratorReadOptions {
             cache_policy: Default::default(),
-            must_iterated_end_user_key: None,
+            scan_end_user_key: None,
+            prefetch: false,
             max_preload_retry_times: 0,
-            prefetch_for_large_query: false,
         });
 
         async fn make_iter(

@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use anyhow::anyhow;
 use risingwave_common::secret::LocalSecretManager;
 use risingwave_connector::sink::iceberg::IcebergConfig;
 use risingwave_pb::id::SinkId;
@@ -46,10 +47,19 @@ impl ExecutorBuilder for IcebergWithPkIndexPositionDeleteMergerExecutorBuilder {
             sink_desc.get_properties().clone(),
             sink_desc.get_secret_refs().clone(),
         )?;
-        let config = IcebergConfig::from_btreemap(properties_with_secret.clone())
-            .map_err(|err| StreamExecutorError::from((err, sink_id)))?;
-        let handler =
-            PositionDeleteHandlerImpl::new(config, params.actor_context.id, sink_id).await?;
+        let config = IcebergConfig::from_btreemap(properties_with_secret)
+            .map_err(|err| StreamExecutorError::sink_error(err, sink_id))?;
+        let meta_client = params.env.meta_client().ok_or_else(|| {
+            anyhow!("meta client is required for iceberg pk-index position-delete merger")
+        })?;
+
+        let handler = PositionDeleteHandlerImpl::new(
+            config,
+            params.actor_context.id,
+            params.vnode_bitmap.clone(),
+            sink_id,
+            meta_client,
+        );
 
         let exec = PositionDeleteMergerExecutor::new(
             params.actor_context.id,

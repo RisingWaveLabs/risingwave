@@ -19,9 +19,8 @@ use itertools::Itertools;
 use mysql_async::consts::ColumnType as MySqlColumnType;
 use mysql_async::prelude::*;
 use risingwave_common::array::arrow::IcebergArrowConvert;
-use risingwave_common::secret::LocalSecretManager;
 use risingwave_common::types::{DataType, ScalarImpl, StructType};
-use risingwave_connector::connector_common::create_pg_client;
+use risingwave_connector::connector_common::{PgConnectionConfig, create_pg_client};
 use risingwave_connector::source::iceberg::{
     FileScanBackend, extract_bucket_and_file_name, get_parquet_fields, list_data_directory,
     new_azblob_operator, new_gcs_operator, new_s3_operator,
@@ -31,15 +30,10 @@ pub use risingwave_pb::expr::table_function::PbType as TableFunctionType;
 use tokio_postgres::types::Type as TokioPgType;
 
 use super::{Expr, ExprImpl, ExprRewriter, Literal, RwResult, infer_type};
-use crate::catalog::catalog_service::CatalogReadGuard;
 use crate::catalog::function_catalog::{FunctionCatalog, FunctionKind};
-use crate::catalog::root_catalog::SchemaPath;
 use crate::error::ErrorCode::BindError;
 use crate::expr::reject_impure;
 use crate::utils::FRONTEND_RUNTIME;
-
-const INLINE_ARG_LEN: usize = 6;
-const CDC_SOURCE_ARG_LEN: usize = 2;
 
 /// A table function takes a row as input and returns a table. It is also known as Set-Returning
 /// Function.
@@ -298,85 +292,7 @@ impl TableFunction {
         })
     }
 
-    fn handle_postgres_or_mysql_query_args(
-        catalog_reader: &CatalogReadGuard,
-        db_name: &str,
-        schema_path: SchemaPath<'_>,
-        args: Vec<ExprImpl>,
-        expect_connector_name: &str,
-    ) -> RwResult<Vec<ExprImpl>> {
-        let cast_args = match args.len() {
-            INLINE_ARG_LEN => {
-                let mut cast_args = Vec::with_capacity(INLINE_ARG_LEN);
-                for arg in args {
-                    let arg = arg.cast_implicit(&DataType::Varchar)?;
-                    cast_args.push(arg);
-                }
-                cast_args
-            }
-            CDC_SOURCE_ARG_LEN => {
-                let source_name = expr_impl_to_string_fn(&args[0])?;
-                let source_catalog = catalog_reader
-                    .get_source_by_name(db_name, schema_path, &source_name)?
-                    .0;
-                if !source_catalog
-                    .connector_name()
-                    .eq_ignore_ascii_case(expect_connector_name)
-                {
-                    return Err(BindError(format!("TVF function only accepts `mysql-cdc` and `postgres-cdc` source. Expected: {}, but got: {}", expect_connector_name, source_catalog.connector_name())).into());
-                }
-
-                let (props, secret_refs) = source_catalog.with_properties.clone().into_parts();
-                let secret_resolved =
-                    LocalSecretManager::global().fill_secrets(props, secret_refs)?;
-
-                let mut args_vec = vec![
-                    ExprImpl::literal_varchar(secret_resolved["hostname"].clone()),
-                    ExprImpl::literal_varchar(secret_resolved["port"].clone()),
-                    ExprImpl::literal_varchar(secret_resolved["username"].clone()),
-                    ExprImpl::literal_varchar(secret_resolved["password"].clone()),
-                    ExprImpl::literal_varchar(secret_resolved["database.name"].clone()),
-                    args.get(1)
-                        .unwrap()
-                        .clone()
-                        .cast_implicit(&DataType::Varchar)?,
-                ];
-
-                if expect_connector_name.eq_ignore_ascii_case("postgres-cdc") {
-                    args_vec.push(ExprImpl::literal_varchar(
-                        secret_resolved.get("ssl.mode").cloned().unwrap_or_default(),
-                    ));
-                    args_vec.push(ExprImpl::literal_varchar(
-                        secret_resolved
-                            .get("ssl.root.cert")
-                            .cloned()
-                            .unwrap_or_default(),
-                    ));
-                }
-
-                args_vec
-            }
-            _ => {
-                return Err(BindError("postgres_query function and mysql_query function accept either 2 arguments: (cdc_source_name varchar, query varchar) or 6 arguments: (hostname varchar, port varchar, username varchar, password varchar, database_name varchar, query varchar)".to_owned()).into());
-            }
-        };
-
-        Ok(cast_args)
-    }
-
-    pub fn new_postgres_query(
-        catalog_reader: &CatalogReadGuard,
-        db_name: &str,
-        schema_path: SchemaPath<'_>,
-        args: Vec<ExprImpl>,
-    ) -> RwResult<Self> {
-        let args = Self::handle_postgres_or_mysql_query_args(
-            catalog_reader,
-            db_name,
-            schema_path,
-            args,
-            "postgres-cdc",
-        )?;
+    pub fn new_postgres_query(args: Vec<ExprImpl>) -> RwResult<Self> {
         let evaled_args = args
             .iter()
             .map(expr_impl_to_string_fn)
@@ -403,17 +319,19 @@ impl TableFunction {
                         .get(7)
                         .and_then(|s| if s.is_empty() { None } else { Some(s.clone()) });
 
-                    let client = create_pg_client(
-                        &evaled_args[2],
-                        &evaled_args[3],
-                        &evaled_args[0],
-                        &evaled_args[1],
-                        &evaled_args[4],
-                        &ssl_mode,
-                        &ssl_root_cert,
-                        None,
-                    )
-                    .await?;
+                    let port = evaled_args[1]
+                        .parse::<u16>()
+                        .with_context(|| format!("invalid postgres port `{}`", evaled_args[1]))?;
+                    let pg_conn = PgConnectionConfig {
+                        host: evaled_args[0].clone(),
+                        port,
+                        user: evaled_args[2].clone(),
+                        password: evaled_args[3].clone(),
+                        database: evaled_args[4].clone(),
+                        ssl_mode,
+                        ssl_root_cert,
+                    };
+                    let client = create_pg_client(&pg_conn, None).await?;
 
                     let statement = client.prepare(evaled_args[5].as_str()).await?;
 
@@ -461,19 +379,7 @@ impl TableFunction {
         }
     }
 
-    pub fn new_mysql_query(
-        catalog_reader: &CatalogReadGuard,
-        db_name: &str,
-        schema_path: SchemaPath<'_>,
-        args: Vec<ExprImpl>,
-    ) -> RwResult<Self> {
-        let args = Self::handle_postgres_or_mysql_query_args(
-            catalog_reader,
-            db_name,
-            schema_path,
-            args,
-            "mysql-cdc",
-        )?;
+    pub fn new_mysql_query(args: Vec<ExprImpl>) -> RwResult<Self> {
         let evaled_args = args
             .iter()
             .map(expr_impl_to_string_fn)
@@ -733,7 +639,7 @@ impl Expr for TableFunction {
     }
 }
 
-fn expr_impl_to_string_fn(arg: &ExprImpl) -> RwResult<String> {
+pub(crate) fn expr_impl_to_string_fn(arg: &ExprImpl) -> RwResult<String> {
     match arg.try_fold_const() {
         Some(Ok(value)) => {
             let Some(scalar) = value else {

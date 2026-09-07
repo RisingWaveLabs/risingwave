@@ -1,4 +1,6 @@
-disallowed-methods = []
+disallowed-methods = [
+    { path = "tokio_retry::strategy::ExponentialBackoff::from_millis", reason = "Please use `risingwave_common::util::retry::exponential_backoff` instead; `from_millis` sets the exponent base, not the initial delay." },
+]
 
 disallowed-types = [
     { path = "iceberg::Error", reason = "Please use `risingwave_common::error::IcebergError` instead." },

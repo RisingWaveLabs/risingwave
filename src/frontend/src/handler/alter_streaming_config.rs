@@ -27,6 +27,16 @@ use crate::handler::{HandlerArgs, RwPgResponse};
 /// A diff of a TOML map. `None` means the key should be removed.
 type TomlMapDiff = TomlMap<String, Option<TomlValue>>;
 
+const STREAMING_CACHE_REFILL_POLICY_CONFIG_PATH: &str = "streaming.developer.cache_refill_policy";
+const ALTER_CONFIG_RECOVER_NOTICE: &str =
+    "ALTER CONFIG requires a RECOVER on the specified streaming job to take effect.";
+
+fn alter_config_requires_recover(map_diff: &TomlMapDiff) -> bool {
+    map_diff
+        .keys()
+        .any(|key| key != STREAMING_CACHE_REFILL_POLICY_CONFIG_PATH)
+}
+
 fn collect_options(entries: Vec<SqlOption>) -> Result<TomlMapDiff> {
     let mut map = TomlMap::new();
 
@@ -73,6 +83,7 @@ pub async fn handle_alter_streaming_set_config(
 
     let job_id = resolve_streaming_job_id_for_alter(&session, obj_name, stmt_type, "config")?;
     let map_diff = collect_options(entries)?;
+    let requires_recover = alter_config_requires_recover(&map_diff);
 
     let mut entries_to_add = HashMap::new();
     let mut keys_to_remove = Vec::new();
@@ -90,9 +101,11 @@ pub async fn handle_alter_streaming_set_config(
         .alter_config(job_id, entries_to_add, keys_to_remove)
         .await?;
 
-    Ok(RwPgResponse::builder(stmt_type)
-        .notice("ALTER CONFIG requires a RECOVER on the specified streaming job to take effect.")
-        .into())
+    let mut builder = RwPgResponse::builder(stmt_type);
+    if requires_recover {
+        builder = builder.notice(ALTER_CONFIG_RECOVER_NOTICE);
+    }
+    Ok(builder.into())
 }
 
 pub async fn handle_alter_streaming_reset_config(
@@ -111,4 +124,50 @@ pub async fn handle_alter_streaming_reset_config(
 
     // Simply delegate to `handle_alter_streaming_set_config` with all values set to `NULL`.
     handle_alter_streaming_set_config(handler_args, obj_name, entries, stmt_type).await
+}
+
+#[cfg(test)]
+mod tests {
+    use toml::Value as TomlValue;
+
+    use super::{
+        STREAMING_CACHE_REFILL_POLICY_CONFIG_PATH, TomlMapDiff, alter_config_requires_recover,
+    };
+
+    #[test]
+    fn test_cache_refill_policy_config_does_not_require_recover() {
+        let mut map_diff = TomlMapDiff::new();
+        map_diff.insert(
+            STREAMING_CACHE_REFILL_POLICY_CONFIG_PATH.to_owned(),
+            Some(TomlValue::String("both".to_owned())),
+        );
+        assert!(!alter_config_requires_recover(&map_diff));
+
+        map_diff.insert(STREAMING_CACHE_REFILL_POLICY_CONFIG_PATH.to_owned(), None);
+        assert!(!alter_config_requires_recover(&map_diff));
+    }
+
+    #[test]
+    fn test_other_streaming_config_still_requires_recover() {
+        let mut map_diff = TomlMapDiff::new();
+        map_diff.insert(
+            "streaming.developer.some_other_config".to_owned(),
+            Some(TomlValue::Boolean(true)),
+        );
+        assert!(alter_config_requires_recover(&map_diff));
+    }
+
+    #[test]
+    fn test_mixed_streaming_config_requires_recover() {
+        let mut map_diff = TomlMapDiff::new();
+        map_diff.insert(
+            STREAMING_CACHE_REFILL_POLICY_CONFIG_PATH.to_owned(),
+            Some(TomlValue::String("both".to_owned())),
+        );
+        map_diff.insert(
+            "streaming.developer.some_other_config".to_owned(),
+            Some(TomlValue::Boolean(true)),
+        );
+        assert!(alter_config_requires_recover(&map_diff));
+    }
 }

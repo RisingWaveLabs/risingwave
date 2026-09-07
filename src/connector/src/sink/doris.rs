@@ -96,7 +96,12 @@ pub struct DorisConfig {
     #[serde_as(as = "DisplayFromStr")]
     #[with_option(allow_alter_on_fly)]
     pub stream_load_http_timeout_ms: u64,
+
+    #[serde(flatten)]
+    pub unknown_fields: std::collections::HashMap<String, String>,
 }
+
+crate::impl_sink_unknown_fields!(DorisConfig);
 
 impl EnforceSecret for DorisConfig {
     fn enforce_one(prop: &str) -> crate::error::ConnectorResult<()> {
@@ -229,6 +234,9 @@ impl DorisSink {
             risingwave_common::types::DataType::Jsonb => {
                 Ok(doris_data_type.contains("JSON") || is_variant)
             }
+            risingwave_common::types::DataType::Variant => {
+                Err(SinkError::Doris("VARIANT is not supported for Doris sink.".to_owned()))
+            }
             risingwave_common::types::DataType::Serial => Ok(doris_data_type.contains("BIGINT")),
             risingwave_common::types::DataType::Int256 => {
                 Err(SinkError::Doris("INT256 is not supported for Doris sink.".to_owned()))
@@ -247,6 +255,8 @@ impl Sink for DorisSink {
     type LogSinker = LogSinkerOf<DorisSinkWriter>;
 
     const SINK_NAME: &'static str = DORIS_SINK;
+
+    crate::impl_validate_sink_unknown_fields!();
 
     async fn new_log_sinker(&self, writer_param: SinkWriterParam) -> Result<Self::LogSinker> {
         Ok(DorisSinkWriter::new(
@@ -571,14 +581,16 @@ mod tests {
 
     #[test]
     fn test_jsonb_can_write_to_variant() {
-        assert!(DorisSink::check_and_correct_column_type(&DataType::Jsonb, "VARIANT".into())
-            .unwrap());
+        assert!(
+            DorisSink::check_and_correct_column_type(&DataType::Jsonb, "VARIANT".into()).unwrap()
+        );
     }
 
     #[test]
     fn test_varchar_can_write_to_variant() {
-        assert!(DorisSink::check_and_correct_column_type(&DataType::Varchar, "VARIANT".into())
-            .unwrap());
+        assert!(
+            DorisSink::check_and_correct_column_type(&DataType::Varchar, "VARIANT".into()).unwrap()
+        );
     }
 }
 

@@ -89,12 +89,33 @@ setup_new_cluster() {
   git checkout $LATEST_BRANCH
 }
 
+upgrade_through_intermediate_versions() {
+  local version
+
+  while read -r version; do
+    [[ -z "$version" ]] && continue
+
+    echo "--- Upgrade through intermediate version $version"
+    rm -rf .risingwave/bin/risingwave
+    git checkout "v${version}"
+    configure_rw "$version"
+    rm -rf .risingwave/config
+    ENABLE_UDF=1 ./risedev d full-without-monitoring
+    if version_le "$RECOVER_COMMAND_MIN_VERSION" "$version"; then
+      wait_for_recovery "$version"
+    fi
+    kill_cluster
+  done < <(get_intermediate_versions)
+}
+
 main() {
   set -euo pipefail
   get_rw_versions
   setup_old_cluster
   configure_rw "$OLD_VERSION"
   seed_old_cluster "$OLD_VERSION"
+
+  upgrade_through_intermediate_versions
 
   setup_new_cluster
   configure_rw "99.99.99"

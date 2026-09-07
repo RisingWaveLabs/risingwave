@@ -55,12 +55,15 @@ fn read_rw_sources_info(reader: &SysCatalogReaderImpl) -> Result<Vec<RwSource>> 
     let catalog_reader = reader.catalog_reader.read_guard();
     let schemas = catalog_reader.iter_schemas(&reader.auth_context.database)?;
     let user_reader = reader.user_info_reader.read_guard();
+    let current_user = user_reader
+        .get_user_by_name(&reader.auth_context.user_name)
+        .expect("user not found");
     let users = user_reader.get_all_users();
     let username_map = user_reader.get_user_name_map();
 
     Ok(schemas
         .flat_map(|schema| {
-            schema.iter_source().map(|source| {
+            schema.iter_source_with_acl(current_user).map(|source| {
                 let format_encode_props_with_secrets = WithOptionsSecResolved::new(
                     source.info.format_encode_options.clone(),
                     source.info.format_encode_secret_refs.clone(),

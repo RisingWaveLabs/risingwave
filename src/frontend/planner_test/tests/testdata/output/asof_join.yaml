@@ -78,27 +78,10 @@
         │     └─StreamTableScan { table: t1, columns: [t1.v1, t1.v2, t1._row_id], stream_scan_type: SnapshotBackfill, stream_key: [t1._row_id], pk: [_row_id], dist: UpstreamHashShard(t1._row_id) }
         └─StreamExchange { dist: HashShard(t2.v1) }
           └─StreamTableScan { table: t2, columns: [t2.v1, t2.v2, t2._row_id], stream_scan_type: SnapshotBackfill, stream_key: [t2._row_id], pk: [_row_id], dist: UpstreamHashShard(t2._row_id) }
-- sql: CREATE TABLE t1(v1 varchar, v2 int, v3 int); CREATE TABLE t2(v1 varchar, v2 int, v3 int); SELECT t1.v1 t1_v1, t1.v2 t1_v2, t2.v1 t2_v1, t2.v2 t2_v2 FROM t1 ASOF LEFT JOIN t2 ON t1.v1 = t2.v1 and t1.v2 *2 < t2.v2 and t1.v2 < 10 and t2.v2 < 10;
-  batch_plan: |-
-    BatchExchange { order: [], dist: Single }
-    └─BatchHashJoin { type: AsofLeftOuter, predicate: t1.v1 = t2.v1 AND ($expr1 < t2.v2), output: [t1.v1, t1.v2, t2.v1, t2.v2] }
-      ├─BatchExchange { order: [], dist: HashShard(t1.v1) }
-      │ └─BatchProject { exprs: [t1.v1, t1.v2, (t1.v2 * 2:Int32) as $expr1] }
-      │   └─BatchFilter { predicate: (t1.v2 < 10:Int32) }
-      │     └─BatchScan { table: t1, columns: [t1.v1, t1.v2], distribution: SomeShard }
-      └─BatchExchange { order: [], dist: HashShard(t2.v1) }
-        └─BatchFilter { predicate: (t2.v2 < 10:Int32) }
-          └─BatchScan { table: t2, columns: [t2.v1, t2.v2], distribution: SomeShard }
-  stream_plan: |-
-    StreamMaterialize { columns: [t1_v1, t1_v2, t2_v1, t2_v2, t1._row_id(hidden), t2._row_id(hidden)], stream_key: [t1._row_id, t2._row_id, t1_v1], pk_columns: [t1._row_id, t2._row_id, t1_v1], pk_conflict: NoCheck }
-    └─StreamAsOfJoin { type: AsofLeftOuter, predicate: t1.v1 = t2.v1 AND ($expr1 < t2.v2), output: [t1.v1, t1.v2, t2.v1, t2.v2, t1._row_id, t2._row_id] }
-      ├─StreamExchange { dist: HashShard(t1.v1) }
-      │ └─StreamProject { exprs: [t1.v1, t1.v2, (t1.v2 * 2:Int32) as $expr1, t1._row_id] }
-      │   └─StreamFilter { predicate: (t1.v2 < 10:Int32) }
-      │     └─StreamTableScan { table: t1, columns: [t1.v1, t1.v2, t1._row_id], stream_scan_type: SnapshotBackfill, stream_key: [t1._row_id], pk: [_row_id], dist: UpstreamHashShard(t1._row_id) }
-      └─StreamExchange { dist: HashShard(t2.v1) }
-        └─StreamFilter { predicate: (t2.v2 < 10:Int32) }
-          └─StreamTableScan { table: t2, columns: [t2.v1, t2.v2, t2._row_id], stream_scan_type: SnapshotBackfill, stream_key: [t2._row_id], pk: [_row_id], dist: UpstreamHashShard(t2._row_id) }
+- name: asof left outer join should not push left-only on predicate
+  sql: CREATE TABLE t1(v1 varchar, v2 int, v3 int); CREATE TABLE t2(v1 varchar, v2 int, v3 int); SELECT t1.v1 t1_v1, t1.v2 t1_v2, t2.v1 t2_v1, t2.v2 t2_v2 FROM t1 ASOF LEFT JOIN t2 ON t1.v1 = t2.v1 and t1.v2 *2 < t2.v2 and t1.v2 < 10 and t2.v2 < 10;
+  batch_error: 'Invalid input syntax: AsOf join requires exactly 1 ineuquality condition'
+  stream_error: 'Invalid input syntax: AsOf join requires exactly 1 ineuquality condition'
 - sql: CREATE TABLE t1(v1 varchar, v2 int, v3 int); CREATE TABLE t2(v1 varchar, v2 int, v3 int); SELECT t1.v1 t1_v1, t1.v2 t1_v2, t2.v1 t2_v1, t2.v2 t2_v2 FROM t1 ASOF JOIN t2 ON t1.v1 = t2.v1 and t1.v2 < t2.v2 and t1.v3 < t2.v3;
   batch_error: 'Invalid input syntax: AsOf join requires exactly 1 ineuquality condition'
   stream_error: 'Invalid input syntax: AsOf join requires exactly 1 ineuquality condition'

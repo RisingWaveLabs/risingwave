@@ -59,6 +59,55 @@
         │ └─StreamTableScan { table: t, columns: [t.v1, t._row_id], stream_scan_type: SnapshotBackfill, stream_key: [t._row_id], pk: [_row_id], dist: UpstreamHashShard(t._row_id) }
         └─StreamExchange { dist: HashShard(t.v1) }
           └─StreamTableScan { table: t, columns: [t.v1, t.v2, t.v3, t._row_id], stream_scan_type: SnapshotBackfill, stream_key: [t._row_id], pk: [_row_id], dist: UpstreamHashShard(t._row_id) }
+- name: qualified wildcard on schema-qualified relation
+  sql: |
+    create schema s;
+    create table s.t (v1 int, v2 int, v3 int);
+    select t.* except (t.v2) from s.t;
+  batch_plan: |-
+    BatchExchange { order: [], dist: Single }
+    └─BatchScan { table: t, columns: [t.v1, t.v3], distribution: SomeShard }
+  stream_plan: |-
+    StreamMaterialize { columns: [v1, v3, t._row_id(hidden)], stream_key: [t._row_id], pk_columns: [t._row_id], pk_conflict: NoCheck }
+    └─StreamTableScan { table: t, columns: [t.v1, t.v3, t._row_id], stream_scan_type: SnapshotBackfill, stream_key: [t._row_id], pk: [_row_id], dist: UpstreamHashShard(t._row_id) }
+- name: qualified wildcard on schema-qualified relation with join using
+  sql: |
+    create schema s;
+    create table s.names (id int, name varchar);
+    create table s.people (id int, version int, age int);
+    select names.name, people.* except (people.version) from s.names join s.people using (id);
+  batch_plan: |-
+    BatchExchange { order: [], dist: Single }
+    └─BatchHashJoin { type: Inner, predicate: names.id = people.id, output: [names.name, people.id, people.age] }
+      ├─BatchExchange { order: [], dist: HashShard(names.id) }
+      │ └─BatchScan { table: names, columns: [names.id, names.name], distribution: SomeShard }
+      └─BatchExchange { order: [], dist: HashShard(people.id) }
+        └─BatchScan { table: people, columns: [people.id, people.age], distribution: SomeShard }
+  stream_plan: |-
+    StreamMaterialize { columns: [name, id, age, names._row_id(hidden), names.id(hidden), people._row_id(hidden)], stream_key: [names._row_id, people._row_id, names.id], pk_columns: [names._row_id, people._row_id, names.id], pk_conflict: NoCheck }
+    └─StreamExchange { dist: HashShard(names._row_id, names.id, people._row_id) }
+      └─StreamHashJoin { type: Inner, predicate: names.id = people.id, output: [names.name, people.id, people.age, names._row_id, names.id, people._row_id] }
+        ├─StreamExchange { dist: HashShard(names.id) }
+        │ └─StreamTableScan { table: names, columns: [names.id, names.name, names._row_id], stream_scan_type: SnapshotBackfill, stream_key: [names._row_id], pk: [_row_id], dist: UpstreamHashShard(names._row_id) }
+        └─StreamExchange { dist: HashShard(people.id) }
+          └─StreamTableScan { table: people, columns: [people.id, people.age, people._row_id], stream_scan_type: SnapshotBackfill, stream_key: [people._row_id], pk: [_row_id], dist: UpstreamHashShard(people._row_id) }
+- name: qualified wildcard argument on schema-qualified relation
+  sql: |
+    create schema s;
+    create table s.t (v1 int, v2 int);
+    select jsonb_agg(t.*) from s.t;
+  batch_plan: |-
+    BatchSimpleAgg { aggs: [jsonb_agg($expr1)] }
+    └─BatchExchange { order: [], dist: Single }
+      └─BatchProject { exprs: [Row(t.v1, t.v2) as $expr1] }
+        └─BatchScan { table: t, columns: [t.v1, t.v2], distribution: SomeShard }
+  stream_plan: |-
+    StreamMaterialize { columns: [jsonb_agg], stream_key: [], pk_columns: [], pk_conflict: NoCheck }
+    └─StreamProject { exprs: [jsonb_agg($expr1)] }
+      └─StreamSimpleAgg { aggs: [jsonb_agg($expr1), count] }
+        └─StreamExchange { dist: Single }
+          └─StreamProject { exprs: [Row(t.v1, t.v2) as $expr1, t._row_id] }
+            └─StreamTableScan { table: t, columns: [t.v1, t.v2, t._row_id], stream_scan_type: SnapshotBackfill, stream_key: [t._row_id], pk: [_row_id], dist: UpstreamHashShard(t._row_id) }
 - name: except with unknown column
   sql: |
     create table t (v1 int, v2 int, v3 int);

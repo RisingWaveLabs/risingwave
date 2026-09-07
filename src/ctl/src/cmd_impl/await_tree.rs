@@ -38,6 +38,7 @@ pub async fn dump(context: &CtlContext, actor_traces_format: Option<String>) -> 
 
     if all.actor_traces.is_empty()
         && all.rpc_traces.is_empty()
+        && all.batch_traces.is_empty()
         && all.compaction_task_traces.is_empty()
         && all.inflight_barrier_traces.is_empty()
     {

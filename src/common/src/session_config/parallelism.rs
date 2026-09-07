@@ -350,30 +350,9 @@ mod tests {
     }
 
     #[test]
-    fn test_parallelism_default_constants() {
-        assert_eq!(
-            DEFAULT_GLOBAL_STREAMING_PARALLELISM,
-            ConfigParallelism::Bounded(NonZeroU64::new(64).unwrap())
-        );
-        assert_eq!(
-            DEFAULT_TABLE_SOURCE_STREAMING_PARALLELISM,
-            ConfigParallelism::Bounded(NonZeroU64::new(4).unwrap())
-        );
-        assert_eq!(
-            DEFAULT_SINK_STREAMING_PARALLELISM,
-            ConfigParallelism::Bounded(NonZeroU64::new(8).unwrap())
-        );
-    }
-
-    #[test]
     fn test_parallelism_parse_ratio() {
         let parallelism: ConfigParallelism = "ratio(0.5)".parse().unwrap();
         assert_eq!(parallelism, ConfigParallelism::Ratio(0.5));
-    }
-
-    #[test]
-    fn test_parallelism_default_variant() {
-        assert_eq!(ConfigParallelism::default(), ConfigParallelism::Default);
     }
 
     #[test]

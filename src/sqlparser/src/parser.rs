@@ -14,7 +14,7 @@
 
 use std::fmt;
 
-use ddl::WebhookSourceInfo;
+use ddl::{AlterRateLimit, AlterRateLimitType, WebhookSourceInfo};
 use itertools::Itertools;
 use tracing::{debug, instrument};
 use winnow::combinator::{
@@ -3374,12 +3374,8 @@ impl Parser<'_> {
                     parallelism: value,
                     deferred,
                 }
-            } else if let Some(rate_limit) = self.parse_alter_source_rate_limit(true)? {
-                AlterTableOperation::SetSourceRateLimit { rate_limit }
-            } else if let Some(rate_limit) = self.parse_alter_backfill_rate_limit()? {
-                AlterTableOperation::SetBackfillRateLimit { rate_limit }
-            } else if let Some(rate_limit) = self.parse_alter_dml_rate_limit()? {
-                AlterTableOperation::SetDmlRateLimit { rate_limit }
+            } else if let Some(rate_limit) = self.parse_alter_rate_limit()? {
+                AlterTableOperation::AlterRateLimit(rate_limit)
             } else if self.parse_keyword(Keyword::CONFIG) {
                 let entries = self.parse_options()?;
                 AlterTableOperation::SetConfig { entries }
@@ -3471,71 +3467,37 @@ impl Parser<'_> {
         })
     }
 
-    /// BACKFILL_RATE_LIMIT = default | NUMBER
-    /// BACKFILL_RATE_LIMIT TO default | NUMBER
-    pub fn parse_alter_backfill_rate_limit(&mut self) -> ModalResult<Option<i32>> {
-        if !self.parse_word("BACKFILL_RATE_LIMIT") {
-            return Ok(None);
-        }
+    fn parse_rate_limit_value(&mut self) -> ModalResult<i32> {
         if self.expect_keyword(Keyword::TO).is_err() && self.expect_token(&Token::Eq).is_err() {
-            return self.expected("TO or = after ALTER TABLE SET BACKFILL_RATE_LIMIT");
+            return self.expected("TO or = after rate limit");
         }
-        let rate_limit = if self.parse_keyword(Keyword::DEFAULT) {
-            -1
+        if self.parse_keyword(Keyword::DEFAULT) {
+            return Ok(-1);
+        }
+        let s = self.parse_number_value()?;
+        if let Ok(n) = s.parse::<i32>() {
+            Ok(n)
         } else {
-            let s = self.parse_number_value()?;
-            if let Ok(n) = s.parse::<i32>() {
-                n
-            } else {
-                return self.expected("number or DEFAULT");
-            }
-        };
-        Ok(Some(rate_limit))
+            self.expected("number or DEFAULT")
+        }
     }
 
-    /// DML_RATE_LIMIT = default | NUMBER
-    /// DML_RATE_LIMIT TO default | NUMBER
-    pub fn parse_alter_dml_rate_limit(&mut self) -> ModalResult<Option<i32>> {
-        if !self.parse_word("DML_RATE_LIMIT") {
-            return Ok(None);
-        }
-        if self.expect_keyword(Keyword::TO).is_err() && self.expect_token(&Token::Eq).is_err() {
-            return self.expected("TO or = after ALTER TABLE SET DML_RATE_LIMIT");
-        }
-        let rate_limit = if self.parse_keyword(Keyword::DEFAULT) {
-            -1
-        } else {
-            let s = self.parse_number_value()?;
-            if let Ok(n) = s.parse::<i32>() {
-                n
-            } else {
-                return self.expected("number or DEFAULT");
+    pub fn parse_alter_rate_limit(&mut self) -> ModalResult<Option<AlterRateLimit>> {
+        for rate_limit_type in [
+            AlterRateLimitType::Source,
+            AlterRateLimitType::Backfill,
+            AlterRateLimitType::Dml,
+            AlterRateLimitType::Sink,
+        ] {
+            if self.parse_word(rate_limit_type.as_str()) {
+                let rate_limit = self.parse_rate_limit_value()?;
+                return Ok(Some(AlterRateLimit {
+                    rate_limit_type,
+                    rate_limit,
+                }));
             }
-        };
-        Ok(Some(rate_limit))
-    }
-
-    /// SOURCE_RATE_LIMIT = default | NUMBER
-    /// SOURCE_RATE_LIMIT TO default | NUMBER
-    pub fn parse_alter_source_rate_limit(&mut self, is_table: bool) -> ModalResult<Option<i32>> {
-        if !self.parse_word("SOURCE_RATE_LIMIT") {
-            return Ok(None);
         }
-        if self.expect_keyword(Keyword::TO).is_err() && self.expect_token(&Token::Eq).is_err() {
-            let ddl = if is_table { "TABLE" } else { "SOURCE" };
-            return self.expected(&format!("TO or = after ALTER {ddl} SET SOURCE_RATE_LIMIT"));
-        }
-        let rate_limit = if self.parse_keyword(Keyword::DEFAULT) {
-            -1
-        } else {
-            let s = self.parse_number_value()?;
-            if let Ok(n) = s.parse::<i32>() {
-                n
-            } else {
-                return self.expected("number or DEFAULT");
-            }
-        };
-        Ok(Some(rate_limit))
+        Ok(None)
     }
 
     pub fn parse_alter_index(&mut self) -> ModalResult<Statement> {
@@ -3704,10 +3666,8 @@ impl Parser<'_> {
                     resource_group: Some(value),
                     deferred,
                 }
-            } else if materialized
-                && let Some(rate_limit) = self.parse_alter_backfill_rate_limit()?
-            {
-                AlterViewOperation::SetBackfillRateLimit { rate_limit }
+            } else if let Some(rate_limit) = self.parse_alter_rate_limit()? {
+                AlterViewOperation::AlterRateLimit(rate_limit)
             } else if self.parse_keyword(Keyword::CONFIG) && materialized {
                 let entries = self.parse_options()?;
                 AlterViewOperation::SetConfig { entries }
@@ -3742,28 +3702,6 @@ impl Parser<'_> {
             name: view_name,
             operation,
         })
-    }
-
-    /// SINK_RATE_LIMIT = default | NUMBER
-    /// SINK_RATE_LIMIT TO default | NUMBER
-    pub fn parse_alter_sink_rate_limit(&mut self) -> ModalResult<Option<i32>> {
-        if !self.parse_word("SINK_RATE_LIMIT") {
-            return Ok(None);
-        }
-        if self.expect_keyword(Keyword::TO).is_err() && self.expect_token(&Token::Eq).is_err() {
-            return self.expected("TO or = after ALTER SINK SET SINK_RATE_LIMIT");
-        }
-        let rate_limit = if self.parse_keyword(Keyword::DEFAULT) {
-            -1
-        } else {
-            let s = self.parse_number_value()?;
-            if let Ok(n) = s.parse::<i32>() {
-                n
-            } else {
-                return self.expected("number or DEFAULT");
-            }
-        };
-        Ok(Some(rate_limit))
     }
 
     pub fn parse_alter_sink(&mut self) -> ModalResult<Statement> {
@@ -3831,10 +3769,8 @@ impl Parser<'_> {
                     resource_group: Some(value),
                     deferred,
                 }
-            } else if let Some(rate_limit) = self.parse_alter_sink_rate_limit()? {
-                AlterSinkOperation::SetSinkRateLimit { rate_limit }
-            } else if let Some(rate_limit) = self.parse_alter_backfill_rate_limit()? {
-                AlterSinkOperation::SetBackfillRateLimit { rate_limit }
+            } else if let Some(rate_limit) = self.parse_alter_rate_limit()? {
+                AlterSinkOperation::AlterRateLimit(rate_limit)
             } else if self.parse_keyword(Keyword::CONFIG) {
                 let entries = self.parse_options()?;
                 AlterSinkOperation::SetConfig { entries }
@@ -3947,8 +3883,8 @@ impl Parser<'_> {
                 AlterSourceOperation::SetSchema {
                     new_schema_name: schema_name,
                 }
-            } else if let Some(rate_limit) = self.parse_alter_source_rate_limit(false)? {
-                AlterSourceOperation::SetSourceRateLimit { rate_limit }
+            } else if let Some(rate_limit) = self.parse_alter_rate_limit()? {
+                AlterSourceOperation::AlterRateLimit(rate_limit)
             } else if self.parse_keyword(Keyword::PARALLELISM) {
                 if self.expect_keyword(Keyword::TO).is_err()
                     && self.expect_token(&Token::Eq).is_err()
@@ -4081,6 +4017,20 @@ impl Parser<'_> {
     }
 
     pub fn parse_alter_system(&mut self) -> ModalResult<Statement> {
+        if self.parse_word("CLEAR") {
+            self.expect_keywords(&[Keyword::FILE, Keyword::CACHE])?;
+            let cache_type = if self.parse_keyword(Keyword::META) {
+                FileCacheType::Meta
+            } else if self.parse_keyword(Keyword::DATA) {
+                FileCacheType::Data
+            } else if self.parse_keyword(Keyword::ALL) {
+                FileCacheType::All
+            } else {
+                return self.expected("META, DATA, or ALL after ALTER SYSTEM CLEAR FILE CACHE");
+            };
+            return Ok(Statement::AlterSystemClearFileCache { cache_type });
+        }
+
         self.expect_keyword(Keyword::SET)?;
         let param = self.parse_identifier()?;
         if self.expect_keyword(Keyword::TO).is_err() && self.expect_token(&Token::Eq).is_err() {
@@ -4139,7 +4089,7 @@ impl Parser<'_> {
             AlterFragmentOperation::SetParallelism { parallelism }
         } else {
             let rate_limit = self.parse_alter_fragment_rate_limit()?;
-            AlterFragmentOperation::AlterBackfillRateLimit { rate_limit }
+            AlterFragmentOperation::AlterRateLimit(rate_limit)
         };
         Ok(Statement::AlterFragment {
             fragment_ids,
@@ -4169,24 +4119,19 @@ impl Parser<'_> {
         })
     }
 
-    fn parse_alter_fragment_rate_limit(&mut self) -> ModalResult<i32> {
-        if !self.parse_word("RATE_LIMIT") {
-            return self.expected("expected RATE_LIMIT after SET");
+    fn parse_alter_fragment_rate_limit(&mut self) -> ModalResult<AlterRateLimit> {
+        if self.parse_word("RATE_LIMIT") {
+            let rate_limit = self.parse_rate_limit_value()?;
+            return Ok(AlterRateLimit {
+                rate_limit_type: AlterRateLimitType::Backfill,
+                rate_limit,
+            });
         }
-        if self.expect_keyword(Keyword::TO).is_err() && self.expect_token(&Token::Eq).is_err() {
-            return self.expected("TO or = after RATE_LIMIT");
-        }
-        let rate_limit = if self.parse_keyword(Keyword::DEFAULT) {
-            -1
+        if let Some(rate_limit) = self.parse_alter_rate_limit()? {
+            Ok(rate_limit)
         } else {
-            let s = self.parse_number_value()?;
-            if let Ok(n) = s.parse::<i32>() {
-                n
-            } else {
-                return self.expected("number or DEFAULT");
-            }
-        };
-        Ok(rate_limit)
+            self.expected("expected rate limit after SET")
+        }
     }
 
     /// Parse a copy statement

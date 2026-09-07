@@ -433,7 +433,7 @@ async fn test_read_filter_basic() {
 //     )
 //     .unwrap();
 
-//     // No imms should be proivided
+//     // No imms should be provided
 //     assert_eq!(0, hummock_read_snapshot.0.len());
 //     // Only 1 staging sst is provided
 //     assert_eq!(1, hummock_read_snapshot.1.len());

@@ -1,0 +1,66 @@
+control substitution on
+
+# VARIANT columns are rejected on tables created from a CDC source: CDC parsers cannot
+# produce variant values.
+
+statement ok
+drop table if exists variant_reject_cdc;
+
+statement ok
+drop source if exists variant_reject_source;
+
+system ok
+psql -c "
+    DROP TABLE IF EXISTS variant_reject_cdc CASCADE;
+    CREATE TABLE variant_reject_cdc (
+        id int PRIMARY KEY,
+        name varchar
+    );
+    INSERT INTO variant_reject_cdc VALUES (1, 'a');
+"
+
+statement ok
+create source variant_reject_source with (
+  connector = 'postgres-cdc',
+  hostname = '${PGHOST:localhost}',
+  port = '${PGPORT:5432}',
+  username = '${PGUSER:$USER}',
+  password = '${PGPASSWORD:}',
+  database.name = '${PGDATABASE:postgres}',
+  schema.name = 'public',
+  slot.name = 'variant_reject_slot'
+);
+
+statement error is not supported on a table created from a CDC source
+create table variant_reject_cdc (
+    id int primary key,
+    name varchar,
+    v variant
+) from variant_reject_source table 'public.variant_reject_cdc';
+
+statement error is not supported on a table created from a CDC source
+create table variant_reject_cdc (
+    id int primary key,
+    name varchar,
+    s struct<v variant>
+) from variant_reject_source table 'public.variant_reject_cdc';
+
+# Control: the same table without a variant column binds fine.
+statement ok
+create table variant_reject_cdc (
+    id int primary key,
+    name varchar
+) from variant_reject_source table 'public.variant_reject_cdc';
+
+# ALTER TABLE on a CDC table re-binds through the same path and must be gated too.
+statement error is not supported on a table created from a CDC source
+alter table variant_reject_cdc add column v variant;
+
+statement ok
+drop table variant_reject_cdc;
+
+statement ok
+drop source variant_reject_source;
+
+system ok
+psql -c "DROP TABLE IF EXISTS variant_reject_cdc CASCADE;"

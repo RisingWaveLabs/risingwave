@@ -67,7 +67,7 @@ use sea_orm::{
 use serde::{Deserialize, Serialize};
 
 use crate::barrier::{SharedActorInfos, SharedFragmentInfo, SnapshotBackfillInfo};
-use crate::controller::catalog::CatalogController;
+use crate::controller::catalog::{CatalogController, CatalogControllerInner};
 use crate::controller::scale::{
     FragmentRenderMap, LoadedFragmentContext, NoShuffleEnsemble, RenderedGraph,
     find_fragment_no_shuffle_dags_detailed, load_fragment_context_for_jobs,
@@ -131,13 +131,21 @@ pub struct InflightFragmentInfo {
 }
 
 #[derive(Clone, Debug)]
-pub struct FragmentParallelismInfo {
+pub struct FragmentServingInfo {
+    /// The query-visible result table for this job, if it has one.
+    /// Sink/source jobs have no serving target.
+    pub result_table_id: Option<TableId>,
     pub distribution_type: FragmentDistributionType,
     pub vnode_count: usize,
 }
 
 #[easy_ext::ext(FragmentTypeMaskExt)]
 pub impl FragmentTypeMask {
+    /// Matches fragments whose creation progress cannot be recovered after a failure.
+    fn contains_non_recoverable_fragment() -> SimpleExpr {
+        Self::intersects(FragmentTypeFlag::Values)
+    }
+
     fn intersects(flag: FragmentTypeFlag) -> SimpleExpr {
         Expr::col(fragment::Column::FragmentTypeMask)
             .bit_and(Expr::value(flag as i32))
@@ -233,6 +241,49 @@ impl NotificationManager {
         self.notify_local_subscribers(LocalNotification::ServingFragmentMappingsDelete(
             fragment_ids,
         ));
+    }
+}
+
+impl CatalogControllerInner {
+    /// Returns distribution type, vnode count and query-visible result table for all fragments.
+    ///
+    /// Reads directly from the persistent catalog rather than from the in-memory
+    /// `shared_actor_infos`. This is critical because the serving vnode mapping
+    /// must be available even before recovery has populated `shared_actor_infos`.
+    pub async fn fragment_serving_infos(
+        &self,
+    ) -> MetaResult<HashMap<FragmentId, FragmentServingInfo>> {
+        let query = FragmentModel::find().select_only().columns([
+            fragment::Column::FragmentId,
+            fragment::Column::JobId,
+            fragment::Column::DistributionType,
+            fragment::Column::VnodeCount,
+            fragment::Column::StateTableIds,
+        ]);
+        let fragments: Vec<(FragmentId, JobId, DistributionType, i32, TableIdArray)> =
+            query.into_tuple().all(&self.db).await?;
+
+        Ok(fragments
+            .into_iter()
+            .map(
+                |(fragment_id, job_id, distribution_type, vnode_count, state_table_ids)| {
+                    // Table/MV/index result tables reuse the job id and appear only in their
+                    // owning fragment; sink/source jobs therefore have no matching state table.
+                    let result_table_id = job_id.as_mv_table_id();
+                    (
+                        fragment_id,
+                        FragmentServingInfo {
+                            result_table_id: state_table_ids
+                                .0
+                                .contains(&result_table_id)
+                                .then_some(result_table_id),
+                            distribution_type: PbFragmentDistributionType::from(distribution_type),
+                            vnode_count: vnode_count as usize,
+                        },
+                    )
+                },
+            )
+            .collect())
     }
 }
 
@@ -429,36 +480,11 @@ impl CatalogController {
         Ok((pb_fragment, pb_actors, pb_actor_status, pb_actor_splits))
     }
 
-    /// Returns distribution type and vnode count for all (or filtered) fragments.
-    ///
-    /// Reads directly from the persistent catalog (fragment table) rather than
-    /// from the in-memory `shared_actor_infos`.  This is critical because the
-    /// serving vnode mapping must be available even before the barrier manager's
-    /// recovery has completed and populated `shared_actor_infos`.
-    pub async fn fragment_parallelisms(
+    pub async fn fragment_serving_infos(
         &self,
-    ) -> MetaResult<HashMap<FragmentId, FragmentParallelismInfo>> {
+    ) -> MetaResult<HashMap<FragmentId, FragmentServingInfo>> {
         let inner = self.inner.read().await;
-        let query = FragmentModel::find().select_only().columns([
-            fragment::Column::FragmentId,
-            fragment::Column::DistributionType,
-            fragment::Column::VnodeCount,
-        ]);
-        let fragments: Vec<(FragmentId, DistributionType, i32)> =
-            query.into_tuple().all(&inner.db).await?;
-
-        Ok(fragments
-            .into_iter()
-            .map(|(fragment_id, distribution_type, vnode_count)| {
-                (
-                    fragment_id,
-                    FragmentParallelismInfo {
-                        distribution_type: PbFragmentDistributionType::from(distribution_type),
-                        vnode_count: vnode_count as usize,
-                    },
-                )
-            })
-            .collect())
+        inner.fragment_serving_infos().await
     }
 
     pub async fn fragment_job_mapping(&self) -> MetaResult<HashMap<FragmentId, JobId>> {
@@ -1726,7 +1752,7 @@ impl CatalogController {
             })?;
 
         if fragment_relation != DispatcherType::NoShuffle {
-            return Err(anyhow!("expect NoShuffle but get {:?}", fragment_relation).into());
+            return Err(anyhow!("expected NoShuffle but got {:?}", fragment_relation).into());
         }
 
         let load_fragment_distribution_type = |txn, fragment_id: FragmentId| async move {

@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+real_path=$(echo "$PATH" | sed "s,$(dirname "$0"):,,g")
+
+if PATH="$real_path" command -v redis-cli >/dev/null 2>&1; then
+  PATH="$real_path" exec redis-cli -h "${REDIS_HOST}" -p "${REDIS_PORT}" "$@"
+fi
+
+exec docker exec -i "${REDIS_CONTAINER}" redis-cli "$@"

@@ -1,0 +1,113 @@
+init_sqls = [
+    'CREATE SCHEMA IF NOT EXISTS demo_db',
+    'DROP TABLE IF EXISTS demo_db.test_variant_source PURGE',
+    """CREATE TABLE demo_db.test_variant_source (
+        id INT,
+        v_null VARIANT,
+        v_true VARIANT,
+        v_false VARIANT,
+        v_int8 VARIANT,
+        v_int16 VARIANT,
+        v_int32 VARIANT,
+        v_int64 VARIANT,
+        v_float VARIANT,
+        v_double VARIANT,
+        v_decimal4 VARIANT,
+        v_decimal8 VARIANT,
+        v_decimal16 VARIANT,
+        v_date VARIANT,
+        v_timestamp VARIANT,
+        v_timestamp_ntz VARIANT,
+        v_binary VARIANT,
+        v_short_string VARIANT,
+        v_long_string VARIANT,
+        v_object VARIANT,
+        v_array VARIANT,
+        nested STRUCT<top_variant: VARIANT, variant_list: ARRAY<VARIANT>, variant_map: MAP<STRING, VARIANT>>,
+        evolved ARRAY<STRUCT<a: INT, v: VARIANT>>
+    ) USING iceberg
+    TBLPROPERTIES ('format-version'='3')""",
+    """INSERT INTO demo_db.test_variant_source
+    SELECT
+        1,
+        parse_json('null'),
+        CAST(TRUE AS VARIANT),
+        CAST(FALSE AS VARIANT),
+        CAST(CAST(34 AS TINYINT) AS VARIANT),
+        CAST(CAST(1234 AS SMALLINT) AS VARIANT),
+        CAST(CAST(100000 AS INT) AS VARIANT),
+        CAST(CAST(5000000000 AS BIGINT) AS VARIANT),
+        CAST(CAST(3.5 AS FLOAT) AS VARIANT),
+        CAST(CAST(14.25 AS DOUBLE) AS VARIANT),
+        CAST(CAST(12345.5 AS DECIMAL(9, 1)) AS VARIANT),
+        CAST(CAST(123456789.5 AS DECIMAL(18, 1)) AS VARIANT),
+        CAST(CAST(1234567890123456789 AS DECIMAL(19, 0)) AS VARIANT),
+        CAST(DATE '2024-11-07' AS VARIANT),
+        CAST(TIMESTAMP '2024-11-07 12:33:54.123456+00:00' AS VARIANT),
+        CAST(TIMESTAMP_NTZ '2024-11-07 12:33:54.123456' AS VARIANT),
+        CAST(UNHEX('0A0B0C0D') AS VARIANT),
+        CAST('iceberg' AS VARIANT),
+        CAST(REPEAT('x', 64) AS VARIANT),
+        parse_json('{"a":1,"b":true}'),
+        parse_json('[1,true,null]'),
+        named_struct(
+            'top_variant', CAST(DATE '2024-11-08' AS VARIANT),
+            'variant_list', array(
+                CAST(CAST(7 AS TINYINT) AS VARIANT),
+                parse_json('{"x":2}'),
+                CAST(UNHEX('ABCD') AS VARIANT)
+            ),
+            'variant_map', map(
+                'k1', CAST(CAST(42 AS INT) AS VARIANT),
+                'k2', CAST(REPEAT('y', 64) AS VARIANT),
+                'k3', parse_json('null')
+            )
+        ),
+        array(named_struct('a', CAST(5 AS INT), 'v', CAST(CAST(7 AS TINYINT) AS VARIANT)))
+    """,
+    """INSERT INTO demo_db.test_variant_source
+    SELECT
+        2,
+        NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+        NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+        NULL, NULL
+    UNION ALL
+    SELECT
+        3,
+        NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+        CAST(CAST('NaN' AS DOUBLE) AS VARIANT),
+        NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+        parse_json('{}'),
+        parse_json('[]'),
+        named_struct(
+            'top_variant', parse_json('{"a":{"b":[1,{"c":2}],"d":{},"e":[]}}'),
+            'variant_list', array(parse_json('{}'), parse_json('[]')),
+            'variant_map', map('empty', parse_json('{}'))
+        ),
+        NULL
+    """,
+    # Schema evolution: `v2` is added after the first files are written, so old files
+    # must NULL-fill it. `b` sits after a variant column in the parquet files, pinning
+    # the field-id map against position shifts caused by variant's id-less sub-leaves.
+    'DROP TABLE IF EXISTS demo_db.test_variant_evolution PURGE',
+    """CREATE TABLE demo_db.test_variant_evolution (
+        id INT,
+        payload VARIANT,
+        b INT
+    ) USING iceberg
+    TBLPROPERTIES ('format-version'='3')""",
+    """INSERT INTO demo_db.test_variant_evolution VALUES
+        (1, parse_json('{"k":1}'), 100),
+        (2, parse_json('"old"'), 200)""",
+    'ALTER TABLE demo_db.test_variant_evolution ADD COLUMNS (v2 VARIANT)',
+    """INSERT INTO demo_db.test_variant_evolution VALUES
+        (3, parse_json('{"k":3}'), 300, parse_json('{"new":true}'))""",
+]
+
+slt = 'test_case/iceberg_source_variant.slt'
+
+drop_sqls = [
+    'DROP TABLE IF EXISTS demo_db.test_variant_source PURGE',
+    'DROP TABLE IF EXISTS demo_db.test_variant_evolution PURGE',
+    'DROP SCHEMA IF EXISTS demo_db',
+]

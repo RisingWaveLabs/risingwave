@@ -1,0 +1,165 @@
+# Regression test: rescaling the iceberg pk-index sink must not seed the position-delete
+# merger from a stale snapshot.
+#
+# Before the wait-for-epoch fix, a rescale rebuilt the merger actors and each new actor
+# called load_table() at build time -- before the config-change epoch's delete files were
+# committed -- so it seeded from a snapshot missing earlier committed deletion vectors (DVs).
+# A subsequent delete then wrote a second DV for a data file that already had one (illegal
+# in V3) and dropped the earlier deleted positions, resurrecting deleted rows.
+#
+# Test shape:
+#   - UNPARTITIONED table with pinned streaming_parallelism = 2, so epoch A's 60 rows land
+#     in exactly 2 multi-row data files (30 rows each). Both the epoch-B deletes (evens)
+#     and the epoch-C deletes (multiples of 3) hit BOTH files, which is required for the
+#     bug to be reachable: a stale-seeded merger emits a second DV for a file that already
+#     has one and loses epoch B's positions. (partition_by='id' would give one row per
+#     data file and the two delete epochs would never share a file.)
+#   - The rescale is done with ALTER SINK on the internal pk-index sink
+#     `__iceberg_sink_<table>`; ALTER TABLE ... SET PARALLELISM is rejected for iceberg
+#     engine tables. The sink job owns the merger + writer fragments.
+#   - Assertions NEVER use a bare `select count(*)`: IcebergCountStarRule folds it to a
+#     plan-time constant from data-file record counts and ignores deletion vectors, so it
+#     returns the pre-delete count forever. `count(id)`, predicated counts, and row scans
+#     go through the real iceberg read path, which resolves the current snapshot at plan
+#     time and applies DVs in the reader -- fresh immediately after the sink commit lands.
+#   - The retry budgets only cover the small async gap between FLUSH returning and the
+#     sink coordinator committing the iceberg snapshot.
+
+statement ok
+create secret pk_index_scale_secret with (
+  backend = 'meta'
+) as 'hummockadmin';
+
+statement ok
+create connection pk_index_scale_conn
+with (
+    type = 'iceberg',
+    warehouse.path = 's3://hummock001/iceberg_v3_pk_index_scale',
+    s3.access.key = secret pk_index_scale_secret,
+    s3.secret.key = secret pk_index_scale_secret,
+    s3.endpoint = 'http://127.0.0.1:9301',
+    s3.region = 'us-west-2',
+    hosted_catalog = true
+);
+
+statement ok
+set iceberg_engine_connection = 'public.pk_index_scale_conn';
+
+# Pin the job at parallelism 2 so the data-file layout is deterministic (2 writers ->
+# 2 data files for epoch A) and the later rescale to 1 is always a real change.
+statement ok
+set streaming_parallelism = 2;
+
+statement ok
+create table t_pk_scale(id int primary key, v int)
+with(
+    commit_checkpoint_interval = 1,
+    format_version = 3,
+    enable_pk_index = 'true'
+) engine = iceberg;
+
+statement ok
+set streaming_parallelism to default;
+
+# Epoch A: 60 rows across 2 multi-row data files (30 rows per writer).
+statement ok
+insert into t_pk_scale select i, i from generate_series(1, 60) as t(i);
+
+statement ok
+flush;
+
+# Exactly 2 data files, 60 records total: multi-row files, as the repro requires.
+query TII retry 15 backoff 1s
+select content, count(*), sum(record_count) from rw_iceberg_files
+where source_name = '__iceberg_source_t_pk_scale'
+group by content order by content;
+----
+Data 2 60
+
+# Epoch B: delete every even id -> one deletion vector per data file (30 positions total).
+statement ok
+delete from t_pk_scale where id % 2 = 0;
+
+statement ok
+flush;
+
+# Pre-scale sanity. NOTE: count(id), not count(*) (see header).
+query I retry 15 backoff 1s
+select count(id) from t_pk_scale;
+----
+30
+
+query I
+select count(*) from t_pk_scale where id % 2 = 0;
+----
+0
+
+# B's deletion vectors are committed: one DV entry per data file, 30 positions total.
+query II retry 15 backoff 1s
+select count(*), sum(record_count) from rw_iceberg_files
+where source_name = '__iceberg_source_t_pk_scale'
+  and content = 'PositionDeletes';
+----
+2 30
+
+# Rescale the pk-index sink job (merger + writer fragments). The new merger actors are
+# built at a config-change checkpoint whose prev epoch is B; without the wait-for-epoch
+# fix they would seed from a snapshot predating B's deletion vectors.
+statement ok
+alter sink __iceberg_sink_t_pk_scale set parallelism = 1;
+
+# Epoch C (post-rescale): delete every id divisible by 3. The 10 odd multiples of 3 live
+# in the SAME two data files that already carry epoch-B DVs, so a stale-seeded merger
+# would write a second DV for those files and lose B's 30 positions.
+statement ok
+delete from t_pk_scale where id % 3 = 0;
+
+statement ok
+flush;
+
+# Survivors are exactly the ids that are odd AND not divisible by 3:
+# 30 odds - 10 odd multiples of 3 = 20.
+query I retry 15 backoff 1s
+select count(id) from t_pk_scale;
+----
+20
+
+# No previously-deleted even id was resurrected...
+query I
+select count(*) from t_pk_scale where id % 2 = 0;
+----
+0
+
+# ...and every multiple of 3 is gone.
+query I
+select count(*) from t_pk_scale where id % 3 = 0;
+----
+0
+
+# Still exactly ONE deletion vector per data file (V3-legal), now carrying all
+# 30 + 10 = 40 deleted positions. A stale-seeded merger yields either extra DV
+# entries (> 2) or lost positions (< 40).
+query II retry 15 backoff 1s
+select count(*), sum(record_count) from rw_iceberg_files
+where source_name = '__iceberg_source_t_pk_scale'
+  and content = 'PositionDeletes';
+----
+2 40
+
+# Spot-check concrete rows: kept (5, 25, 35 -- odd, not multiples of 3),
+# gone (6 even; 9, 15 multiples of 3).
+query II rowsort
+select id, v from t_pk_scale where id in (5, 6, 9, 15, 25, 35);
+----
+25 25
+35 35
+5 5
+
+statement ok
+drop table t_pk_scale;
+
+statement ok
+drop connection pk_index_scale_conn;
+
+statement ok
+drop secret pk_index_scale_secret;

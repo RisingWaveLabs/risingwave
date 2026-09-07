@@ -15,15 +15,16 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use opendal::Operator;
-use opendal::layers::{HttpClientLayer, LoggingLayer};
-use opendal::raw::HttpClient;
+use opendal::layers::LoggingLayer;
 use opendal::services::S3;
+use opendal::{HttpTransporter, OperationContext, Operator};
+use opendal_http_transport_reqwest::ReqwestTransport;
 use risingwave_common::config::ObjectStoreConfig;
+use thiserror_ext::AsReport as _;
 
 use super::{MediaType, OpendalObjectStore, new_operator};
-use crate::object::ObjectResult;
 use crate::object::object_metrics::ObjectStoreMetrics;
+use crate::object::{ObjectError, ObjectResult};
 
 impl OpendalObjectStore {
     /// create opendal s3 engine.
@@ -44,11 +45,12 @@ impl OpendalObjectStore {
         }
 
         let http_client = Self::new_http_client(&config)?;
+        let transport = HttpTransporter::new(ReqwestTransport::new(http_client));
 
         let op = new_operator(
             &config,
             Operator::new(builder)?
-                .layer(HttpClientLayer::new(http_client))
+                .with_context(OperationContext::new().with_http_transport(transport))
                 .layer(LoggingLayer::default()),
         );
 
@@ -89,11 +91,14 @@ impl OpendalObjectStore {
             .disable_config_load();
 
         let http_client = Self::new_http_client(&config)?;
+        let transport = HttpTransporter::new(ReqwestTransport::new(http_client));
 
-        let op: Operator = Operator::new(builder)?
-            .layer(HttpClientLayer::new(http_client))
-            .layer(LoggingLayer::default())
-            .finish();
+        let op = new_operator(
+            &config,
+            Operator::new(builder)?
+                .with_context(OperationContext::new().with_http_transport(transport))
+                .layer(LoggingLayer::default()),
+        );
 
         Ok(Self {
             op,
@@ -103,7 +108,7 @@ impl OpendalObjectStore {
         })
     }
 
-    pub fn new_http_client(config: &ObjectStoreConfig) -> ObjectResult<HttpClient> {
+    pub fn new_http_client(config: &ObjectStoreConfig) -> ObjectResult<reqwest::Client> {
         let mut client_builder = reqwest::ClientBuilder::new();
 
         if let Some(keepalive_ms) = config.s3.keepalive_ms.as_ref() {
@@ -113,7 +118,8 @@ impl OpendalObjectStore {
         if let Some(nodelay) = config.s3.nodelay.as_ref() {
             client_builder = client_builder.tcp_nodelay(*nodelay);
         }
-        #[expect(deprecated)]
-        Ok(HttpClient::build(client_builder)?)
+        client_builder.build().map_err(|e| {
+            ObjectError::internal(format!("failed to build HTTP client: {}", e.as_report()))
+        })
     }
 }

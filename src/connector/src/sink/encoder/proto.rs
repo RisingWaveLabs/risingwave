@@ -413,6 +413,9 @@ fn on_field<D: MaybeData>(
             _ => return no_match_err(), /* Value, NullValue, Struct (map), ListValue
                                          * Group C: experimental */
         },
+        DataType::Variant => {
+            return no_match_err();
+        }
         DataType::Int16 => match proto_field.kind() {
             Kind::Int64 => maybe.on_base(|s| Ok(Value::I64(s.into_int16() as i64)))?,
             _ => return no_match_err(),
@@ -540,7 +543,9 @@ mod tests {
                 Some(ScalarImpl::Utf8("".into())),
             ]))),
             Some(ScalarImpl::List(ListValue::from_iter([4, 0, 4]))),
-            Some(ScalarImpl::Timestamptz(Timestamptz::from_micros(3))),
+            Some(ScalarImpl::Timestamptz(
+                Timestamptz::from_micros(3).unwrap(),
+            )),
             Some(ScalarImpl::Map(
                 MapValue::try_from_kv(
                     ListValue::from_iter(["a", "b"]),

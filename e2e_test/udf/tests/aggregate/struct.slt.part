@@ -1,0 +1,51 @@
+# Expected functions:
+# sum_cnt(value int) -> struct<sum int, cnt int>
+
+# batch
+query T
+select sum_cnt(value) from (values (1), (null), (3)) as t(value);
+----
+(4,2)
+
+# streaming
+statement ok
+create table t_sum_cnt(value int);
+
+statement ok
+create materialized view mv_sum_cnt as select sum_cnt(value) as sc from t_sum_cnt;
+
+query II
+select (sc).sum, (sc).cnt from mv_sum_cnt;
+----
+NULL NULL
+
+statement ok
+insert into t_sum_cnt values (1), (null), (3);
+
+statement ok
+flush;
+
+query II
+select (sc).sum, (sc).cnt from mv_sum_cnt;
+----
+4 2
+
+statement ok
+delete from t_sum_cnt where value = 3;
+
+statement ok
+flush;
+
+query II
+select (sc).sum, (sc).cnt from mv_sum_cnt;
+----
+1 1
+
+statement ok
+drop materialized view mv_sum_cnt;
+
+statement ok
+drop table t_sum_cnt;
+
+statement ok
+drop aggregate sum_cnt;

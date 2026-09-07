@@ -54,9 +54,9 @@ pub use insert::BoundInsert;
 use pgwire::pg_server::{Session, SessionId};
 pub use query::BoundQuery;
 pub use relation::{
-    BoundBaseTable, BoundGapFill, BoundJoin, BoundShare, BoundShareInput, BoundSource,
-    BoundSystemTable, BoundWatermark, BoundWindowTableFunction, Relation,
-    ResolveQualifiedNameError, WindowTableFunctionKind,
+    BoundBaseTable, BoundGapFill, BoundIcebergMetadataTable, BoundJoin, BoundShare,
+    BoundShareInput, BoundSource, BoundSystemTable, BoundWatermark, BoundWindowTableFunction,
+    Relation, ResolveQualifiedNameError, WindowTableFunctionKind,
 };
 // Re-export common types
 pub use risingwave_common::gap_fill::FillStrategy;
@@ -384,17 +384,25 @@ impl Binder {
         Ok(())
     }
 
-    fn try_mark_lateral_as_visible(&mut self) {
-        if let Some(mut ctx) = self.lateral_contexts.pop() {
-            ctx.is_visible = true;
-            self.lateral_contexts.push(ctx);
-        }
+    /// Make every enclosing left-hand `FROM` context visible while binding a lateral table
+    /// factor. A lateral factor nested in a join tree may refer not only to its immediate left
+    /// sibling, but also to left inputs of enclosing joins.
+    fn mark_lateral_contexts_visible(&mut self) -> Vec<bool> {
+        self.lateral_contexts
+            .iter_mut()
+            .map(|ctx| std::mem::replace(&mut ctx.is_visible, true))
+            .collect()
     }
 
-    fn try_mark_lateral_as_invisible(&mut self) {
-        if let Some(mut ctx) = self.lateral_contexts.pop() {
-            ctx.is_visible = false;
-            self.lateral_contexts.push(ctx);
+    fn restore_lateral_contexts_visibility(&mut self, visibility: Vec<bool>) {
+        // Some table-factor binders return early on an error without unwinding their temporary
+        // query context. The whole binder is discarded in that case, so there is no visibility
+        // state to restore on the active stack.
+        if self.lateral_contexts.len() != visibility.len() {
+            return;
+        }
+        for (ctx, is_visible) in self.lateral_contexts.iter_mut().zip_eq_debug(visibility) {
+            ctx.is_visible = is_visible;
         }
     }
 

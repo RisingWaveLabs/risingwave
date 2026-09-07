@@ -121,7 +121,7 @@ set database to dev;
 statement ok
 set sink_decouple=false;
 
-statement error
+statement error File sink can only be created with sink_decouple enabled
 CREATE SINK file_sink
 FROM
   t
@@ -134,13 +134,34 @@ WITH
   type = 'append-only',
   force_append_only='true'
 ) FORMAT PLAIN ENCODE PARQUET(force_append_only='true');
-----
-db error: ERROR: Failed to run the query
 
-Caused by:
-  Not supported: File sink can only be created with sink_decouple enabled.
-HINT: Please run `set sink_decouple = true` first.
+statement error File sink can only be created with sink_decouple enabled
+CREATE SINK file_sink
+FROM
+  t
+WITH
+(
+  connector = 'gcs',
+  gcs.bucket_name = 'test',
+  gcs.credential = 'test',
+  gcs.path = '',
+  type = 'append-only',
+  force_append_only='true'
+) FORMAT PLAIN ENCODE PARQUET(force_append_only='true');
 
+statement error File sink can only be created with sink_decouple enabled
+CREATE SINK file_sink
+FROM
+  t
+WITH
+(
+  connector = 'snowflake',
+  s3.region_name = 'test',
+  s3.bucket_name = 'test',
+  s3.path = '',
+  type = 'append-only',
+  force_append_only='true'
+) FORMAT PLAIN ENCODE PARQUET(force_append_only='true');
 
 statement ok
 drop sink s1

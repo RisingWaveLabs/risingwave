@@ -12,7 +12,7 @@ execute_sql "FLUSH;"
 
 execute_sql_and_expect \
 "SHOW parameters;" \
-"state_store                            | hummock+minio://hummockadmin:hummockadmin@127.0.0.1:9301/hummock001"
+"state_store                            | hummock+minio://****:****@127.0.0.1:9301/hummock001"
 
 execute_sql_and_expect \
 "SHOW parameters;" \
@@ -40,7 +40,7 @@ start_cluster
 
 execute_sql_and_expect \
 "SHOW parameters;" \
-"state_store                            | hummock+${overwrite_hummock_storage_url}"
+"state_store                            | hummock+minio://****:****@127.0.0.1:9301/hummock002"
 
 execute_sql_and_expect \
 "SHOW parameters;" \

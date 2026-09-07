@@ -14,6 +14,7 @@
 
 use std::fmt::{Debug, Formatter};
 
+use await_tree::InstrumentAwait;
 use futures::StreamExt;
 use risingwave_common::array::DataChunk;
 use risingwave_expr::expr_context::capture_expr_context;
@@ -33,6 +34,8 @@ pub struct GrpcExchangeSource {
     stream: Streaming<GetDataResponse>,
 
     task_output_id: TaskOutputId,
+
+    take_data_span: await_tree::Span,
 }
 
 impl GrpcExchangeSource {
@@ -42,6 +45,13 @@ impl GrpcExchangeSource {
         local_execute_plan: Option<LocalExecutePlan>,
     ) -> Result<Self> {
         let task_id = task_output_id.get_task_id()?.clone();
+        let take_data_span = await_tree::span!(
+            "grpc_exchange_take_data (query {} stage {} task {} output {})",
+            task_id.query_id,
+            task_id.stage_id,
+            task_id.task_id,
+            task_output_id.output_id
+        );
         let stream = match local_execute_plan {
             // When in the local execution mode, `GrpcExchangeSource` would send out
             // `ExecuteRequest` and get the data chunks back in a single RPC.
@@ -60,6 +70,7 @@ impl GrpcExchangeSource {
         let source = Self {
             stream,
             task_output_id,
+            take_data_span,
         };
         Ok(source)
     }
@@ -75,7 +86,12 @@ impl Debug for GrpcExchangeSource {
 
 impl ExchangeSource for GrpcExchangeSource {
     async fn take_data(&mut self) -> Result<Option<DataChunk>> {
-        let res = match self.stream.next().await {
+        let res = match self
+            .stream
+            .next()
+            .instrument_await(self.take_data_span.clone())
+            .await
+        {
             None => {
                 return Ok(None);
             }

@@ -78,23 +78,6 @@ impl StreamGapFill {
         Self { base, core }
     }
 
-    // Legacy constructor for backward compatibility
-    pub fn new_with_args(
-        input: PlanRef<Stream>,
-        time_col: InputRef,
-        interval: ExprImpl,
-        fill_strategies: Vec<BoundFillStrategy>,
-    ) -> Self {
-        let core = generic::GapFill {
-            input,
-            time_col,
-            interval,
-            fill_strategies,
-            partition_by_cols: vec![],
-        };
-        Self::new(core)
-    }
-
     pub fn time_col(&self) -> &InputRef {
         &self.core.time_col
     }

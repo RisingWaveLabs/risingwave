@@ -207,6 +207,9 @@ labels:
 
 - label: "ci/run-e2e-redis-sink-tests"
   files:
+  - "ci\\/scripts\\/e2e-redis-sink-test\\.sh"
+  - "e2e_test\\/commands\\/redis"
+  - "e2e_test\\/sink\\/redis.*"
   - "src\\/connector\\/src\\/sink\\/redis\\.rs"
 
 - label: "ci/run-e2e-doris-sink-tests"

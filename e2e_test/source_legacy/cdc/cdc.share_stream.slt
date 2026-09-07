@@ -780,6 +780,7 @@ CREATE TABLE composite_text_schema_specified_shared (
     listed_price varchar,
     listed_discount varchar,
     complex_col varchar,
+    prices varchar[],
     PRIMARY KEY (id)
 ) FROM pg_source TABLE 'public.order_ledger_entries_composite';
 
@@ -811,13 +812,32 @@ INSERT INTO order_ledger_entries_composite VALUES
         ROW('JPY', 1234.56)::money_type,
         ROW('JPY', 2000.00)::money_type,
         ROW('JPY', 765.44)::money_type,
-        ROW('baz', ROW(3, false, 'delta')::inner_type)::outer_type
+        ROW('baz', ROW(3, false, 'delta')::inner_type)::outer_type,
+        ARRAY[ROW('CAD', 9.0)::money_type]::money_type[]
+    ),
+    (
+        4,
+        'toast_marker_initial',
+        ROW('AUD', 4.40)::money_type,
+        ROW('AUD', 5.50)::money_type,
+        ROW('AUD', 1.10)::money_type,
+        ROW('toast', ROW(4, true, 'large_array')::inner_type)::outer_type,
+        ARRAY[
+            ROW(
+                (SELECT string_agg(md5(i::text), '') FROM generate_series(1, 200) AS g(i)),
+                4.00
+            )::money_type
+        ]::money_type[]
     );
 UPDATE order_ledger_entries_composite
 SET note_varchar = 'still_plain_text_1',
     total = ROW('USD', 66.66)::money_type,
-    complex_col = ROW('foo_updated', ROW(9, true, 'baz')::inner_type)::outer_type
+    complex_col = ROW('foo_updated', ROW(9, true, 'baz')::inner_type)::outer_type,
+    prices = ARRAY[ROW('GBP', 5)::money_type]::money_type[]
 WHERE id = 1;
+UPDATE order_ledger_entries_composite
+SET note_varchar = 'toast_marker_update'
+WHERE id = 4;
 "
 
 query IITTTTT retry 8 backoff 1s
@@ -828,6 +848,7 @@ order by id;
 1 still_plain_text_1 (USD,66.66) (USD,20.00) (USD,7.66) (foo_updated,"(9,t,baz)")
 2 KEEp (EUR,88.80) (EUR,99.90) (EUR,11.10) (bar,"(2,t,world)")
 3 QmFzZTY0P2J1dF9wbGFpbg== (JPY,1234.56) (JPY,2000.00) (JPY,765.44) (baz,"(3,f,delta)")
+4 toast_marker_update (AUD,4.40) (AUD,5.50) (AUD,1.10) (toast,"(4,t,large_array)")
 
 query IITTTTT retry 8 backoff 1s
 select id, note_varchar, total, listed_price, listed_discount, complex_col
@@ -837,6 +858,56 @@ order by id;
 1 still_plain_text_1 (USD,66.66) (USD,20.00) (USD,7.66) (foo_updated,"(9,t,baz)")
 2 KEEp (EUR,88.80) (EUR,99.90) (EUR,11.10) (bar,"(2,t,world)")
 3 QmFzZTY0P2J1dF9wbGFpbg== (JPY,1234.56) (JPY,2000.00) (JPY,765.44) (baz,"(3,f,delta)")
+4 toast_marker_update (AUD,4.40) (AUD,5.50) (AUD,1.10) (toast,"(4,t,large_array)")
+
+# Array of composite: backfill arrives as PG textual array form, streaming
+# INSERT/UPDATE preserves the same shape.
+query IT retry 8 backoff 1s
+select id, prices from composite_text_schema_specified_shared where id < 4 order by id;
+----
+1 {"(GBP,5)"}
+2 NULL
+3 {"(CAD,9.0)"}
+
+query IT retry 8 backoff 1s
+select id, prices from composite_text_auto_derived_shared where id < 4 order by id;
+----
+1 {"(GBP,5)"}
+2 NULL
+3 {"(CAD,9.0)"}
+
+# Regression: NULL composite arrays stay NULL during snapshot, while an
+# unchanged TOASTed composite array keeps its old value after updating another
+# column instead of being overwritten as an empty array.
+query IBIBBB retry 8 backoff 1s
+select
+    id,
+    prices is null,
+    cardinality(prices),
+    coalesce(prices[1] = '__debezium_unavailable_value', false),
+    coalesce(prices[1] like '(c4ca%', false),
+    coalesce(length(prices[1]) > 6000, false)
+from composite_text_schema_specified_shared
+where id in (2, 4)
+order by id;
+----
+2 t NULL f f f
+4 f 1 f t t
+
+query IBIBBB retry 8 backoff 1s
+select
+    id,
+    prices is null,
+    cardinality(prices),
+    coalesce(prices[1] = '__debezium_unavailable_value', false),
+    coalesce(prices[1] like '(c4ca%', false),
+    coalesce(length(prices[1]) > 6000, false)
+from composite_text_auto_derived_shared
+where id in (2, 4)
+order by id;
+----
+2 t NULL f f f
+4 f 1 f t t
 
 # Regression: DELETE on a row whose composite column is declared NOT NULL upstream.
 # Under REPLICA IDENTITY DEFAULT, Debezium fills non-PK columns with null in the
@@ -853,6 +924,7 @@ order by id;
 ----
 1 still_plain_text_1 (USD,66.66) (USD,20.00) (USD,7.66) (foo_updated,"(9,t,baz)")
 3 QmFzZTY0P2J1dF9wbGFpbg== (JPY,1234.56) (JPY,2000.00) (JPY,765.44) (baz,"(3,f,delta)")
+4 toast_marker_update (AUD,4.40) (AUD,5.50) (AUD,1.10) (toast,"(4,t,large_array)")
 
 query IITTTTT retry 8 backoff 1s
 select id, note_varchar, total, listed_price, listed_discount, complex_col
@@ -861,6 +933,7 @@ order by id;
 ----
 1 still_plain_text_1 (USD,66.66) (USD,20.00) (USD,7.66) (foo_updated,"(9,t,baz)")
 3 QmFzZTY0P2J1dF9wbGFpbg== (JPY,1234.56) (JPY,2000.00) (JPY,765.44) (baz,"(3,f,delta)")
+4 toast_marker_update (AUD,4.40) (AUD,5.50) (AUD,1.10) (toast,"(4,t,large_array)")
 
 statement ok
 CREATE TABLE test_pg_default_value (

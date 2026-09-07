@@ -13,6 +13,7 @@
 // limitations under the License.
 
 mod iceberg_query_storage_mode;
+mod locality_backfill_mode;
 mod non_zero64;
 mod opt;
 pub mod parallelism;
@@ -26,6 +27,7 @@ mod visibility_mode;
 use chrono_tz::Tz;
 pub use iceberg_query_storage_mode::IcebergQueryStorageMode;
 use itertools::Itertools;
+pub use locality_backfill_mode::LocalityBackfillMode;
 pub use opt::OptionConfig;
 pub use query_mode::QueryMode;
 use risingwave_common_proc_macro::{ConfigDoc, SessionConfig};
@@ -36,7 +38,7 @@ use thiserror::Error;
 
 use self::non_zero64::ConfigNonZeroU64;
 use crate::config::mutate::TomlTableMutateExt;
-use crate::config::streaming::{JoinEncodingType, OverWindowCachePolicy};
+use crate::config::streaming::{CacheRefillPolicy, JoinEncodingType, OverWindowCachePolicy};
 use crate::config::{ConfigMergeError, StreamingConfig, merge_streaming_config_section};
 use crate::hash::VirtualNode;
 use crate::session_config::parallelism::{ConfigBackfillParallelism, ConfigParallelism};
@@ -61,6 +63,16 @@ pub enum SessionConfigError {
 }
 
 type SessionConfigResult<T> = std::result::Result<T, SessionConfigError>;
+
+const AUTO_LOCALITY_BACKFILL_MIN_SIZE: u64 = 10 * 1024 * 1024 * 1024;
+
+fn default_auto_locality_backfill_min_size() -> u64 {
+    AUTO_LOCALITY_BACKFILL_MIN_SIZE
+}
+
+fn default_legacy_locality_backfill_mode() -> LocalityBackfillMode {
+    LocalityBackfillMode::Always
+}
 
 // NOTE(kwannoel): We declare it separately as a constant,
 // otherwise seems like it can't infer the type of -1 when written inline.
@@ -253,6 +265,14 @@ pub struct SessionConfig {
     #[parameter(default = false)]
     streaming_unsafe_allow_unmaterialized_impure_expr: bool,
 
+    /// Unsafe: allow an upsert sink to use downstream primary-key columns that are not part of
+    /// the upstream stream key.
+    ///
+    /// This may leave stale rows in the downstream system if a downstream primary-key column
+    /// changes without the upsert stream providing its old value.
+    #[parameter(default = false)]
+    streaming_unsafe_allow_upsert_sink_pk_mismatch: bool,
+
     /// Separate consecutive `StreamHashJoin` by no-shuffle `StreamExchange`
     #[parameter(default = false)]
     streaming_separate_consecutive_join: bool,
@@ -387,6 +407,14 @@ pub struct SessionConfig {
     #[parameter(default = None, alias = "rw_streaming_over_window_cache_policy")]
     streaming_over_window_cache_policy: OptionConfig<OverWindowCachePolicy>,
 
+    /// Cache refill policy for streaming cache refill feature.
+    /// Can be `enabled`, `disabled`, `streaming`, `serving` or `both`.
+    ///
+    /// This overrides the corresponding entry from the `[streaming.developer]` section in the config file,
+    /// taking effect for new streaming jobs created in the current session.
+    #[parameter(default = None)]
+    streaming_cache_refill_policy: OptionConfig<CacheRefillPolicy>,
+
     /// Run DDL statements in background
     #[parameter(default = false)]
     background_ddl: bool,
@@ -475,9 +503,23 @@ pub struct SessionConfig {
     #[parameter(default = false)]
     enable_mv_selection: bool,
 
-    /// Enable locality backfill for streaming queries. Defaults to false.
-    #[parameter(default = false)]
+    /// Whether to enable locality backfill. When enabled, `locality_backfill_mode` controls
+    /// whether it is selected automatically or always used.
+    #[parameter(default = true)]
     enable_locality_backfill: bool,
+
+    /// How to apply locality backfill when it is enabled. `auto` uses the estimated backfill size,
+    /// while `always` skips the size check. Missing values from older versions mean `always` to
+    /// preserve the previous boolean behavior.
+    #[serde(default = "default_legacy_locality_backfill_mode")]
+    #[parameter(default = LocalityBackfillMode::Auto)]
+    locality_backfill_mode: LocalityBackfillMode,
+
+    /// Auto-enable locality backfill when estimated scan backfill data reaches this size in bytes.
+    /// Defaults to 10 `GiB` (10737418240 bytes).
+    #[serde(default = "default_auto_locality_backfill_min_size")]
+    #[parameter(default = AUTO_LOCALITY_BACKFILL_MIN_SIZE)]
+    auto_locality_backfill_min_size: u64,
 
     /// Duration in seconds before notifying the user that a long-running DDL operation (e.g., DROP TABLE, CANCEL JOBS)
     /// is still running. Set to 0 to disable notifications. Defaults to 30 seconds.
@@ -652,6 +694,11 @@ impl SessionConfig {
                 .upsert("streaming.developer.over_window_cache_policy", v)
                 .unwrap();
         }
+        if let Some(v) = self.streaming_cache_refill_policy.as_ref() {
+            table
+                .upsert("streaming.developer.cache_refill_policy", v)
+                .unwrap();
+        }
 
         let res = toml::to_string(&table)?;
 
@@ -713,11 +760,15 @@ mod test {
                 &mut (),
             )
             .unwrap();
+        config
+            .set_streaming_cache_refill_policy(Some(CacheRefillPolicy::Both).into(), &mut ())
+            .unwrap();
 
         // Check the converted config override string.
         let override_str = config.to_initial_streaming_config_override().unwrap();
         expect![[r#"
             [streaming.developer]
+            cache_refill_policy = "both"
             join_encoding_type = "cpu_optimized"
             over_window_cache_policy = "recent_first_n"
         "#]]
@@ -731,6 +782,10 @@ mod test {
         assert_eq!(
             merged.developer.over_window_cache_policy,
             OverWindowCachePolicy::RecentFirstN
+        );
+        assert_eq!(
+            merged.developer.cache_refill_policy,
+            CacheRefillPolicy::Both
         );
     }
 
@@ -759,6 +814,7 @@ mod test {
             config.streaming_parallelism_for_materialized_view(),
             ConfigParallelism::Default
         );
+        assert!(!config.streaming_unsafe_allow_upsert_sink_pk_mismatch());
     }
 
     #[test]

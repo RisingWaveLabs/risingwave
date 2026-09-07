@@ -67,9 +67,8 @@ pub struct DebeziumCdcMeta {
 impl DebeziumCdcMeta {
     // These `extract_xxx` methods are used to support the `INCLUDE TIMESTAMP/DATABASE_NAME/TABLE_NAME` feature
     pub fn extract_timestamp(&self) -> DatumRef<'_> {
-        Some(ScalarRefImpl::Timestamptz(
-            Timestamptz::from_millis(self.source_ts_ms).unwrap(),
-        ))
+        // Yield NULL rather than panicking on an out-of-range upstream `source.ts_ms`.
+        Timestamptz::from_millis(self.source_ts_ms).map(ScalarRefImpl::Timestamptz)
     }
 
     pub fn extract_database_name(&self) -> DatumRef<'_> {

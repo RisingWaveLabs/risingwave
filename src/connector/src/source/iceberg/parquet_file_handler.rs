@@ -25,6 +25,7 @@ use futures::{FutureExt, Stream, TryFutureExt};
 use iceberg::io::{
     FileIOBuilder, FileMetadata, FileRead, S3_ACCESS_KEY_ID, S3_REGION, S3_SECRET_ACCESS_KEY,
 };
+use iceberg_storage_opendal::OpenDalStorageFactory;
 use itertools::Itertools;
 use opendal::Operator;
 use opendal::layers::{LoggingLayer, RetryLayer};
@@ -34,7 +35,7 @@ use parquet::arrow::{ParquetRecordBatchStreamBuilder, ProjectionMask, parquet_to
 use parquet::file::metadata::{FileMetaData, ParquetMetaData, ParquetMetaDataReader};
 use prometheus::core::GenericCounter;
 use risingwave_common::array::StreamChunk;
-use risingwave_common::array::arrow::{IcebergArrowConvert, is_parquet_schema_match_source_schema};
+use risingwave_common::array::arrow::{IcebergArrowConvert, is_parquet_field_match_source_schema};
 use risingwave_common::catalog::{ColumnDesc, ColumnId};
 use risingwave_common::metrics::LabelGuardedMetric;
 use risingwave_common::util::tokio_util::compat::FuturesAsyncReadCompatExt;
@@ -90,8 +91,9 @@ pub async fn create_parquet_stream_builder(
     props.insert(S3_ACCESS_KEY_ID, s3_access_key.clone());
     props.insert(S3_SECRET_ACCESS_KEY, s3_secret_key.clone());
 
-    let file_io_builder = FileIOBuilder::new("s3");
-    let file_io = file_io_builder.with_props(props).build()?;
+    let file_io = FileIOBuilder::new(Arc::new(OpenDalStorageFactory::s3()))
+        .with_props(props)
+        .build();
     let parquet_file = file_io.new_input(&location)?;
 
     let parquet_metadata = parquet_file.metadata().await?;
@@ -120,8 +122,7 @@ pub fn new_s3_operator(
         .disable_config_load();
     let op: Operator = Operator::new(builder)?
         .layer(LoggingLayer::default())
-        .layer(RetryLayer::default())
-        .finish();
+        .layer(RetryLayer::default());
 
     Ok(op)
 }
@@ -132,8 +133,7 @@ pub fn new_gcs_operator(credential: String, bucket: String) -> ConnectorResult<O
 
     let operator: Operator = Operator::new(builder)?
         .layer(LoggingLayer::default())
-        .layer(RetryLayer::default())
-        .finish();
+        .layer(RetryLayer::default());
     Ok(operator)
 }
 
@@ -153,8 +153,7 @@ pub fn new_azblob_operator(
 
     let operator: Operator = Operator::new(builder)?
         .layer(LoggingLayer::default())
-        .layer(RetryLayer::default())
-        .finish();
+        .layer(RetryLayer::default());
     Ok(operator)
 }
 
@@ -270,11 +269,19 @@ pub fn get_project_mask(
                         _ => None,
                     }?;
                     let arrow_field = converted_arrow_schema.fields.get(pos)?;
-                    let arrow_data_type = arrow_field.data_type();
                     let rw_data_type: &risingwave_common::types::DataType = &column.data_type;
-                    if is_parquet_schema_match_source_schema(arrow_data_type, rw_data_type) {
+                    if is_parquet_field_match_source_schema(arrow_field, rw_data_type) {
                         Some(pos)
                     } else {
+                        // The parquet column exists but its type does not match the declared
+                        // schema; it is NULL-filled rather than decoded to a diverging type.
+                        tracing::warn!(
+                            column = %column.name,
+                            declared_type = %rw_data_type,
+                            parquet_type = %arrow_field.data_type(),
+                            parquet_extension = ?arrow_field.extension_type_name(),
+                            "parquet column does not match the declared source schema; it will be NULL-filled",
+                        );
                         None
                     }
                 })
@@ -372,15 +379,23 @@ pub async fn read_parquet_file(
             .iter()
             .enumerate()
             .map(|(index, field_ref)| {
-                let data_type = IcebergArrowConvert.type_from_field(field_ref).unwrap();
+                let data_type = IcebergArrowConvert
+                    .type_from_field(field_ref)
+                    .with_context(|| {
+                        format!(
+                            "cannot infer the RisingWave type of parquet column `{}` in file {}",
+                            field_ref.name(),
+                            file_name
+                        )
+                    })?;
                 let column_desc = ColumnDesc::named(
                     field_ref.name().clone(),
                     ColumnId::new(index as i32),
                     data_type,
                 );
-                SourceColumnDesc::from(&column_desc)
+                Ok(SourceColumnDesc::from(&column_desc))
             })
-            .collect(),
+            .collect::<ConnectorResult<Vec<_>>>()?,
     };
     let parquet_parser = ParquetParser::new(columns, file_name, offset, case_insensitive)?;
     let msg_stream: Pin<

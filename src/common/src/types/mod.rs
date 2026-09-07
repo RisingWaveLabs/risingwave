@@ -74,6 +74,7 @@ mod timestamptz;
 mod to_binary;
 mod to_sql;
 mod to_text;
+mod variant;
 mod with_data_type;
 
 pub use fields::Fields;
@@ -99,6 +100,7 @@ pub use self::struct_type::StructType;
 pub use self::successor::Successor;
 pub use self::timestamptz::*;
 pub use self::to_text::ToText;
+pub use self::variant::{VariantRef, VariantVal};
 pub use self::with_data_type::WithDataType;
 
 /// A 32-bit floating point type with total order.
@@ -215,6 +217,9 @@ pub enum DataType {
     #[display("vector({0})")]
     #[from_str(regex = "(?i)^vector\\((?P<0>.+)\\)$")]
     Vector(usize),
+    #[display("variant")]
+    #[from_str(regex = "(?i)^variant$")]
+    Variant,
 }
 
 impl !PartialOrd for DataType {}
@@ -243,11 +248,12 @@ impl TryFrom<DataTypeName> for DataType {
             DataTypeName::Time => Ok(DataType::Time),
             DataTypeName::Interval => Ok(DataType::Interval),
             DataTypeName::Jsonb => Ok(DataType::Jsonb),
+            DataTypeName::Variant => Ok(DataType::Variant),
             DataTypeName::Struct
             | DataTypeName::List
             | DataTypeName::Map
             | DataTypeName::Vector => Err(
-                "Functions returning parameterized types can not be inferred. Please use `FunctionCall::new_unchecked`.",
+                "Functions returning parameterized types cannot be inferred. Please use `FunctionCall::new_unchecked`.",
             ),
         }
     }
@@ -273,6 +279,7 @@ impl From<&PbDataType> for DataType {
             PbTypeName::Interval => DataType::Interval,
             PbTypeName::Bytea => DataType::Bytea,
             PbTypeName::Jsonb => DataType::Jsonb,
+            PbTypeName::Variant => DataType::Variant,
             PbTypeName::Struct => {
                 let fields: Vec<DataType> = proto.field_type.iter().map(|f| f.into()).collect_vec();
                 let field_names: Vec<String> = proto.field_names.iter().cloned().collect_vec();
@@ -338,6 +345,7 @@ impl From<DataTypeName> for PbTypeName {
             DataTypeName::Decimal => PbTypeName::Decimal,
             DataTypeName::Bytea => PbTypeName::Bytea,
             DataTypeName::Jsonb => PbTypeName::Jsonb,
+            DataTypeName::Variant => PbTypeName::Variant,
             DataTypeName::Struct => PbTypeName::Struct,
             DataTypeName::List => PbTypeName::List,
             DataTypeName::Int256 => PbTypeName::Int256,
@@ -397,6 +405,7 @@ pub mod data_types {
                 | DataType::Interval
                 | DataType::Bytea
                 | DataType::Jsonb
+                | DataType::Variant
                 | DataType::Serial
                 | DataType::Int256
                 | DataType::Vector(_)
@@ -486,6 +495,7 @@ impl DataType {
             | DataType::Interval
             | DataType::Bytea
             | DataType::Jsonb
+            | DataType::Variant
             | DataType::Serial
             | DataType::Int256 => (),
         }
@@ -669,6 +679,23 @@ impl DataType {
                 map_type.value().can_alter()
             }
         }
+    }
+
+    /// Whether this type is `VARIANT` or contains a nested `VARIANT`.
+    pub fn contains_variant(&self) -> bool {
+        matches!(self, DataType::Variant)
+            || match self {
+                DataType::List(list_type) => list_type.elem().contains_variant(),
+                DataType::Struct(struct_type) => {
+                    struct_type.types().any(DataType::contains_variant)
+                }
+                DataType::Map(map_type) => {
+                    map_type.key().contains_variant() || map_type.value().contains_variant()
+                }
+                // Listed rather than `_`: a new composite type answering `false` here would slip
+                // past every VARIANT-as-key gate.
+                data_types::simple!() => false,
+            }
     }
 }
 
@@ -866,7 +893,7 @@ macro_rules! impl_self_as_scalar_ref {
         )*
     };
 }
-impl_self_as_scalar_ref! { &str, &[u8], Int256Ref<'_>, JsonbRef<'_>, ListRef<'_>, StructRef<'_>, ScalarRefImpl<'_>, MapRef<'_> }
+impl_self_as_scalar_ref! { &str, &[u8], Int256Ref<'_>, JsonbRef<'_>, VariantRef<'_>, ListRef<'_>, StructRef<'_>, ScalarRefImpl<'_>, MapRef<'_> }
 
 /// `for_all_native_types` includes all native variants of our scalar types.
 ///
@@ -1025,6 +1052,12 @@ impl From<JsonbRef<'_>> for ScalarImpl {
     }
 }
 
+impl From<VariantRef<'_>> for ScalarImpl {
+    fn from(variant: VariantRef<'_>) -> Self {
+        Self::Variant(variant.to_owned_scalar())
+    }
+}
+
 impl<T: PrimitiveArrayItemType> From<Vec<T>> for ScalarImpl {
     fn from(v: Vec<T>) -> Self {
         Self::List(v.into_iter().collect())
@@ -1092,6 +1125,8 @@ impl ScalarImpl {
                 JsonbVal::value_deserialize(bytes)
                     .ok_or_else(|| "invalid value of Jsonb".to_owned())?,
             ),
+            // pgwire binary parameters are untrusted and must be re-canonicalized.
+            DataType::Variant => Self::Variant(VariantVal::from_serialized_untrusted(bytes)?),
             DataType::Int256 => Self::Int256(Int256::from_binary(bytes)?),
             DataType::Vector(_) | DataType::Struct(_) | DataType::List(_) | DataType::Map(_) => {
                 return Err(format!("unsupported data type: {}", data_type).into());
@@ -1125,6 +1160,7 @@ impl ScalarImpl {
             DataType::List(_) => ListValue::from_str(s, data_type)?.into(),
             DataType::Struct(st) => StructValue::from_str(s, st)?.into(),
             DataType::Jsonb => JsonbVal::from_str(s)?.into(),
+            DataType::Variant => VariantVal::from_str(s)?.into(),
             DataType::Bytea => {
                 let mut buf = Vec::new();
                 str_to_bytea(s, &mut buf)?;
@@ -1234,6 +1270,7 @@ impl ScalarRefImpl<'_> {
             }
             Self::Int256(v) => v.memcmp_serialize(ser)?,
             Self::Jsonb(v) => v.memcmp_serialize(ser)?,
+            Self::Variant(v) => v.memcmp_serialize(ser)?,
             Self::Struct(v) => v.memcmp_serialize(ser)?,
             Self::List(v) => v.memcmp_serialize(ser)?,
             Self::Map(v) => v.memcmp_serialize(ser)?,
@@ -1290,6 +1327,7 @@ impl ScalarImpl {
                     .map_err(|e| memcomparable::Error::Message(e.to_report_string()))?
             }),
             Ty::Jsonb => Self::Jsonb(JsonbVal::memcmp_deserialize(de)?),
+            Ty::Variant => Self::Variant(VariantVal::memcmp_deserialize(de)?),
             Ty::Struct(t) => StructValue::memcmp_deserialize(t.types(), de)?.to_scalar_value(),
             Ty::List(t) => ListValue::memcmp_deserialize(t, de)?.to_scalar_value(),
             Ty::Map(t) => MapValue::memcmp_deserialize(t, de)?.to_scalar_value(),
@@ -1501,7 +1539,7 @@ mod tests {
                     DataType::Timestamp,
                 ),
                 DataTypeName::Timestamptz => (
-                    ScalarImpl::Timestamptz(Timestamptz::from_micros(233333333)),
+                    ScalarImpl::Timestamptz(Timestamptz::from_micros(233333333).unwrap()),
                     DataType::Timestamptz,
                 ),
                 DataTypeName::Interval => (
@@ -1509,6 +1547,9 @@ mod tests {
                     DataType::Interval,
                 ),
                 DataTypeName::Jsonb => (ScalarImpl::Jsonb(JsonbVal::null()), DataType::Jsonb),
+                DataTypeName::Variant => {
+                    (ScalarImpl::Variant(VariantVal::null()), DataType::Variant)
+                }
                 DataTypeName::Struct => (
                     ScalarImpl::Struct(StructValue::new(vec![
                         ScalarImpl::Int64(233).into(),
@@ -1668,6 +1709,13 @@ mod tests {
             DataType::from_str("varchar[]").unwrap(),
             DataType::Varchar.list()
         );
+        assert_eq!(DataType::from_str("variant").unwrap(), DataType::Variant);
+        assert_eq!(DataType::from_str("VARIANT").unwrap(), DataType::Variant);
+        assert_eq!(
+            DataType::from_str("variant[]").unwrap(),
+            DataType::Variant.list()
+        );
+
         assert_eq!(DataType::from_str("date[]").unwrap(), DataType::Date.list());
         assert_eq!(DataType::from_str("time[]").unwrap(), DataType::Time.list());
         assert_eq!(

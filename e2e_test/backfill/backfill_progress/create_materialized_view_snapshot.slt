@@ -10,7 +10,7 @@ create materialized view m1 as
       join t2 on x.v1 = t2.v1
       join t3 on t3.v1 = t2.v1
 
-query ? retry 3 backoff 1s
+query ? retry 6 backoff 1s
 select
   case when regexp_match(progress, '([0-9]+?\.?[0-9]+)%')[1]::numeric
     >= (99::numeric / 1000::numeric)
@@ -51,7 +51,7 @@ create materialized view m1 as
 ' >/dev/null 2>&1 &
 
 
-query ? retry 3 backoff 1s
+query ? retry 6 backoff 1s
 select
   case when regexp_match(progress, '([0-9]+?\.?[0-9]+)%')[1]::numeric
     >= (2::numeric * 50::numeric / 1000::numeric)

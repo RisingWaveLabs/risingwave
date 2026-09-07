@@ -595,6 +595,15 @@ impl<S: StateStore> OverWindowExecutor<S> {
                         yield Message::Chunk(chunk?);
                     }
                     this.state_table.try_flush().await?;
+
+                    // Also apply the LRU watermark at chunk boundaries, so that cold
+                    // partitions can be released without waiting for the next barrier,
+                    // which can be a long time away with large barrier intervals. This
+                    // is safe because the range cache is write-through: at this point
+                    // all changes have been applied to both the state table and the
+                    // cache, so an evicted partition can be reloaded from the state
+                    // table with identical content.
+                    vars.cached_partitions.evict();
                 }
                 Message::Barrier(barrier) => {
                     let post_commit = this.state_table.commit(barrier.epoch).await?;

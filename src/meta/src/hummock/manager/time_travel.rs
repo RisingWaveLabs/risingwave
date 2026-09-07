@@ -34,8 +34,8 @@ use risingwave_meta_model::{
 use risingwave_pb::hummock::{PbHummockVersion, PbHummockVersionDelta};
 use sea_orm::ActiveValue::Set;
 use sea_orm::{
-    ColumnTrait, Condition, DatabaseTransaction, EntityTrait, PaginatorTrait, QueryFilter,
-    QueryOrder, QuerySelect, TransactionTrait,
+    ColumnTrait, Condition, ConnectionTrait, DatabaseTransaction, EntityTrait, PaginatorTrait,
+    QueryFilter, QueryOrder, QuerySelect, TransactionTrait,
 };
 use tracing::info;
 
@@ -46,7 +46,10 @@ use crate::hummock::error::{Error, Result};
 impl HummockManager {
     pub(crate) async fn init_time_travel_state(&self) -> Result<()> {
         let sql_store = self.env.meta_store_ref();
-        let mut guard = self.versioning.write().await;
+        let mut guard = self
+            .versioning
+            .write_with_process_name("init_time_travel_state")
+            .await;
         guard.mark_next_time_travel_version_snapshot();
 
         guard.last_time_travel_snapshot_sst_ids = HashSet::new();
@@ -67,39 +70,118 @@ impl HummockManager {
     pub(crate) async fn truncate_time_travel_metadata(
         &self,
         epoch_watermark: HummockEpoch,
+        pinned_snapshot_epochs: HashMap<TableId, HashSet<HummockEpoch>>,
     ) -> Result<()> {
         let _timer = self
             .metrics
             .time_travel_vacuum_metadata_latency
             .start_timer();
-        let min_pinned_version_id = self.context_info.read().await.min_pinned_version_id();
+        let min_pinned_version_id = self
+            .context_info
+            .read_with_process_name("truncate_time_travel_metadata")
+            .await
+            .min_pinned_version_id();
         let sql_store = self.env.meta_store_ref();
         let txn = sql_store.conn.begin().await?;
-        let version_watermark = hummock_epoch_to_version::Entity::find()
-            .filter(
-                hummock_epoch_to_version::Column::Epoch
-                    .lt(risingwave_meta_model::Epoch::try_from(epoch_watermark).unwrap()),
-            )
-            .order_by_desc(hummock_epoch_to_version::Column::Epoch)
-            .order_by_asc(hummock_epoch_to_version::Column::VersionId)
+
+        let epoch_watermark_model =
+            risingwave_meta_model::Epoch::try_from(epoch_watermark).unwrap();
+        let has_expired_epoch = hummock_epoch_to_version::Entity::find()
+            .filter(hummock_epoch_to_version::Column::Epoch.lt(epoch_watermark_model))
+            .select_only()
+            .column(hummock_epoch_to_version::Column::VersionId)
+            .into_tuple::<HummockVersionId>()
             .one(&txn)
-            .await?;
-        let Some(version_watermark) = version_watermark else {
+            .await?
+            .is_some();
+        if !has_expired_epoch {
             txn.commit().await?;
             return Ok(());
-        };
+        }
+
+        let mut pinned_epoch_rows = HashSet::new();
+        let mut pinned_snapshot_version_ids = HashSet::new();
+        for (table_id, pinned_epochs) in pinned_snapshot_epochs {
+            for pinned_epoch in pinned_epochs {
+                if pinned_epoch >= epoch_watermark {
+                    continue;
+                }
+                let pinned_epoch_model =
+                    risingwave_meta_model::Epoch::try_from(pinned_epoch).unwrap();
+                let epoch_to_version = hummock_epoch_to_version::Entity::find_by_id((
+                    pinned_epoch_model,
+                    i64::from(table_id.as_raw_id()),
+                ))
+                .one(&txn)
+                .await?;
+                let Some(epoch_to_version) = epoch_to_version else {
+                    tracing::warn!(
+                        %table_id,
+                        pinned_epoch,
+                        "pinned snapshot epoch mapping not found, skip pinning"
+                    );
+                    continue;
+                };
+                pinned_epoch_rows.insert((epoch_to_version.epoch, epoch_to_version.table_id));
+                pinned_snapshot_version_ids.insert(epoch_to_version.version_id);
+            }
+        }
+
+        let mut pinned_replay_version_ids = HashSet::new();
+        let mut pinned_delta_ids = HashSet::new();
+        let mut pinned_snapshot_sst_ids = HashSet::new();
+        let mut pinned_snapshot_object_ids = HashSet::new();
+        for pinned_snapshot_version_id in pinned_snapshot_version_ids {
+            let Some(resolved) =
+                resolve_time_travel_version(&txn, pinned_snapshot_version_id).await?
+            else {
+                tracing::warn!(
+                    %pinned_snapshot_version_id,
+                    "time travel version before pinned version not found, skip pinning"
+                );
+                continue;
+            };
+            pinned_replay_version_ids.insert(resolved.replay_version.id);
+            pinned_snapshot_sst_ids.extend(resolved.replay_version.get_sst_ids());
+            pinned_snapshot_object_ids.extend(resolved.replay_version.get_object_ids());
+            for delta in resolved.deltas {
+                pinned_delta_ids.insert(delta.id);
+                pinned_snapshot_sst_ids.extend(delta.newly_added_sst_ids());
+                pinned_snapshot_object_ids.extend(delta.newly_added_object_ids());
+            }
+        }
+
+        // Version ids follow global commit order, while epochs are only monotonic per table.
+        // Use the earliest version needed by any retained mapping as the watermark so its replay
+        // metadata cannot be truncated. If no mapping is retained, only version pins and vacuum
+        // throttling need to constrain the watermark.
+        let version_watermark = hummock_epoch_to_version::Entity::find()
+            .filter(hummock_epoch_to_version::Column::Epoch.gte(epoch_watermark_model))
+            .select_only()
+            .column(hummock_epoch_to_version::Column::VersionId)
+            .order_by_asc(hummock_epoch_to_version::Column::VersionId)
+            .into_tuple::<HummockVersionId>()
+            .one(&txn)
+            .await?;
         // metadata BELOW watermark_version_id will be truncated.
-        let mut watermark_version_id =
-            std::cmp::min(version_watermark.version_id, min_pinned_version_id);
+        let mut watermark_version_id = version_watermark.map_or(min_pinned_version_id, |id| {
+            std::cmp::min(id, min_pinned_version_id)
+        });
         if let Some(max_version_count) = self.env.opts.time_travel_vacuum_max_version_count {
-            let earliest2_version_ids = hummock_time_travel_version::Entity::find()
+            let mut query = hummock_time_travel_version::Entity::find()
                 .select_only()
                 .column(hummock_time_travel_version::Column::VersionId)
                 .order_by_asc(hummock_time_travel_version::Column::VersionId)
-                .limit(2)
-                .into_tuple::<HummockVersionId>()
-                .all(&txn)
-                .await?;
+                .limit(2);
+            // A replay version can be pinned for arbitrarily long. Counting it would keep selecting
+            // the same two earliest versions and prevent incremental vacuum from advancing.
+            if !pinned_replay_version_ids.is_empty() {
+                query = query.filter(
+                    hummock_time_travel_version::Column::VersionId
+                        .is_not_in(pinned_replay_version_ids.iter().copied()),
+                );
+            }
+            let earliest2_version_ids = query.into_tuple::<HummockVersionId>().all(&txn).await?;
             // Ensure at least 1 version BELOW watermark_version_id if applying time_travel_vacuum_max_version_count.
             if earliest2_version_ids.len() == 2 {
                 watermark_version_id = std::cmp::min(
@@ -113,13 +195,16 @@ impl HummockManager {
                 );
             }
         }
-        let res = hummock_epoch_to_version::Entity::delete_many()
-            .filter(
-                hummock_epoch_to_version::Column::Epoch
-                    .lt(risingwave_meta_model::Epoch::try_from(epoch_watermark).unwrap()),
-            )
-            .exec(&txn)
-            .await?;
+        let mut delete_epoch_rows = hummock_epoch_to_version::Entity::delete_many()
+            .filter(hummock_epoch_to_version::Column::Epoch.lt(epoch_watermark_model));
+        for (epoch, table_id) in &pinned_epoch_rows {
+            delete_epoch_rows = delete_epoch_rows.filter(
+                Condition::any()
+                    .add(hummock_epoch_to_version::Column::Epoch.ne(*epoch))
+                    .add(hummock_epoch_to_version::Column::TableId.ne(*table_id)),
+            );
+        }
+        let res = delete_epoch_rows.exec(&txn).await?;
         tracing::info!(
             epoch_watermark,
             "Delete {} rows from hummock_epoch_to_version.",
@@ -137,34 +222,44 @@ impl HummockManager {
             txn.commit().await?;
             return Ok(());
         };
-        let (
-            latest_valid_version_id,
-            latest_valid_version_sst_ids,
-            latest_valid_version_object_ids,
-        ) = {
-            (
-                latest_valid_version.id,
-                latest_valid_version.get_sst_ids(),
-                latest_valid_version
-                    .get_object_ids()
-                    .collect::<HashSet<_>>(),
-            )
-        };
+        let latest_valid_version_id = latest_valid_version.id;
+        let mut retained_snapshot_sst_ids = latest_valid_version.get_sst_ids();
+        let mut retained_snapshot_object_ids = latest_valid_version
+            .get_object_ids()
+            .collect::<HashSet<_>>();
+        retained_snapshot_sst_ids.extend(pinned_snapshot_sst_ids);
+        retained_snapshot_object_ids.extend(pinned_snapshot_object_ids);
         let mut object_ids_to_delete: HashSet<_> = HashSet::default();
+        let mut version_delete_condition = Condition::all()
+            .add(hummock_time_travel_version::Column::VersionId.lt(latest_valid_version_id));
+        if !pinned_replay_version_ids.is_empty() {
+            version_delete_condition = version_delete_condition.add(
+                hummock_time_travel_version::Column::VersionId
+                    .is_not_in(pinned_replay_version_ids.iter().copied()),
+            );
+        }
         let version_ids_to_delete: Vec<risingwave_meta_model::HummockVersionId> =
             hummock_time_travel_version::Entity::find()
                 .select_only()
                 .column(hummock_time_travel_version::Column::VersionId)
-                .filter(hummock_time_travel_version::Column::VersionId.lt(latest_valid_version_id))
+                .filter(version_delete_condition.clone())
                 .order_by_desc(hummock_time_travel_version::Column::VersionId)
                 .into_tuple()
                 .all(&txn)
                 .await?;
+        let mut delta_delete_condition = Condition::all()
+            .add(hummock_time_travel_delta::Column::VersionId.lt(latest_valid_version_id));
+        if !pinned_delta_ids.is_empty() {
+            delta_delete_condition = delta_delete_condition.add(
+                hummock_time_travel_delta::Column::VersionId
+                    .is_not_in(pinned_delta_ids.iter().copied()),
+            );
+        }
         let delta_ids_to_delete: Vec<risingwave_meta_model::HummockVersionId> =
             hummock_time_travel_delta::Entity::find()
                 .select_only()
                 .column(hummock_time_travel_delta::Column::VersionId)
-                .filter(hummock_time_travel_delta::Column::VersionId.lt(latest_valid_version_id))
+                .filter(delta_delete_condition.clone())
                 .into_tuple()
                 .all(&txn)
                 .await?;
@@ -224,9 +319,9 @@ impl HummockManager {
                 let delta_to_delete = IncompleteHummockVersionDelta::from_persisted_protobuf_owned(
                     delta_to_delete.version_delta.to_protobuf(),
                 );
-                let new_sst_ids = delta_to_delete.newly_added_sst_ids(true);
+                let new_sst_ids = delta_to_delete.newly_added_sst_ids();
                 // The SST ids added and then deleted by compaction between the 2 versions.
-                sst_ids_to_delete.extend(&new_sst_ids - &latest_valid_version_sst_ids);
+                sst_ids_to_delete.extend(&new_sst_ids - &retained_snapshot_sst_ids);
                 if sst_ids_to_delete.len() >= delete_sst_batch_size {
                     delete_sst_in_batch(
                         &txn,
@@ -235,11 +330,10 @@ impl HummockManager {
                     )
                     .await?;
                 }
-                let new_object_ids = delta_to_delete.newly_added_object_ids(true);
-                object_ids_to_delete.extend(&new_object_ids - &latest_valid_version_object_ids);
+                let new_object_ids = delta_to_delete.newly_added_object_ids();
+                object_ids_to_delete.extend(&new_object_ids - &retained_snapshot_object_ids);
             }
         }
-        let mut next_version_sst_ids = latest_valid_version_sst_ids;
         for prev_version_id in version_ids_to_delete {
             let prev_version = {
                 let prev_version = hummock_time_travel_version::Entity::find_by_id(prev_version_id)
@@ -256,8 +350,7 @@ impl HummockManager {
                 )
             };
             let sst_ids = prev_version.get_sst_ids();
-            // The SST ids deleted by compaction between the 2 versions.
-            sst_ids_to_delete.extend(&sst_ids - &next_version_sst_ids);
+            sst_ids_to_delete.extend(&sst_ids - &retained_snapshot_sst_ids);
             if sst_ids_to_delete.len() >= delete_sst_batch_size {
                 delete_sst_in_batch(
                     &txn,
@@ -267,8 +360,7 @@ impl HummockManager {
                 .await?;
             }
             let new_object_ids: HashSet<_> = prev_version.get_object_ids().collect();
-            object_ids_to_delete.extend(&new_object_ids - &latest_valid_version_object_ids);
-            next_version_sst_ids = sst_ids;
+            object_ids_to_delete.extend(&new_object_ids - &retained_snapshot_object_ids);
         }
         if !sst_ids_to_delete.is_empty() {
             delete_sst_in_batch(&txn, sst_ids_to_delete, delete_sst_batch_size).await?;
@@ -282,7 +374,7 @@ impl HummockManager {
         }
 
         let res = hummock_time_travel_version::Entity::delete_many()
-            .filter(hummock_time_travel_version::Column::VersionId.lt(latest_valid_version_id))
+            .filter(version_delete_condition)
             .exec(&txn)
             .await?;
         tracing::info!(
@@ -293,7 +385,7 @@ impl HummockManager {
         );
 
         let res = hummock_time_travel_delta::Entity::delete_many()
-            .filter(hummock_time_travel_delta::Column::VersionId.lt(latest_valid_version_id))
+            .filter(delta_delete_condition)
             .exec(&txn)
             .await?;
         tracing::info!(
@@ -416,8 +508,7 @@ impl HummockManager {
                     let version_delta = HummockVersionDelta::from_persisted_protobuf_owned(
                         model.version_delta.to_protobuf(),
                     );
-                    // set exclude_table_change_log to true because in time travel delta we ignore the table change log
-                    for object_id in version_delta.newly_added_object_ids(true) {
+                    for object_id in version_delta.newly_added_object_ids() {
                         result.remove(&object_id);
                     }
                     next_prev_version_id = Some(model.version_id);
@@ -492,27 +583,26 @@ impl HummockManager {
             "convert query epoch"
         );
 
-        let replay_version = hummock_time_travel_version::Entity::find()
-            .filter(hummock_time_travel_version::Column::VersionId.lte(actual_version_id))
-            .order_by_desc(hummock_time_travel_version::Column::VersionId)
-            .one(&sql_store.conn)
-            .await?
-            .ok_or_else(|| Error::TimeTravelVersionExpired {
+        let Some(resolved) =
+            resolve_time_travel_version(&sql_store.conn, actual_version_id).await?
+        else {
+            return Err(Error::TimeTravelVersionExpired {
                 table_id,
                 epoch: query_epoch,
-            })?;
-        let deltas = hummock_time_travel_delta::Entity::find()
-            .filter(hummock_time_travel_delta::Column::VersionId.gt(replay_version.version_id))
-            .filter(hummock_time_travel_delta::Column::VersionId.lte(actual_version_id))
-            .order_by_asc(hummock_time_travel_delta::Column::VersionId)
-            .all(&sql_store.conn)
-            .await?;
-        // SstableInfo in actual_version is incomplete before refill_version.
+            });
+        };
         let mut actual_version = replay_archive(
-            replay_version.version.to_protobuf(),
-            deltas.into_iter().map(|d| d.version_delta.to_protobuf()),
-        );
+            resolved.replay_version.to_protobuf(),
+            resolved.deltas.into_iter().map(|delta| delta.to_protobuf()),
+        )?;
+        if actual_version.id != actual_version_id {
+            return Err(Error::TimeTravelVersionExpired {
+                table_id,
+                epoch: query_epoch,
+            });
+        }
 
+        // SstableInfo in actual_version is incomplete before refill_version.
         let mut sst_ids = actual_version
             .get_sst_ids()
             .into_iter()
@@ -601,6 +691,9 @@ impl HummockManager {
 
         let mut batch = vec![];
         for (table_id, _cg_id, committed_epoch) in tables_to_commit {
+            if !time_travel_table_ids.contains(table_id) {
+                continue;
+            }
             let m = hummock_epoch_to_version::ActiveModel {
                 epoch: Set(committed_epoch.try_into().unwrap()),
                 table_id: Set(i64::from(table_id.as_raw_id())),
@@ -672,7 +765,7 @@ impl HummockManager {
             return Ok(version_sst_ids);
         }
         let written = write_sstable_infos(
-            delta.newly_added_sst_infos(true).filter(|s| {
+            delta.newly_added_sst_infos().filter(|s| {
                 !skip_sst_ids.contains(&s.sst_id)
                     && s.table_ids
                         .iter()
@@ -706,11 +799,49 @@ impl HummockManager {
     }
 }
 
+struct ResolvedTimeTravelVersion {
+    replay_version: IncompleteHummockVersion,
+    deltas: Vec<IncompleteHummockVersionDelta>,
+}
+
+async fn resolve_time_travel_version(
+    conn: &impl ConnectionTrait,
+    actual_version_id: HummockVersionId,
+) -> Result<Option<ResolvedTimeTravelVersion>> {
+    let Some(replay_version) = hummock_time_travel_version::Entity::find()
+        .filter(hummock_time_travel_version::Column::VersionId.lte(actual_version_id))
+        .order_by_desc(hummock_time_travel_version::Column::VersionId)
+        .one(conn)
+        .await?
+    else {
+        return Ok(None);
+    };
+    let deltas = hummock_time_travel_delta::Entity::find()
+        .filter(hummock_time_travel_delta::Column::VersionId.gt(replay_version.version_id))
+        .filter(hummock_time_travel_delta::Column::VersionId.lte(actual_version_id))
+        .order_by_asc(hummock_time_travel_delta::Column::VersionId)
+        .all(conn)
+        .await?;
+    Ok(Some(ResolvedTimeTravelVersion {
+        replay_version: IncompleteHummockVersion::from_persisted_protobuf_owned(
+            replay_version.version.to_protobuf(),
+        ),
+        deltas: deltas
+            .into_iter()
+            .map(|delta| {
+                IncompleteHummockVersionDelta::from_persisted_protobuf_owned(
+                    delta.version_delta.to_protobuf(),
+                )
+            })
+            .collect(),
+    }))
+}
+
 /// The `HummockVersion` is actually `InHummockVersion`. It requires `refill_version`.
 fn replay_archive(
     version: PbHummockVersion,
     deltas: impl Iterator<Item = PbHummockVersionDelta>,
-) -> HummockVersion {
+) -> Result<HummockVersion> {
     // The pb version ann pb version delta are actually written by InHummockVersion and InHummockVersionDelta, respectively.
     // Using HummockVersion make it easier for `refill_version` later.
     let mut last_version = HummockVersion::from_persisted_protobuf_owned(version);
@@ -721,14 +852,18 @@ fn replay_archive(
             "unexpected time travel delta {:?}",
             d
         );
-        // Need to work around the assertion in `apply_version_delta`.
-        // Because compaction deltas are not included in time travel archive.
-        while last_version.id < d.prev_id {
-            last_version.id += 1;
+        if d.prev_id < last_version.id {
+            return Err(Error::TimeTravel(anyhow!(format!(
+                "invalid time travel delta chain: delta {} has prev version {}, but replay has reached {}",
+                d.id, d.prev_id, last_version.id
+            ))));
         }
+        // Compaction deltas are not included in the time travel archive, so there may be gaps
+        // between the last replayed version and this delta's previous version.
+        last_version.id = d.prev_id;
         last_version.apply_version_delta(&d);
     }
-    last_version
+    Ok(last_version)
 }
 
 pub fn require_sql_meta_store_err() -> Error {
@@ -743,4 +878,30 @@ pub fn should_mark_next_time_travel_version_snapshot(delta: &HummockVersionDelta
             .iter()
             .any(|d| !matches!(d, GroupDeltaCommon::NewL0SubLevel(_)))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn version(id: u64) -> PbHummockVersion {
+        let mut version = HummockVersion::default();
+        version.id = id.into();
+        version.to_protobuf()
+    }
+
+    fn delta(id: u64, prev_id: u64) -> PbHummockVersionDelta {
+        let mut delta = HummockVersionDelta::default();
+        delta.id = id.into();
+        delta.prev_id = prev_id.into();
+        delta.to_protobuf()
+    }
+
+    #[test]
+    fn test_replay_archive_delta_chain() {
+        let replayed = replay_archive(version(1), [delta(4, 3), delta(5, 4)].into_iter()).unwrap();
+        assert_eq!(replayed.id, HummockVersionId::new(5));
+
+        assert!(replay_archive(version(3), [delta(4, 2)].into_iter()).is_err());
+    }
 }

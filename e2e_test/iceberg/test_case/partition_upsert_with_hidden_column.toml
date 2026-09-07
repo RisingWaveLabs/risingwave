@@ -1,0 +1,34 @@
+init_sqls = [
+    'CREATE SCHEMA IF NOT EXISTS demo_db',
+    'DROP TABLE IF EXISTS demo_db.partition_upsert_with_hidden_column_table PURGE',
+    '''
+    CREATE TABLE demo_db.partition_upsert_with_hidden_column_table (
+        category string NOT NULL,
+        event_id string NOT NULL,
+        event_time timestamp NOT NULL,
+        snapshot_time timestamp NOT NULL,
+        data string
+    ) USING iceberg
+    PARTITIONED BY (category, days(snapshot_time))
+    TBLPROPERTIES ('format-version'='2')
+    ''',
+]
+
+slt = 'test_case/iceberg_sink_partition_upsert_with_hidden_column.slt'
+
+verify_schema = ['string', 'string', 'timestamp', 'timestamp', 'string']
+
+verify_sql = '''
+SELECT category, event_id, event_time, snapshot_time, data
+FROM demo_db.partition_upsert_with_hidden_column_table
+ORDER BY category, event_id
+'''
+
+verify_data = """
+click,e1,2025-11-07 10:00:00+00:00,2025-11-07 10:00:00+00:00,payload
+"""
+
+drop_sqls = [
+    'DROP TABLE IF EXISTS demo_db.partition_upsert_with_hidden_column_table PURGE',
+    'DROP SCHEMA IF EXISTS demo_db',
+]

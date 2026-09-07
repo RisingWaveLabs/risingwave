@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use core::num::NonZero;
+use std::collections::BTreeMap;
 use std::fmt::Write;
 use std::time::Duration;
 
@@ -122,7 +123,12 @@ pub struct RedShiftConfig {
 
     #[serde(flatten)]
     pub s3_inner: Option<S3Common>,
+
+    #[serde(flatten)]
+    pub unknown_fields: std::collections::HashMap<String, String>,
 }
+
+crate::impl_sink_unknown_fields!(RedShiftConfig);
 
 fn default_target_interval_schedule() -> u64 {
     3600 // Default to 1 hour
@@ -141,6 +147,11 @@ fn default_with_s3() -> bool {
 }
 
 impl RedShiftConfig {
+    pub fn from_btreemap(properties: BTreeMap<String, String>) -> Result<Self> {
+        serde_json::from_value::<RedShiftConfig>(serde_json::to_value(properties).unwrap())
+            .map_err(|e| SinkError::Config(anyhow!(e)))
+    }
+
     pub fn build_client(&self) -> Result<JdbcJniClient> {
         let mut jdbc_url = self.jdbc_url.clone();
         if let Some(username) = &self.username {
@@ -173,10 +184,7 @@ impl TryFrom<SinkParam> for RedshiftSink {
     type Error = SinkError;
 
     fn try_from(param: SinkParam) -> std::result::Result<Self, Self::Error> {
-        let config = serde_json::from_value::<RedShiftConfig>(
-            serde_json::to_value(param.properties.clone()).unwrap(),
-        )
-        .map_err(|e| SinkError::Config(anyhow!(e)))?;
+        let config = RedShiftConfig::from_btreemap(param.properties.clone())?;
         let is_append_only = param.sink_type.is_append_only();
         let schema = param.schema();
         let pk_indices = param.downstream_pk_or_empty();
@@ -194,6 +202,8 @@ impl Sink for RedshiftSink {
     type LogSinker = CoordinatedLogSinker<RedShiftSinkWriter>;
 
     const SINK_NAME: &'static str = REDSHIFT_SINK;
+
+    crate::impl_validate_sink_unknown_fields!();
 
     async fn validate(&self) -> Result<()> {
         if self.config.create_table_if_not_exists {
@@ -297,7 +307,7 @@ impl RedShiftSinkWriter {
         config: RedShiftConfig,
         is_append_only: bool,
         writer_param: super::SinkWriterParam,
-        param: SinkParam,
+        mut param: SinkParam,
     ) -> Result<Self> {
         let schema = param.schema();
         if config.with_s3 {
@@ -311,11 +321,28 @@ impl RedShiftSinkWriter {
             )?;
             Ok(Self::S3(s3_writer))
         } else {
+            let (writer_schema, writer_table) = if is_append_only {
+                (config.schema.clone(), config.table.clone())
+            } else {
+                (
+                    config.intermediate_schema.clone().or(config.schema.clone()),
+                    config.cdc_table.clone().ok_or_else(|| {
+                        SinkError::Config(anyhow!(
+                            "intermediate.table.name is required for non-append-only sink"
+                        ))
+                    })?,
+                )
+            };
+            param.properties.remove("schema");
+            param.properties.remove("schema.name");
+            if let Some(writer_schema) = writer_schema {
+                param.properties.insert("schema".to_owned(), writer_schema);
+            }
             let jdbc_writer = SnowflakeRedshiftSinkJdbcWriter::new(
                 is_append_only,
                 writer_param,
                 param,
-                build_full_table_name(config.schema.as_deref(), &config.table),
+                writer_table,
             )
             .await?;
             Ok(Self::Jdbc(jdbc_writer))
@@ -724,7 +751,10 @@ impl SinglePhaseCommitCoordinator for RedshiftSinkCommitter {
                 ))
             })?;
             let sql = build_alter_add_column_sql(
-                self.config.schema.as_deref(),
+                self.config
+                    .intermediate_schema
+                    .as_deref()
+                    .or(self.config.schema.as_deref()),
                 cdc_table_name,
                 &add_columns
                     .fields

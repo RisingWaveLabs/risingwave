@@ -126,6 +126,7 @@ impl MapType {
             | DataType::List(_)
             | DataType::Bytea
             | DataType::Jsonb
+            | DataType::Variant
             | DataType::Serial
             | DataType::Int256
             | DataType::Vector(_)

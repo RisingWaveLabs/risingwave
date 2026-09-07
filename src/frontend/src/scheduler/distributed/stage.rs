@@ -803,7 +803,7 @@ impl StageRunner {
             )?;
             let id_to_worker_slots = self
                 .worker_node_manager
-                .fragment_mapping(fragment_id)?
+                .fragment_mapping(fragment_id, self.query.batch_parallelism())?
                 .iter_unique()
                 .collect_vec();
 

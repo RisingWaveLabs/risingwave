@@ -27,7 +27,7 @@ use serde::{Deserialize, Serialize};
 use tiberius::{Config, Query, QueryItem};
 
 use crate::error::{ConnectorError, ConnectorResult};
-use crate::parser::{ScalarImplTiberiusWrapper, sql_server_row_to_owned_row};
+use crate::parser::{ScalarImplTiberiusWrapper, sql_server_row_to_owned_row_with_strict_pk};
 use crate::sink::sqlserver::SqlServerClient;
 use crate::source::CdcTableSnapshotSplit;
 use crate::source::cdc::external::{
@@ -216,6 +216,7 @@ fn mssql_type_to_rw_type(col_type: &str, col_name: &str) -> ConnectorResult<Data
 #[derive(Debug)]
 pub struct SqlServerExternalTableReader {
     rw_schema: Schema,
+    pk_indices: Vec<usize>,
     field_names: String,
     client: tokio::sync::Mutex<SqlServerClient>,
 }
@@ -332,6 +333,7 @@ impl SqlServerExternalTableReader {
 
         Ok(Self {
             rw_schema,
+            pk_indices,
             field_names,
             client: tokio::sync::Mutex::new(client),
         })
@@ -380,9 +382,13 @@ impl SqlServerExternalTableReader {
         // FIXME(kexiang): Set session timezone to UTC
         if let Some(pk_row) = start_pk_row {
             let params: Vec<Option<ScalarImpl>> = pk_row.into_iter().collect();
-            for param in params {
-                // primary key should not be null, so it's safe to unwrap
-                sql.bind(ScalarImplTiberiusWrapper::from(param.unwrap()));
+            for (index, param) in params.into_iter().enumerate() {
+                let param = param.with_context(|| {
+                    format!(
+                        "SQL Server snapshot primary-key position at index {index} cannot be NULL"
+                    )
+                })?;
+                sql.bind(ScalarImplTiberiusWrapper::from(param));
             }
         }
 
@@ -391,7 +397,8 @@ impl SqlServerExternalTableReader {
         let row_stream = stream.map(|res| {
             // convert sql server row into OwnedRow
             let mut row = res?;
-            Ok::<_, ConnectorError>(sql_server_row_to_owned_row(&mut row, &self.rw_schema))
+            sql_server_row_to_owned_row_with_strict_pk(&mut row, &self.rw_schema, &self.pk_indices)
+                .map_err(ConnectorError::from)
         });
 
         pin_mut!(row_stream);

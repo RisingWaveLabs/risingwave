@@ -83,16 +83,3 @@ fn extract_decimal(bytes: Vec<u8>) -> AccessResult<(u32, u32, u32)> {
         _ => bail_uncategorized!("invalid decimal bytes length {}", bytes.len()),
     }
 }
-
-#[cfg(test)]
-mod tests {
-
-    #[test]
-    fn test_extract_decimal() {
-        let decimal_max = rust_decimal::Decimal::MAX; // 79228162514264337593543950335
-        let decimal_min = rust_decimal::Decimal::MIN; // -79228162514264337593543950335
-
-        println!("decimal_max: {}", decimal_max);
-        println!("decimal_min: {}", decimal_min);
-    }
-}

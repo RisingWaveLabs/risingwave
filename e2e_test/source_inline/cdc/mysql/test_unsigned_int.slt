@@ -222,8 +222,81 @@ create table rw_unsigned_smallint_to_smallint (
   snapshot.batch_size = 10,
 ) from s_unsigned_int_to_signed table 'risedev.test_unsigned_int';
 
+# Regression: buffered binlog rows must be compared with MySQL unsigned ordering.
+#
+# The initial table only contains BIGINT UNSIGNED values that overflow RW BIGINT and become
+# negative i64 values. After backfill has advanced into that range, insert a non-overflow PK.
+# The row is already behind the snapshot cursor in MySQL unsigned order, so it must be emitted
+# from the binlog buffer instead of being filtered out by signed i64 comparison.
+system ok
+mysql -e "
+    USE risedev;
+    DROP TABLE IF EXISTS test_unsigned_bigint_backfill_buffer;
+    CREATE TABLE test_unsigned_bigint_backfill_buffer (
+        id BIGINT UNSIGNED NOT NULL,
+        info VARCHAR(50) NOT NULL DEFAULT '',
+        PRIMARY KEY (id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+"
+
+system ok
+mysql -e "
+    USE risedev;
+    INSERT INTO test_unsigned_bigint_backfill_buffer (id, info)
+    SELECT 9223372036854775808 + ones.n + tens.n * 10 + hundreds.n * 100, 'backfill'
+    FROM
+        (SELECT 0 AS n UNION ALL SELECT 1 UNION ALL SELECT 2 UNION ALL SELECT 3 UNION ALL SELECT 4
+         UNION ALL SELECT 5 UNION ALL SELECT 6 UNION ALL SELECT 7 UNION ALL SELECT 8 UNION ALL SELECT 9) ones
+    CROSS JOIN
+        (SELECT 0 AS n UNION ALL SELECT 1 UNION ALL SELECT 2 UNION ALL SELECT 3 UNION ALL SELECT 4
+         UNION ALL SELECT 5 UNION ALL SELECT 6 UNION ALL SELECT 7 UNION ALL SELECT 8 UNION ALL SELECT 9) tens
+    CROSS JOIN
+        (SELECT 0 AS n UNION ALL SELECT 1 UNION ALL SELECT 2 UNION ALL SELECT 3 UNION ALL SELECT 4
+         UNION ALL SELECT 5 UNION ALL SELECT 6 UNION ALL SELECT 7 UNION ALL SELECT 8 UNION ALL SELECT 9) hundreds;
+"
+
+statement ok
+set backfill_rate_limit=1;
+
+statement ok
+create table rw_unsigned_bigint_backfill_buffer (
+  id BIGINT,
+  info VARCHAR,
+  primary key (id)
+) with (
+  snapshot = 'true',
+  snapshot.batch_size = 10,
+) from s_unsigned_int_to_signed table 'risedev.test_unsigned_bigint_backfill_buffer';
+
+query B retry 30 backoff 1s
+select count(*) > 0 and count(*) < 1000 from rw_unsigned_bigint_backfill_buffer;
+----
+t
+
+system ok
+mysql -e "
+    USE risedev;
+    INSERT INTO test_unsigned_bigint_backfill_buffer VALUES (42, 'buffer');
+"
+
+statement ok
+ALTER TABLE rw_unsigned_bigint_backfill_buffer SET backfill_rate_limit = 1000;
+
+query I retry 30 backoff 1s
+select count(*) from rw_unsigned_bigint_backfill_buffer where id = 42 and info = 'buffer';
+----
+1
+
+query I retry 30 backoff 1s
+select count(*) from rw_unsigned_bigint_backfill_buffer;
+----
+1001
+
 
 # Clean up
+statement ok
+drop table rw_unsigned_bigint_backfill_buffer;
+
 statement ok
 drop table rw_unsigned_int_upcast;
 
@@ -240,4 +313,5 @@ system ok
 mysql -e "
     USE risedev;
     DROP TABLE IF EXISTS test_unsigned_int;
+    DROP TABLE IF EXISTS test_unsigned_bigint_backfill_buffer;
 "

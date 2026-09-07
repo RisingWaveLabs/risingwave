@@ -64,6 +64,8 @@ pg_catalog 1186 interval b f NULL
 pg_catalog 1187 _interval b f NULL
 pg_catalog 1231 _numeric b f NULL
 pg_catalog 1301 rw_int256 b f NULL
+pg_catalog 1307 variant b f NULL
+pg_catalog 1308 _variant b f NULL
 pg_catalog 16 bool b f NULL
 pg_catalog 17 bytea b f NULL
 pg_catalog 1700 numeric b f NULL

@@ -61,7 +61,6 @@ pub enum Components {
     Hdfs,
     PrometheusAndGrafana,
     Pubsub,
-    Redis,
     Tracing,
     RustComponents,
     UseSystem,
@@ -88,7 +87,6 @@ impl Components {
             Self::Hdfs => "[Component] Hummock: Hdfs Backend",
             Self::PrometheusAndGrafana => "[Component] Metrics: Prometheus + Grafana",
             Self::Pubsub => "[Component] Google Pubsub",
-            Self::Redis => "[Component] Redis",
             Self::BuildConnectorNode => "[Build] Build RisingWave Connector (Java)",
             Self::RustComponents => "[Build] Rust components",
             Self::UseSystem => "[Build] Use system RisingWave",
@@ -149,7 +147,7 @@ from source. This implies `ENABLE_BUILD_RUST` to be false.
                 "
 Required if you want to build dashboard from source.
 This is generally not the option you want to use to develop the
-dashboard. Instead, directly run `npm run dev` in the dashboard
+dashboard. Instead, directly run `pnpm run dev` in the dashboard
 directory to start the development server, set the API endpoint
 to a running RisingWave cluster in the settings page.
 "
@@ -171,11 +169,6 @@ with thread sanitizer. The built binaries will be at
 `target/debug`. RiseDev will help link binaries when starting
 a dev cluster.
 "
-            }
-            Self::Redis => {
-                "
-Required if you want to sink data to redis.
-                "
             }
             Self::BuildConnectorNode => {
                 "
@@ -251,7 +244,6 @@ This will download the ADBC Snowflake driver shared library (.so/.dylib)."
             "ENABLE_RELEASE_PROFILE" => Some(Self::Release),
             "ENABLE_DYNAMIC_LINKING" => Some(Self::DynamicLinking),
             "ENABLE_SANITIZER" => Some(Self::Sanitizer),
-            "ENABLE_REDIS" => Some(Self::Redis),
             "ENABLE_BUILD_RW_CONNECTOR" => Some(Self::BuildConnectorNode),
             "ENABLE_HUMMOCK_TRACE" => Some(Self::HummockTrace),
             "ENABLE_COREDUMP" => Some(Self::Coredump),
@@ -272,7 +264,6 @@ This will download the ADBC Snowflake driver shared library (.so/.dylib)."
             Self::Hdfs => "ENABLE_HDFS",
             Self::PrometheusAndGrafana => "ENABLE_PROMETHEUS_GRAFANA",
             Self::Pubsub => "ENABLE_PUBSUB",
-            Self::Redis => "ENABLE_REDIS",
             Self::RustComponents => "ENABLE_BUILD_RUST",
             Self::UseSystem => "USE_SYSTEM_RISINGWAVE",
             Self::Dashboard => "ENABLE_BUILD_DASHBOARD",

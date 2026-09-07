@@ -138,7 +138,7 @@ create table t (
   v18 bytea,
   v19 jsonb,
   v20 character varying,
-  v21 struct<x REAL, y REAL>,
+  v21 struct<x DOUBLE PRECISION, y DOUBLE PRECISION>,
   v22 character varying,
   v23 character varying,
   v24 character varying,
@@ -303,8 +303,8 @@ v18 bytea false NULL
 v19 jsonb false NULL
 v20 character varying false NULL
 v21 struct false NULL
-v21.x real false NULL
-v21.y real false NULL
+v21.x double precision false NULL
+v21.y double precision false NULL
 v22 character varying false NULL
 v23 character varying false NULL
 v24 character varying false NULL

@@ -63,13 +63,12 @@ pub fn is_empty_key_range(key_range: &TableKeyRange) -> bool {
 /// but this function will still return `Excluded(256)`.
 ///
 /// See also [`vnode`] and [`end_bound_of_vnode`] which hold such invariant.
-pub fn vnode_range(range: &TableKeyRange) -> (usize, usize) {
-    let (left, right) = range;
-    let left = match left {
+pub fn vnode_range<T: AsRef<[u8]>>(range: &impl RangeBounds<TableKey<T>>) -> (usize, usize) {
+    let left = match range.start_bound() {
         Included(key) | Excluded(key) => key.vnode_part().to_index(),
         Unbounded => 0,
     };
-    let right = match right {
+    let right = match range.end_bound() {
         Included(key) => key.vnode_part().to_index() + 1,
         Excluded(key) => {
             let (vnode, inner_key) = key.split_vnode();

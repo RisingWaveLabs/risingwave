@@ -15,7 +15,7 @@
 use sea_orm::entity::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use crate::WorkerId;
+use crate::{WorkerId, WorkerResource};
 
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Eq, Serialize, Deserialize)]
 #[sea_orm(table_name = "worker_property")]
@@ -29,6 +29,8 @@ pub struct Model {
     pub internal_rpc_host_addr: Option<String>,
     pub resource_group: Option<String>,
     pub is_iceberg_compactor: bool,
+    pub resource: Option<WorkerResource>,
+    pub started_at: Option<i64>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

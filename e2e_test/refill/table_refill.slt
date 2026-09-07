@@ -1,0 +1,45 @@
+# Policies become active after recovery and are projected by compute-node role.
+statement ok
+create table refill_base(k int, v int);
+
+statement ok
+create materialized view refill_streaming_mv as
+select k, count(*) as cnt from refill_base group by k;
+
+statement ok
+alter materialized view refill_streaming_mv
+set config(streaming.developer.cache_refill_policy = 'streaming');
+
+statement ok
+create materialized view refill_serving_mv as
+select k, count(*) as cnt from refill_base group by k;
+
+statement ok
+alter materialized view refill_serving_mv
+set config(streaming.developer.cache_refill_policy = 'serving');
+
+statement ok
+create materialized view refill_both_mv as
+select k, count(*) as cnt from refill_base group by k;
+
+statement ok
+alter materialized view refill_both_mv
+set config(streaming.developer.cache_refill_policy = 'both');
+
+statement ok
+recover;
+
+system ok
+psql_refill_validate.py
+
+statement ok
+drop materialized view refill_both_mv;
+
+statement ok
+drop materialized view refill_serving_mv;
+
+statement ok
+drop materialized view refill_streaming_mv;
+
+statement ok
+drop table refill_base;

@@ -36,7 +36,7 @@ use risingwave_connector::sink::catalog::SinkId;
 use risingwave_pb::id::ExecutorId;
 
 use crate::common::log_store_impl::kv_log_store::{
-    REWIND_BACKOFF_FACTOR, REWIND_BASE_DELAY, REWIND_MAX_DELAY,
+    REWIND_BACKOFF_MULTIPLIER, REWIND_INITIAL_DELAY, REWIND_MAX_DELAY,
 };
 use crate::executor::prelude::ActorId;
 use crate::task::FragmentId;
@@ -160,14 +160,14 @@ pub struct StreamingMetrics {
     over_window_same_output_count: LabelGuardedIntCounterVec,
 
     /// The duration from receipt of barrier to all actors collection.
-    /// And the max of all node `barrier_inflight_latency` is the latency for a barrier
-    /// to flow through the graph.
-    pub barrier_inflight_latency: Histogram,
+    /// The max of all nodes' `barrier_inflight_latency` for a partial graph is the latency for a
+    /// barrier to flow through that partial graph.
+    pub barrier_inflight_latency: LabelGuardedHistogramVec,
     /// The duration of sync to storage.
-    pub barrier_sync_latency: Histogram,
+    pub barrier_sync_latency: LabelGuardedHistogramVec,
     pub barrier_batch_size: Histogram,
     /// The progress made by the earliest in-flight barriers in the local barrier manager.
-    pub barrier_manager_progress: IntCounter,
+    pub barrier_manager_progress: LabelGuardedIntCounterVec,
 
     pub kv_log_store_storage_write_count: LabelGuardedIntCounterVec,
     pub kv_log_store_storage_write_size: LabelGuardedIntCounterVec,
@@ -240,6 +240,16 @@ pub struct StreamingMetrics {
 }
 
 pub static GLOBAL_STREAMING_METRICS: OnceLock<StreamingMetrics> = OnceLock::new();
+
+fn latency_buckets(max: f64, count: usize) -> Vec<f64> {
+    const MIN: f64 = 0.1;
+
+    assert!(count > 1);
+    let factor = (max / MIN).powf(1.0 / (count - 1) as f64);
+    let mut buckets = exponential_buckets(MIN, factor, count).unwrap();
+    *buckets.last_mut().unwrap() = max;
+    buckets
+}
 
 pub fn global_streaming_metrics(metric_level: MetricLevel) -> StreamingMetrics {
     GLOBAL_STREAMING_METRICS
@@ -916,19 +926,23 @@ impl StreamingMetrics {
         )
         .unwrap();
 
-        let opts = histogram_opts!(
+        let barrier_inflight_latency = register_guarded_histogram_vec_with_registry!(
             "stream_barrier_inflight_duration_seconds",
             "barrier_inflight_latency",
-            exponential_buckets(0.1, 1.5, 16).unwrap() // max 43s
-        );
-        let barrier_inflight_latency = register_histogram_with_registry!(opts, registry).unwrap();
+            &["partial_graph"],
+            latency_buckets(600.0, 20),
+            registry
+        )
+        .unwrap();
 
-        let opts = histogram_opts!(
+        let barrier_sync_latency = register_guarded_histogram_vec_with_registry!(
             "stream_barrier_sync_storage_duration_seconds",
             "barrier_sync_latency",
-            exponential_buckets(0.1, 1.5, 16).unwrap() // max 43
-        );
-        let barrier_sync_latency = register_histogram_with_registry!(opts, registry).unwrap();
+            &["partial_graph"],
+            latency_buckets(600.0, 20),
+            registry
+        )
+        .unwrap();
 
         let opts = histogram_opts!(
             "stream_barrier_batch_size",
@@ -937,9 +951,10 @@ impl StreamingMetrics {
         );
         let barrier_batch_size = register_histogram_with_registry!(opts, registry).unwrap();
 
-        let barrier_manager_progress = register_int_counter_with_registry!(
+        let barrier_manager_progress = register_guarded_int_counter_vec_with_registry!(
             "stream_barrier_manager_progress",
             "The number of actors that have processed the earliest in-flight barriers",
+            &["partial_graph"],
             registry
         )
         .unwrap();
@@ -1087,16 +1102,12 @@ impl StreamingMetrics {
         .unwrap();
 
         let kv_log_store_rewind_delay_opts = {
-            assert_eq!(2, REWIND_BACKOFF_FACTOR);
-            let bucket_count = (REWIND_MAX_DELAY.as_secs_f64().log2()
-                - REWIND_BASE_DELAY.as_secs_f64().log2())
-            .ceil() as usize;
-            let buckets = exponential_buckets(
-                REWIND_BASE_DELAY.as_secs_f64(),
-                REWIND_BACKOFF_FACTOR as _,
-                bucket_count,
-            )
-            .unwrap();
+            let first_delay_secs = REWIND_INITIAL_DELAY.as_secs_f64();
+            let base = REWIND_BACKOFF_MULTIPLIER as f64;
+            let bucket_count = (REWIND_MAX_DELAY.as_secs_f64() / first_delay_secs)
+                .log(base)
+                .ceil() as usize;
+            let buckets = exponential_buckets(first_delay_secs, base, bucket_count).unwrap();
             histogram_opts!(
                 "kv_log_store_rewind_delay",
                 "Kv log store rewind delay",

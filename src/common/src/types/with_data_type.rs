@@ -20,7 +20,7 @@ use risingwave_pb::id::TypedId;
 
 use super::{
     DataType, Date, Decimal, F32, F64, Fields, Int256, Interval, JsonbRef, JsonbVal, Serial,
-    StructType, Time, Timestamp, Timestamptz,
+    StructType, Time, Timestamp, Timestamptz, VariantRef, VariantVal,
 };
 
 /// A trait for all physical types that can be associated with a [`DataType`].
@@ -109,10 +109,17 @@ impl_with_data_type!(Interval, DataType::Interval);
 impl_with_data_type!(Vec<u8>, DataType::Bytea);
 impl_with_data_type!(Bytes, DataType::Bytea);
 impl_with_data_type!(JsonbVal, DataType::Jsonb);
+impl_with_data_type!(VariantVal, DataType::Variant);
 
 impl WithDataType for JsonbRef<'_> {
     fn default_data_type() -> DataType {
         DataType::Jsonb
+    }
+}
+
+impl WithDataType for VariantRef<'_> {
+    fn default_data_type() -> DataType {
+        DataType::Variant
     }
 }
 

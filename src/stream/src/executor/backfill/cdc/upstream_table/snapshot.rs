@@ -403,7 +403,7 @@ mod tests {
         let config =
             serde_json::from_value::<ExternalTableConfig>(serde_json::to_value(props).unwrap())
                 .unwrap();
-        let reader = MySqlExternalTableReader::new(config, rw_schema.clone())
+        let reader = MySqlExternalTableReader::new(config, rw_schema.clone(), vec![0])
             .await
             .unwrap();
 

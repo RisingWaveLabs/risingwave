@@ -35,9 +35,7 @@ use risingwave_connector::source::filesystem::opendal_source::opendal_enumerator
 use risingwave_connector::source::filesystem::opendal_source::{
     BatchPosixFsEnumerator, OpendalAzblob, OpendalGcs, OpendalS3,
 };
-use risingwave_connector::source::iceberg::{
-    IcebergFileScanTask, IcebergSplit, IcebergSplitEnumerator,
-};
+use risingwave_connector::source::iceberg::{IcebergFileScanTask, IcebergScanTaskPlanner};
 use risingwave_connector::source::kafka::KafkaSplitEnumerator;
 use risingwave_connector::source::prelude::DatagenSplitEnumerator;
 use risingwave_connector::source::reader::reader::build_opendal_fs_list_for_batch;
@@ -240,6 +238,7 @@ impl BatchPlanFragmenter {
                 1,
                 &self.catalog_reader,
                 &self.worker_node_manager,
+                self.batch_parallelism,
             )?),
         )?;
         self.stage_graph = Some(
@@ -312,6 +311,10 @@ impl Query {
     pub fn stage(&self, stage_id: StageId) -> &QueryStage {
         &self.stage_graph.stages[&stage_id]
     }
+
+    pub fn batch_parallelism(&self) -> usize {
+        self.stage_graph.batch_parallelism
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -380,40 +383,13 @@ impl SourceScanInfo {
 
 impl UnpartitionedData {
     fn complete(self, batch_parallelism: usize) -> SchedulerResult<SourceScanInfo> {
-        macro_rules! iceberg_tasks {
-            ($tasks:expr, $variant:ident, $limit:expr) => {
-                if let Some(limit) = $limit {
-                    vec![SplitImpl::Iceberg(IcebergSplit {
-                        split_id: 0,
-                        task: IcebergFileScanTask::$variant($tasks),
-                        limit: Some(limit),
-                    })]
-                } else {
-                    IcebergSplitEnumerator::split_n_vecs($tasks, batch_parallelism)
-                        .into_iter()
-                        .enumerate()
-                        .map(|(id, tasks)| {
-                            SplitImpl::Iceberg(IcebergSplit {
-                                split_id: id.try_into().unwrap(),
-                                task: IcebergFileScanTask::$variant(tasks),
-                                limit: None,
-                            })
-                        })
-                        .collect()
-                }
-            };
-        }
-
         let splits = match self {
-            UnpartitionedData::Iceberg { task, limit } => match task {
-                IcebergFileScanTask::Data(tasks) => iceberg_tasks!(tasks, Data, limit),
-                IcebergFileScanTask::EqualityDelete(tasks) => {
-                    iceberg_tasks!(tasks, EqualityDelete, None)
-                }
-                IcebergFileScanTask::PositionDelete(tasks) => {
-                    iceberg_tasks!(tasks, PositionDelete, None)
-                }
-            },
+            UnpartitionedData::Iceberg { task, limit } => {
+                IcebergScanTaskPlanner::plan_splits(task, batch_parallelism, limit)?
+                    .into_iter()
+                    .map(SplitImpl::Iceberg)
+                    .collect()
+            }
         };
         Ok(SourceScanInfo::Complete(splits))
     }
@@ -936,6 +912,7 @@ impl StageGraph {
                     parallelism,
                     catalog_reader,
                     worker_node_manager,
+                    self.batch_parallelism,
                 )?)
             } else {
                 None
@@ -1072,6 +1049,13 @@ impl BatchPlanFragmenter {
         let mut has_lookup_join = false;
         let parallelism = match root.distribution() {
             Distribution::Single => {
+                // A lookup join on a lookup table with a singleton distribution is gathered
+                // into a single task. Mark `has_lookup_join` so that epoch unpin is delayed
+                // until the end of the query.
+                has_lookup_join = self
+                    .collect_stage_lookup_join_parallelism(root.clone())?
+                    .is_some();
+
                 if let Some(info) = &mut table_scan_info {
                     if let Some(partitions) = &mut info.partitions {
                         if partitions.len() != 1 {
@@ -1191,6 +1175,7 @@ impl BatchPlanFragmenter {
                 parallelism,
                 &self.catalog_reader,
                 &self.worker_node_manager,
+                self.batch_parallelism,
             )?)
         } else {
             None
@@ -1293,7 +1278,7 @@ impl BatchPlanFragmenter {
         let build_table_scan_info = |name, table_catalog: &TableCatalog, scan_range| {
             let vnode_mapping = self
                 .worker_node_manager
-                .fragment_mapping(table_catalog.fragment_id)?;
+                .fragment_mapping(table_catalog.fragment_id, self.batch_parallelism)?;
             let partitions = derive_partitions(scan_range, table_catalog, &vnode_mapping)?;
             let info = TableScanInfo::new(name, partitions);
             Ok(Some(info))
@@ -1355,7 +1340,7 @@ impl BatchPlanFragmenter {
             let table_catalog = lookup_join.right_table();
             let vnode_mapping = self
                 .worker_node_manager
-                .fragment_mapping(table_catalog.fragment_id)?;
+                .fragment_mapping(table_catalog.fragment_id, self.batch_parallelism)?;
             let parallelism = vnode_mapping.iter().sorted().dedup().count();
             Ok(Some(parallelism))
         } else {

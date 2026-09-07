@@ -59,6 +59,9 @@ num-traits = "0.2"
 opentelemetry = { workspace = true }
 opentelemetry_sdk = { workspace = true }
 parking_lot = { workspace = true }
+parquet-variant = { workspace = true }
+parquet-variant-compute = { workspace = true }
+parquet-variant-json = { workspace = true }
 parse-display = "0.11"
 paste = "1"
 pin-project-lite = { workspace = true }
@@ -102,7 +105,7 @@ stacker = "0.1"
 static_assertions = "1"
 strum = "0.28"
 strum_macros = "0.28"
-sysinfo = { version = "0.38", default-features = false, features = ["system"] }
+sysinfo = { version = "0.39", default-features = false, features = ["system"] }
 thiserror = { workspace = true }
 thiserror-ext = { workspace = true }
 tinyvec = { version = "1", features = ["rustc_1_55", "grab_spare_slice"] }

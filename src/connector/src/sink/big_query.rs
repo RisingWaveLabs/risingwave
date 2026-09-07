@@ -260,7 +260,12 @@ pub struct BigQueryConfig {
     #[serde(flatten)]
     pub aws_auth_props: AwsAuthProps,
     pub r#type: String, // accept "append-only" or "upsert"
+
+    #[serde(flatten)]
+    pub unknown_fields: std::collections::HashMap<String, String>,
 }
+
+crate::impl_sink_unknown_fields!(BigQueryConfig);
 
 impl EnforceSecret for BigQueryConfig {
     fn enforce_one(prop: &str) -> crate::error::ConnectorResult<()> {
@@ -415,6 +420,9 @@ impl BigQuerySink {
             }
             DataType::Bytea => Ok("BYTES".to_owned()),
             DataType::Jsonb => Ok("JSON".to_owned()),
+            DataType::Variant => Err(SinkError::BigQuery(anyhow::anyhow!(
+                "VARIANT is not supported for BigQuery sink."
+            ))),
             DataType::Serial => Ok("INT64".to_owned()),
             DataType::Int256 => Err(SinkError::BigQuery(anyhow::anyhow!(
                 "INT256 is not supported for BigQuery sink."
@@ -471,6 +479,11 @@ impl BigQuerySink {
 
             DataType::Bytea => TableFieldSchema::bytes(&rw_field.name),
             DataType::Jsonb => TableFieldSchema::json(&rw_field.name),
+            DataType::Variant => {
+                return Err(SinkError::BigQuery(anyhow::anyhow!(
+                    "VARIANT is not supported for BigQuery sink."
+                )));
+            }
             DataType::Int256 => {
                 return Err(SinkError::BigQuery(anyhow::anyhow!(
                     "INT256 is not supported for BigQuery sink."
@@ -518,6 +531,8 @@ impl Sink for BigQuerySink {
     type LogSinker = BigQueryLogSinker;
 
     const SINK_NAME: &'static str = BIGQUERY_SINK;
+
+    crate::impl_validate_sink_unknown_fields!();
 
     async fn new_log_sinker(&self, _writer_param: SinkWriterParam) -> Result<Self::LogSinker> {
         let (writer, resp_stream) = BigQuerySinkWriter::new(
@@ -986,6 +1001,9 @@ fn build_protobuf_field(
         }
         DataType::Bytea => field.r#type = Some(field_descriptor_proto::Type::Bytes.into()),
         DataType::Jsonb => field.r#type = Some(field_descriptor_proto::Type::String.into()),
+        DataType::Variant => {
+            return Err(SinkError::BigQuery(anyhow::anyhow!("Don't support Variant")));
+        }
         DataType::Serial => field.r#type = Some(field_descriptor_proto::Type::Int64.into()),
         DataType::Float32 | DataType::Int256 => {
             return Err(SinkError::BigQuery(anyhow::anyhow!(
@@ -1129,6 +1147,7 @@ mod test {
                     msk_signer_timeout_sec: None,
                 },
                 r#type: "append-only".to_owned(),
+                unknown_fields: Default::default(),
             },
             schema: Schema {
                 fields: vec![Field::with_name(DataType::Decimal, "capitalizedcost")],

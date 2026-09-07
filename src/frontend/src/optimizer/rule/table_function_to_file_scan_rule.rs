@@ -27,10 +27,10 @@ pub struct TableFunctionToFileScanRule {}
 impl Rule<Logical> for TableFunctionToFileScanRule {
     fn apply(&self, plan: PlanRef) -> Option<PlanRef> {
         let logical_table_function: &LogicalTableFunction = plan.as_logical_table_function()?;
-        if logical_table_function.table_function.function_type != TableFunctionType::FileScan {
+        if logical_table_function.table_function().function_type != TableFunctionType::FileScan {
             return None;
         }
-        assert!(!logical_table_function.with_ordinality);
+        assert!(!logical_table_function.with_ordinality());
         let table_function_return_type = logical_table_function.table_function().return_type();
 
         if let DataType::Struct(st) = table_function_return_type {

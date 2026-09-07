@@ -708,7 +708,7 @@ impl HummockManagerService for HummockServiceImpl {
                 exclude_empty,
                 limit,
             )
-            .await
+            .await?
             .into_iter()
             .map(|(i, l)| (i.as_raw_id(), l.to_protobuf()))
             .collect();

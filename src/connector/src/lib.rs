@@ -190,8 +190,9 @@ mod tests {
     use expect_test::expect_file;
 
     use crate::with_options_test::{
-        generate_allow_alter_on_fly_fields_combined, generate_with_options_yaml_connection,
-        generate_with_options_yaml_sink, generate_with_options_yaml_source,
+        generate_allow_alter_on_fly_fields_combined, generate_iceberg_engine_fields,
+        generate_with_options_yaml_connection, generate_with_options_yaml_sink,
+        generate_with_options_yaml_source,
     };
 
     /// This test ensures that `src/connector/with_options.yaml` is up-to-date with the default values specified
@@ -212,6 +213,13 @@ mod tests {
     fn test_allow_alter_on_fly_fields_rust_up_to_date() {
         expect_file!("../src/allow_alter_on_fly_fields.rs")
             .assert_eq(&generate_allow_alter_on_fly_fields_combined());
+    }
+
+    /// This test ensures that Iceberg Engine sink fields are up-to-date.
+    #[test]
+    fn test_iceberg_engine_fields_rust_up_to_date() {
+        expect_file!("../src/sink/iceberg/engine_options.rs")
+            .assert_eq(&generate_iceberg_engine_fields());
     }
 
     /// Test some serde behavior we rely on.

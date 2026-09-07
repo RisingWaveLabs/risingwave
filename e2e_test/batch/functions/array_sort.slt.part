@@ -35,3 +35,41 @@ select array_sort(array[3, 2, NULL, 1, NULL]);
 
 query error invalid digit found in string
 select array_sort(array[3, 2, 1, 'a']);
+
+# includes only descending parameter, nulls_first defaults to false
+# descending=false, nulls_first=false -> ascending, nulls last
+query I
+select array_sort(array[3, 2, NULL, 1, NULL], false);
+----
+{1,2,3,NULL,NULL}
+
+# descending=true, nulls_first=false -> descending, nulls last
+query I
+select array_sort(array[3, 2, NULL, 1, NULL], true);
+----
+{3,2,1,NULL,NULL}
+
+# includes both descending and nulls_first parameters
+# descending=false, nulls_first=false -> ascending, nulls last
+query I
+select array_sort(array[3, 2, NULL, 1, NULL], false, false);
+----
+{1,2,3,NULL,NULL}
+
+# descending=true, nulls_first=false -> descending, nulls last
+query I
+select array_sort(array[3, 2, NULL, 1, NULL], true, false);
+----
+{3,2,1,NULL,NULL}
+
+# descending=false, nulls_first=true -> ascending, nulls first
+query I
+select array_sort(array[3, 2, NULL, 1, NULL], false, true);
+----
+{NULL,NULL,1,2,3}
+
+# descending=true, nulls_first=true -> descending, nulls first
+query I
+select array_sort(array[3, 2, NULL, 1, NULL], true, true);
+----
+{NULL,NULL,3,2,1}

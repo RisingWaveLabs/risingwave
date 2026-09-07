@@ -17,6 +17,7 @@ use std::mem;
 use std::sync::Arc;
 use std::time::SystemTime;
 
+use await_tree::{InstrumentAwait, SpanExt};
 use bytes::{Bytes, BytesMut};
 use risingwave_common::catalog::TableId;
 use risingwave_common::hash::VirtualNode;
@@ -267,7 +268,9 @@ impl<W: SstableWriter, F: FilterBuilder> SstableBuilder<W, F> {
         if self.last_table_id.is_none() || self.last_table_id.unwrap() != table_id {
             if !self.block_builder.is_empty() {
                 // Try to finish the previous `Block`` when the `table_id` is switched, making sure that the data in the `Block` doesn't span two `table_ids`.
-                self.build_block().await?;
+                self.build_block()
+                    .instrument_await("sstable_build_block_on_raw_table_switch".verbose())
+                    .await?;
             }
 
             self.table_ids.insert(table_id);
@@ -290,13 +293,17 @@ impl<W: SstableWriter, F: FilterBuilder> SstableBuilder<W, F> {
                             self.sst_object_id, self.block_metas.len(), self.last_table_id
                         )
                     });
-                    self.add_impl(iter.key(), value, false).await?;
+                    self.add_impl(iter.key(), value, false)
+                        .instrument_await("sstable_add_raw_block_fallback_add".verbose())
+                        .await?;
                     iter.next();
                 }
                 return Ok(false);
             }
 
-            self.build_block().await?;
+            self.build_block()
+                .instrument_await("sstable_build_block_before_raw_block".verbose())
+                .await?;
         }
         self.last_full_key = largest_key;
         assert_eq!(
@@ -311,7 +318,10 @@ impl<W: SstableWriter, F: FilterBuilder> SstableBuilder<W, F> {
         self.block_metas.push(meta);
         self.filter_builder.add_raw_data(filter_data);
         let block_meta = self.block_metas.last_mut().unwrap();
-        self.writer.write_block_bytes(buf, block_meta).await?;
+        self.writer
+            .write_block_bytes(buf, block_meta)
+            .instrument_await("sstable_write_raw_block_bytes".verbose())
+            .await?;
 
         Ok(true)
     }
@@ -384,10 +394,14 @@ impl<W: SstableWriter, F: FilterBuilder> SstableBuilder<W, F> {
             self.finalize_last_table_stats();
             self.last_table_id = Some(table_id);
             if !self.block_builder.is_empty() {
-                self.build_block().await?;
+                self.build_block()
+                    .instrument_await("sstable_build_block_on_table_switch".verbose())
+                    .await?;
             }
         } else if is_block_full && could_switch_block {
-            self.build_block().await?;
+            self.build_block()
+                .instrument_await("sstable_build_block_on_block_full".verbose())
+                .await?;
         }
         self.last_table_stats.total_key_count += 1;
         self.epoch_set.insert(full_key.epoch_with_gap.pure_epoch());
@@ -490,7 +504,9 @@ impl<W: SstableWriter, F: FilterBuilder> SstableBuilder<W, F> {
             self.table_ids.len()
         );
 
-        self.build_block().await?;
+        self.build_block()
+            .instrument_await("sstable_finish_build_block".verbose())
+            .await?;
         let right_exclusive = false;
         let meta_offset = self.writer.data_len() as u64;
 
@@ -664,7 +680,11 @@ impl<W: SstableWriter, F: FilterBuilder> SstableBuilder<W, F> {
             }
         }
 
-        let writer_output = self.writer.finish(meta).await?;
+        let writer_output = self
+            .writer
+            .finish(meta)
+            .instrument_await("sstable_writer_finish".verbose())
+            .await?;
         // The timestamp is only used during full GC.
         //
         // Ideally object store object's last_modified should be used.
@@ -714,7 +734,10 @@ impl<W: SstableWriter, F: FilterBuilder> SstableBuilder<W, F> {
                 )
             });
         let block = self.block_builder.build();
-        self.writer.write_block(block, block_meta).await?;
+        self.writer
+            .write_block(block, block_meta)
+            .instrument_await("sstable_write_block".verbose())
+            .await?;
         self.block_size_vec.push(block.len());
         let data_len = utils::checked_into_u32(self.writer.data_len()).unwrap_or_else(|_| {
             panic!(

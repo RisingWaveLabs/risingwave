@@ -199,10 +199,11 @@ struct Jwks {
 /// See <https://www.rfc-editor.org/rfc/rfc7517.html#section-4> for more details.
 #[derive(Debug, Deserialize)]
 struct Jwk {
-    kid: String,         // Key ID
+    kty: Option<String>, // Key Type
+    kid: Option<String>, // Key ID (OPTIONAL per RFC 7517 section 4.5)
     alg: Option<String>, // Algorithm (OPTIONAL per RFC 7517 section 4.4)
-    n: String,           // Modulus
-    e: String,           // Exponent
+    n: Option<String>,   // RSA modulus
+    e: Option<String>,   // RSA exponent
 }
 
 /// Algorithms we accept for JWT signature verification.
@@ -221,38 +222,51 @@ const ALLOWED_JWT_ALGORITHMS: &[Algorithm] = &[
     Algorithm::PS384,
     Algorithm::PS512,
 ];
+const RSA_JWK_KEY_TYPE: &str = "RSA";
+/// Optional OAuth user option overriding the expected JWT `aud`.
+const OAUTH_AUDIENCE_KEY: &str = "audience";
 
 async fn validate_jwt(
     jwt: &str,
     jwks_url: &str,
     issuer: &str,
-    cluster_id: &str,
+    audience: &str,
     metadata: &HashMap<String, String>,
 ) -> Result<bool, BoxedError> {
     let jwks: Jwks = reqwest::get(jwks_url).await?.json().await?;
-    validate_jwt_with_jwks(jwt, &jwks, issuer, cluster_id, metadata)
+    validate_jwt_with_jwks(jwt, &jwks, issuer, audience, metadata)
 }
 
 fn audience_from_cluster_id(cluster_id: &str) -> String {
     format!("urn:risingwave:cluster:{}", cluster_id)
 }
 
+fn resolve_oauth_audience(
+    configured: Option<String>,
+    cluster_id: &str,
+) -> Result<String, BoxedError> {
+    let Some(configured_audience) = configured else {
+        return Ok(audience_from_cluster_id(cluster_id));
+    };
+
+    let audience = configured_audience.trim();
+    if audience.is_empty() {
+        return Err(format!("OAuth option `{OAUTH_AUDIENCE_KEY}` cannot be empty").into());
+    }
+    Ok(audience.to_owned())
+}
+
 fn validate_jwt_with_jwks(
     jwt: &str,
     jwks: &Jwks,
     issuer: &str,
-    cluster_id: &str,
+    audience: &str,
     metadata: &HashMap<String, String>,
 ) -> Result<bool, BoxedError> {
     let header = decode_header(jwt)?;
 
-    // 1. Retrieve the kid from the header to find the right JWK in the JWK Set.
+    // 1. Retrieve the kid from the header to find compatible JWKs in the JWK Set.
     let kid = header.kid.ok_or("JWT header missing 'kid' field")?;
-    let jwk = jwks
-        .keys
-        .iter()
-        .find(|k| k.kid == kid)
-        .ok_or(format!("No matching key found in JWKS for kid: '{}'", kid))?;
 
     // 2. Decide which algorithm to use.
     //
@@ -262,25 +276,39 @@ fn validate_jwt_with_jwks(
     // allow-list. The allow-list is what ultimately blocks alg-confusion: an
     // attacker-chosen `alg` from the token header alone must never be trusted
     // to select the verification algorithm.
-    let alg = match jwk.alg.as_deref() {
-        Some(jwk_alg) => {
-            let jwk_alg = Algorithm::from_str(jwk_alg)?;
-            if jwk_alg != header.alg {
-                return Err("alg in jwt header does not match with alg in jwk".into());
-            }
-            jwk_alg
-        }
-        None => header.alg,
-    };
-    if !ALLOWED_JWT_ALGORITHMS.contains(&alg) {
-        return Err(format!("JWT alg {:?} is not allowed", alg).into());
+    if !ALLOWED_JWT_ALGORITHMS.contains(&header.alg) {
+        return Err(format!("JWT alg {:?} is not allowed", header.alg).into());
     }
 
+    // A JWK Set can contain unrelated key types, keys without an optional `kid`,
+    // and equivalent keys of different types that share a `kid`. Scan all
+    // candidates instead of letting the first same-`kid` key shadow a usable
+    // RSA key later in the set.
+    let jwk = jwks
+        .keys
+        .iter()
+        .filter(|jwk| jwk.kid.as_deref() == Some(kid.as_str()))
+        .find(|jwk| {
+            jwk.kty.as_deref() == Some(RSA_JWK_KEY_TYPE)
+                && jwk.n.is_some()
+                && jwk.e.is_some()
+                && match jwk.alg.as_deref() {
+                    Some(alg) => Algorithm::from_str(alg).is_ok_and(|alg| alg == header.alg),
+                    None => true,
+                }
+        })
+        .ok_or_else(|| format!("No compatible RSA key found in JWKS for kid: '{}'", kid))?;
+
     // 3. Decode the JWT and validate the claims.
-    let decoding_key = DecodingKey::from_rsa_components(&jwk.n, &jwk.e)?;
-    let mut validation = Validation::new(alg);
+    let n = jwk.n.as_deref().expect("RSA candidate must have a modulus");
+    let e = jwk
+        .e
+        .as_deref()
+        .expect("RSA candidate must have an exponent");
+    let decoding_key = DecodingKey::from_rsa_components(n, e)?;
+    let mut validation = Validation::new(header.alg);
     validation.set_issuer(&[issuer]);
-    validation.set_audience(&[audience_from_cluster_id(cluster_id)]); // JWT 'aud' claim must match cluster_id
+    validation.set_audience(&[audience]);
     validation.set_required_spec_claims(&["exp", "iss", "aud"]);
     let token_data = decode::<HashMap<String, serde_json::Value>>(jwt, &decoding_key, &validation)?;
 
@@ -308,11 +336,14 @@ impl UserAuthenticator {
                 let mut metadata = metadata.clone();
                 let jwks_url = metadata.remove("jwks_url").unwrap();
                 let issuer = metadata.remove("issuer").unwrap();
+                let audience =
+                    resolve_oauth_audience(metadata.remove(OAUTH_AUDIENCE_KEY), cluster_id)
+                        .map_err(PsqlError::StartupError)?;
                 validate_jwt(
                     &String::from_utf8_lossy(password),
                     &jwks_url,
                     &issuer,
-                    cluster_id,
+                    &audience,
                     &metadata,
                 )
                 .await
@@ -409,7 +440,7 @@ pub async fn handle_connection<S, SM>(
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
 
     use bytes::Bytes;
     use futures::StreamExt;
@@ -435,6 +466,8 @@ mod tests {
 
     struct MockSessionManager {}
     struct MockSession {}
+
+    const STREAMING_TEST_QUERY: &str = "SELECT 'pgwire_streaming_test'";
 
     impl SessionManager for MockSessionManager {
         type Error = BoxedError;
@@ -494,26 +527,42 @@ mod tests {
 
         async fn parse(
             self: Arc<Self>,
-            _sql: Option<Statement>,
+            sql: Option<Statement>,
             _params_types: Vec<Option<DataType>>,
         ) -> Result<String, Self::Error> {
-            Ok(String::new())
+            Ok(sql.map(|stmt| stmt.to_string()).unwrap_or_default())
         }
 
         fn bind(
             self: Arc<Self>,
-            _prepare_statement: String,
+            prepare_statement: String,
             _params: Vec<Option<Bytes>>,
             _param_formats: Vec<types::Format>,
             _result_formats: Vec<types::Format>,
         ) -> Result<String, Self::Error> {
-            Ok(String::new())
+            Ok(prepare_statement)
         }
 
         async fn execute(
             self: Arc<Self>,
-            _portal: String,
+            portal: String,
         ) -> Result<PgResponse<BoxStream<'static, RowSetResult>>, Self::Error> {
+            if portal == STREAMING_TEST_QUERY {
+                let first_row = futures::stream::once(async {
+                    Ok(vec![Row::new(vec![Some(Bytes::from(vec![
+                        b'x';
+                        128 * 1024
+                    ]))])])
+                });
+                let remaining_rows = futures::stream::pending();
+                return Ok(PgResponse::builder(StatementType::SELECT)
+                    .values(
+                        first_row.chain(remaining_rows).boxed(),
+                        vec![PgFieldDescriptor::new("".to_owned(), 1043, -1)],
+                    )
+                    .into());
+            }
+
             Ok(PgResponse::builder(StatementType::SELECT)
                 .values(
                     futures::stream::iter(vec![Ok(vec![Row::new(vec![Some(Bytes::new())])])])
@@ -605,6 +654,7 @@ mod tests {
                     redact_sql_option_keywords: None,
                     message_memory_manager: MessageMemoryManager::new(u64::MAX, u64::MAX, u64::MAX)
                         .into(),
+                    stream_flush_threshold_bytes: 64 * 1024,
                 },
                 CancellationToken::new(), // dummy
             )
@@ -657,6 +707,56 @@ mod tests {
         .await;
     }
 
+    #[cfg(not(madsim))]
+    #[tokio::test]
+    async fn test_large_query_row_is_streamed_before_query_finishes() {
+        let port: i16 = 10001;
+        let dir = tempfile::TempDir::new().unwrap();
+        let sock = dir.path().join(format!(".s.PGSQL.{port}"));
+        let bind_addr = format!("unix:{}", sock.to_str().unwrap());
+        let pg_config = format!("host={} port={port}", dir.path().to_str().unwrap());
+        let cancellation = CancellationToken::new();
+
+        let server_cancellation = cancellation.clone();
+        tokio::spawn(async move {
+            pg_serve(
+                &bind_addr,
+                socket2::TcpKeepalive::new(),
+                Arc::new(MockSessionManager {}),
+                ConnectionContext {
+                    tls_config: None,
+                    redact_sql_option_keywords: None,
+                    message_memory_manager: MessageMemoryManager::new(u64::MAX, u64::MAX, u64::MAX)
+                        .into(),
+                    stream_flush_threshold_bytes: 64 * 1024,
+                },
+                server_cancellation,
+            )
+            .await
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let (client, connection) = tokio_postgres::connect(&pg_config, NoTls).await.unwrap();
+        let connection_handle = tokio::spawn(connection);
+        let params: &[&str] = &[];
+        let rows = client
+            .query_raw(STREAMING_TEST_QUERY, params)
+            .await
+            .unwrap();
+        futures::pin_mut!(rows);
+
+        let first_row = tokio::time::timeout(Duration::from_secs(5), rows.next())
+            .await
+            .expect("first row should be sent before the result stream finishes")
+            .unwrap()
+            .unwrap();
+        assert_eq!(first_row.get::<_, &str>(0).len(), 128 * 1024);
+
+        drop(client);
+        cancellation.cancel();
+        connection_handle.abort();
+    }
+
     mod jwt_validation_tests {
         use std::collections::HashMap;
         use std::time::{SystemTime, UNIX_EPOCH};
@@ -668,7 +768,7 @@ mod tests {
         use rsa::{RsaPrivateKey, RsaPublicKey};
         use serde_json::json;
 
-        use crate::pg_server::{Jwk, Jwks, validate_jwt_with_jwks};
+        use crate::pg_server::{Jwk, Jwks, resolve_oauth_audience, validate_jwt_with_jwks};
 
         fn create_test_rsa_keys() -> (RsaPrivateKey, RsaPublicKey) {
             let mut rng = rand::thread_rng();
@@ -685,10 +785,11 @@ mod tests {
 
             Jwks {
                 keys: vec![Jwk {
-                    kid: kid.to_owned(),
+                    kty: Some("RSA".to_owned()),
+                    kid: Some(kid.to_owned()),
                     alg: alg.map(ToOwned::to_owned),
-                    n,
-                    e,
+                    n: Some(n),
+                    e: Some(e),
                 }],
             }
         }
@@ -766,12 +867,53 @@ mod tests {
                 &jwt,
                 &jwks,
                 "https://test-issuer.com",
-                "test-cluster-id",
+                "urn:risingwave:cluster:test-cluster-id",
                 &metadata,
             );
 
             let error = result.unwrap_err();
             assert!(error.to_string().contains("InvalidAudience"));
+        }
+
+        #[test]
+        fn test_jwt_with_configured_audience() {
+            let (private_key, public_key) = create_test_rsa_keys();
+            let jwks = create_test_jwks(&public_key, "test-kid", Some("RS256"));
+
+            let mut additional_claims = HashMap::new();
+            additional_claims.insert("aud".to_owned(), json!(["urn:sn:cloud:o-for6u"]));
+            let jwt = create_jwt_token(
+                &private_key,
+                "test-kid",
+                Algorithm::RS256,
+                "https://test-issuer.com",
+                None,
+                get_future_timestamp(),
+                additional_claims,
+            );
+
+            let result = validate_jwt_with_jwks(
+                &jwt,
+                &jwks,
+                "https://test-issuer.com",
+                "urn:sn:cloud:o-for6u",
+                &HashMap::new(),
+            );
+
+            assert!(result.unwrap());
+        }
+
+        #[test]
+        fn test_empty_configured_audience() {
+            let error =
+                resolve_oauth_audience(Some("  ".to_owned()), "test-cluster-id").unwrap_err();
+            assert!(error.to_string().contains("cannot be empty"));
+        }
+
+        #[test]
+        fn test_default_audience_from_cluster_id() {
+            let audience = resolve_oauth_audience(None, "test-cluster-id").unwrap();
+            assert_eq!(audience, "urn:risingwave:cluster:test-cluster-id");
         }
 
         #[test]
@@ -795,7 +937,7 @@ mod tests {
                 &jwt,
                 &jwks,
                 "https://test-issuer.com",
-                "test-cluster-id",
+                "urn:risingwave:cluster:test-cluster-id",
                 &metadata,
             );
 
@@ -824,7 +966,7 @@ mod tests {
                 &jwt,
                 &jwks,
                 "https://test-issuer.com",
-                "test-cluster-id",
+                "urn:risingwave:cluster:test-cluster-id",
                 &metadata,
             );
 
@@ -853,7 +995,7 @@ mod tests {
                 &jwt,
                 &jwks,
                 "https://test-issuer.com",
-                "test-cluster-id",
+                "urn:risingwave:cluster:test-cluster-id",
                 &metadata,
             );
 
@@ -861,7 +1003,38 @@ mod tests {
             assert!(
                 error
                     .to_string()
-                    .contains("No matching key found in JWKS for kid: 'missing-kid'")
+                    .contains("No compatible RSA key found in JWKS for kid: 'missing-kid'")
+            );
+        }
+
+        #[test]
+        fn test_jwt_with_empty_jwks_reports_no_matching_key() {
+            let (private_key, _) = create_test_rsa_keys();
+            let jwks = Jwks { keys: vec![] };
+
+            let jwt = create_jwt_token(
+                &private_key,
+                "missing-kid",
+                Algorithm::RS256,
+                "https://test-issuer.com",
+                Some("urn:risingwave:cluster:test-cluster-id"),
+                get_future_timestamp(),
+                HashMap::new(),
+            );
+
+            let result = validate_jwt_with_jwks(
+                &jwt,
+                &jwks,
+                "https://test-issuer.com",
+                "urn:risingwave:cluster:test-cluster-id",
+                &HashMap::new(),
+            );
+
+            let error = result.unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("No compatible RSA key found in JWKS for kid: 'missing-kid'")
             );
         }
 
@@ -886,7 +1059,7 @@ mod tests {
                 &jwt,
                 &jwks,
                 "https://test-issuer.com",
-                "test-cluster-id",
+                "urn:risingwave:cluster:test-cluster-id",
                 &metadata,
             );
 
@@ -917,7 +1090,7 @@ mod tests {
                 &jwt,
                 &jwks,
                 "https://test-issuer.com",
-                "test-cluster-id",
+                "urn:risingwave:cluster:test-cluster-id",
                 &metadata,
             );
 
@@ -953,7 +1126,7 @@ mod tests {
                 &jwt,
                 &jwks,
                 "https://test-issuer.com",
-                "test-cluster-id",
+                "urn:risingwave:cluster:test-cluster-id",
                 &metadata,
             );
 
@@ -987,7 +1160,7 @@ mod tests {
                 &jwt,
                 &jwks,
                 "https://test-issuer.com",
-                "test-cluster-id",
+                "urn:risingwave:cluster:test-cluster-id",
                 &metadata,
             );
 
@@ -1017,7 +1190,104 @@ mod tests {
                 &jwt,
                 &jwks,
                 "https://test-issuer.com",
-                "test-cluster-id",
+                "urn:risingwave:cluster:test-cluster-id",
+                &HashMap::new(),
+            );
+
+            assert!(result.unwrap());
+        }
+
+        #[test]
+        fn test_jwt_with_mixed_jwks_ignores_non_matching_ec_key() {
+            let (private_key, public_key) = create_test_rsa_keys();
+            let mut jwks = create_test_jwks(&public_key, "rsa-kid", Some("RS256"));
+            jwks.keys.push(Jwk {
+                kty: Some("EC".to_owned()),
+                kid: Some("ec-kid".to_owned()),
+                alg: Some("ES256".to_owned()),
+                n: None,
+                e: None,
+            });
+
+            let jwt = create_jwt_token(
+                &private_key,
+                "rsa-kid",
+                Algorithm::RS256,
+                "https://test-issuer.com",
+                Some("urn:risingwave:cluster:test-cluster-id"),
+                get_future_timestamp(),
+                HashMap::new(),
+            );
+
+            let result = validate_jwt_with_jwks(
+                &jwt,
+                &jwks,
+                "https://test-issuer.com",
+                "urn:risingwave:cluster:test-cluster-id",
+                &HashMap::new(),
+            );
+
+            assert!(result.unwrap());
+        }
+
+        #[test]
+        fn test_jwks_deserializes_ec_key_without_kid() {
+            let jwks: Jwks = serde_json::from_value(json!({
+                "keys": [
+                    {
+                        "alg": "ES256",
+                        "kty": "EC",
+                        "crv": "P-256",
+                        "x": "x-coordinate",
+                        "y": "y-coordinate"
+                    },
+                    {
+                        "kid": "rsa-kid",
+                        "alg": "RS256",
+                        "kty": "RSA",
+                        "n": "modulus",
+                        "e": "AQAB"
+                    }
+                ]
+            }))
+            .unwrap();
+
+            assert_eq!(jwks.keys.len(), 2);
+            assert!(jwks.keys[0].kid.is_none());
+            assert_eq!(jwks.keys[1].kid.as_deref(), Some("rsa-kid"));
+            assert_eq!(jwks.keys[1].n.as_deref(), Some("modulus"));
+        }
+
+        #[test]
+        fn test_jwt_uses_compatible_rsa_key_when_ec_key_has_same_kid() {
+            let (private_key, public_key) = create_test_rsa_keys();
+            let mut jwks = create_test_jwks(&public_key, "shared-kid", Some("RS256"));
+            jwks.keys.insert(
+                0,
+                Jwk {
+                    kty: Some("EC".to_owned()),
+                    kid: Some("shared-kid".to_owned()),
+                    alg: Some("ES256".to_owned()),
+                    n: None,
+                    e: None,
+                },
+            );
+
+            let jwt = create_jwt_token(
+                &private_key,
+                "shared-kid",
+                Algorithm::RS256,
+                "https://test-issuer.com",
+                Some("urn:risingwave:cluster:test-cluster-id"),
+                get_future_timestamp(),
+                HashMap::new(),
+            );
+
+            let result = validate_jwt_with_jwks(
+                &jwt,
+                &jwks,
+                "https://test-issuer.com",
+                "urn:risingwave:cluster:test-cluster-id",
                 &HashMap::new(),
             );
 
@@ -1051,7 +1321,7 @@ mod tests {
                 &jwt,
                 &jwks,
                 "https://test-issuer.com",
-                "test-cluster-id",
+                "urn:risingwave:cluster:test-cluster-id",
                 &HashMap::new(),
             );
 
@@ -1083,14 +1353,14 @@ mod tests {
                 &jwt,
                 &jwks,
                 "https://test-issuer.com",
-                "test-cluster-id",
+                "urn:risingwave:cluster:test-cluster-id",
                 &HashMap::new(),
             );
 
             let error = result.unwrap_err();
             assert_eq!(
                 error.to_string(),
-                "alg in jwt header does not match with alg in jwk"
+                "No compatible RSA key found in JWKS for kid: 'test-kid'"
             );
         }
     }

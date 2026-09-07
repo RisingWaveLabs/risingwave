@@ -25,6 +25,34 @@
     └─StreamProject { exprs: [t_since_sink_as_select.v1, (t_since_sink_as_select.v2 + 1:Int32) as $expr1] }
       └─StreamFilter [upsert] { predicate: (t_since_sink_as_select.v2 > 10:Int32) }
         └─StreamTableScan { table: t_since_sink_as_select, columns: [t_since_sink_as_select.v1, t_since_sink_as_select.v2], stream_scan_type: SnapshotBackfill, stream_key: [t_since_sink_as_select.v1], pk: [v1], dist: UpstreamHashShard(t_since_sink_as_select.v1) }
+- name: reject upsert sink primary-key mismatch by default
+  sql: |
+    create table t_reject_unsafe_upsert_sink (id int primary key, value int);
+    explain (verbose) create sink s_reject_unsafe_upsert_sink as
+    select id, value from t_reject_unsafe_upsert_sink
+    with (
+      connector = 'blackhole',
+      type = 'upsert',
+      primary_key = 'value',
+      snapshot = 'false'
+    );
+  planner_error: 'Bind error: When sinking from an upsert stream, the downstream primary key must be the same as or a subset of the one derived from the stream.'
+- name: unsafe allow upsert sink primary-key mismatch
+  sql: |
+    set streaming_unsafe_allow_upsert_sink_pk_mismatch = true;
+    create table t_unsafe_upsert_sink (id int primary key, value int);
+    explain (verbose) create sink s_unsafe_upsert_sink as
+    select id, value from t_unsafe_upsert_sink
+    with (
+      connector = 'blackhole',
+      type = 'upsert',
+      primary_key = 'value',
+      snapshot = 'false'
+    );
+  explain_output: |
+    StreamSink { type: upsert, columns: [id, value], downstream_pk: [t_unsafe_upsert_sink.value] }
+    └─StreamExchange { dist: HashShard(t_unsafe_upsert_sink.value) }
+      └─StreamTableScan { table: t_unsafe_upsert_sink, columns: [t_unsafe_upsert_sink.id, t_unsafe_upsert_sink.value], stream_scan_type: UpstreamOnly, stream_key: [t_unsafe_upsert_sink.id], pk: [id], dist: UpstreamHashShard(t_unsafe_upsert_sink.id) }
 - id: create_upsert_jdbc_sink_with_downstream_pk1
   sql: |
     create table t1 (v1 int, v2 double precision, v3 varchar, v4 bigint, v5 decimal, primary key (v3,v4));
@@ -473,3 +501,29 @@
     └─StreamProject { exprs: [t.id, (t.v1 + 1:Int32) as $expr1] }
       └─StreamFilter [upsert] { predicate: (t.v2 > 10:Int32) }
         └─StreamTableScan { table: t, columns: [t.id, t.v1, t.v2], stream_scan_type: UpstreamOnly, stream_key: [t.id], pk: [id], dist: UpstreamHashShard(t.id) }
+- name: materialize impure sink select-list expressions by default
+  sql: |
+    create table t_impure_sink (id int, value int);
+    create materialized view mv_impure_sink as select * from t_impure_sink;
+    explain create sink s_impure_sink as
+    select gen_random_uuid() as event_id, clock_timestamp() as event_ts, id, value
+    from mv_impure_sink
+    with (connector = 'blackhole');
+  explain_output: |
+    StreamSink { type: upsert, columns: [event_id, event_ts, id, value, mv_impure_sink.t_impure_sink._row_id(hidden)] }
+    └─StreamProject { exprs: [$expr1, $expr2, mv_impure_sink.id, mv_impure_sink.value, mv_impure_sink.t_impure_sink._row_id] }
+      └─StreamMaterializedExprs { exprs: [GenRandomUuid as $expr1, ClockTimestamp as $expr2] }
+        └─StreamTableScan { table: mv_impure_sink, columns: [id, value, t_impure_sink._row_id] }
+- name: skip impure sink select-list materialization with unsafe session option
+  sql: |
+    set streaming_unsafe_allow_unmaterialized_impure_expr = true;
+    create table t_impure_sink (id int, value int);
+    create materialized view mv_impure_sink as select * from t_impure_sink;
+    explain create sink s_impure_sink as
+    select gen_random_uuid() as event_id, clock_timestamp() as event_ts, id, value
+    from mv_impure_sink
+    with (connector = 'blackhole');
+  explain_output: |
+    StreamSink { type: upsert, columns: [event_id, event_ts, id, value, mv_impure_sink.t_impure_sink._row_id(hidden)] }
+    └─StreamProject { exprs: [GenRandomUuid as $expr1, ClockTimestamp as $expr2, mv_impure_sink.id, mv_impure_sink.value, mv_impure_sink.t_impure_sink._row_id] }
+      └─StreamTableScan { table: mv_impure_sink, columns: [id, value, t_impure_sink._row_id] }

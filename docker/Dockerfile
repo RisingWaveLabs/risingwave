@@ -16,7 +16,8 @@ ENV NVM_DIR /root/.nvm
 ENV NODE_VERSION 20.11.1
 RUN curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash \
   && . $NVM_DIR/nvm.sh \
-  && nvm install $NODE_VERSION
+  && nvm install $NODE_VERSION \
+  && npm install --global pnpm@10.14.0
 ENV PATH $NVM_DIR/versions/node/v$NODE_VERSION/bin:$PATH
 
 SHELL ["/bin/bash", "-c"]

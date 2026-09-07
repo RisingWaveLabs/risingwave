@@ -1,4 +1,4 @@
-// Copyright 2025 RisingWave Labs
+// Copyright 2023 RisingWave Labs
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -204,7 +204,7 @@ pub async fn rpc_serve_with_store(
                 .run_once(lease_interval_secs as i64, election_shutdown_rx.clone())
                 .await
             {
-                tracing::error!(error = %e.as_report(), "election error happened");
+                tracing::error!(error = %e.as_report(), "an election error occurred");
             }
             // Leader lost, shutdown the service.
             shutdown.cancel();
@@ -235,7 +235,7 @@ pub async fn rpc_serve_with_store(
 
                 res = is_leader_watcher.changed() => {
                     if res.is_err() {
-                        tracing::error!("leader watcher recv failed");
+                        tracing::error!("failed to receive a leader watcher update");
                     }
                 }
             }
@@ -410,7 +410,7 @@ pub async fn start_service_as_election_leader(
     let trace_srv = otlp_embedded::TraceServiceImpl::new(trace_state.clone());
 
     let (barrier_scheduler, scheduled_barriers) =
-        BarrierScheduler::new_pair(hummock_manager.clone(), meta_metrics.clone());
+        BarrierScheduler::new_pair(hummock_manager.clone());
     tracing::info!("BarrierScheduler started");
 
     // Initialize services.
@@ -465,6 +465,15 @@ pub async fn start_service_as_election_leader(
     // TODO(shutdown): remove this as there's no need to gracefully shutdown some of these sub-tasks.
     let mut sub_tasks = vec![shutdown_handle];
 
+    // Register before the barrier manager starts recovery. Dirty creating-job cleanup emits local
+    // serving mapping deletes, which must not be dropped during bootstrap.
+    sub_tasks.push(serving::start_serving_vnode_mapping_worker(
+        env.notification_manager_ref(),
+        metadata_manager.clone(),
+        serving_vnode_mapping.clone(),
+        env.session_params_manager_impl_ref(),
+    ));
+
     let iceberg_pk_index_sink_manager =
         IcebergPkIndexSinkManager::new(env.meta_store_ref().conn.clone());
     tracing::info!("IcebergPkIndexSinkManager started");
@@ -510,9 +519,11 @@ pub async fn start_service_as_election_leader(
         env.clone(),
         metadata_manager.clone(),
         hummock_manager.clone(),
+        serving_vnode_mapping.clone(),
         source_manager.clone(),
         sink_manager.clone(),
         iceberg_pk_index_sink_manager.clone(),
+        iceberg_compaction_mgr.clone(),
         scale_controller.clone(),
         barrier_scheduler.clone(),
         refresh_manager.clone(),
@@ -536,6 +547,7 @@ pub async fn start_service_as_election_leader(
             hummock_manager.clone(),
             source_manager.clone(),
             refresh_manager.clone(),
+            iceberg_compaction_mgr.clone(),
             scale_controller.clone(),
         )
         .unwrap(),
@@ -596,6 +608,7 @@ pub async fn start_service_as_election_leader(
     let telemetry_srv = TelemetryInfoServiceImpl::new(env.meta_store());
     let system_params_srv = SystemParamsServiceImpl::new(
         env.system_params_manager_impl_ref(),
+        metadata_manager.clone(),
         env.opts.license_key_path.is_some(),
     );
     let session_params_srv = SessionParamsServiceImpl::new(env.session_params_manager_impl_ref());
@@ -657,17 +670,40 @@ pub async fn start_service_as_election_leader(
         backup_manager.clone(),
         &env.opts,
         {
-            let barrier_manager = barrier_manager.clone();
+            let catalog_controller = metadata_manager.catalog_controller.clone();
             Box::new(move || {
-                let barrier_manager = barrier_manager.clone();
+                let catalog_controller = catalog_controller.clone();
                 Box::pin(async move {
-                    barrier_manager.may_snapshot_backfilling_job().await.unwrap_or_else(|e| {
-                        tracing::warn!(err = %e.as_report(), "failed to check having snapshot backfilling jobs. pause vacuum time travel");
-                        true
-                    })
+                    catalog_controller
+                        .get_table_change_log_truncate_info()
+                        .await
+                        .map(Some)
+                        .unwrap_or_else(|e| {
+                            tracing::warn!(err = %e.as_report(), "failed to collect table change log retention metadata");
+                            None
+                        })
                 })
             })
-        }
+        },
+        {
+            let catalog_controller = metadata_manager.catalog_controller.clone();
+            Box::new(move || {
+                let catalog_controller = catalog_controller.clone();
+                Box::pin(async move {
+                    catalog_controller
+                        .get_pinned_snapshot_epochs()
+                        .await
+                        .map(Some)
+                        .unwrap_or_else(|e| {
+                            tracing::warn!(
+                                err = %e.as_report(),
+                                "failed to collect pinned snapshot epochs; pausing time-travel vacuum",
+                            );
+                            None
+                        })
+                })
+            })
+        },
     ));
     sub_tasks.push(start_worker_info_monitor(
         metadata_manager.clone(),
@@ -697,13 +733,6 @@ pub async fn start_service_as_election_leader(
     sub_tasks.extend(IcebergCompactionManager::iceberg_compaction_event_loop(
         iceberg_compaction_mgr.clone(),
         iceberg_compactor_event_rx,
-    ));
-
-    sub_tasks.push(serving::start_serving_vnode_mapping_worker(
-        env.notification_manager_ref(),
-        metadata_manager.clone(),
-        serving_vnode_mapping,
-        env.session_params_manager_impl_ref(),
     ));
 
     {

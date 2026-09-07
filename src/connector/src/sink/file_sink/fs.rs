@@ -54,6 +54,8 @@ impl UnknownFields for FsConfig {
     }
 }
 
+crate::impl_sink_unknown_fields!(FsConfig);
+
 pub const FS_SINK: &str = "fs";
 
 impl<S: OpendalSinkBackend> FileSink<S> {
@@ -62,8 +64,7 @@ impl<S: OpendalSinkBackend> FileSink<S> {
         let builder = Fs::default().root(&config.common.path);
         let operator: Operator = Operator::new(builder)?
             .layer(LoggingLayer::default())
-            .layer(RetryLayer::default())
-            .finish();
+            .layer(RetryLayer::default());
         Ok(operator)
     }
 }

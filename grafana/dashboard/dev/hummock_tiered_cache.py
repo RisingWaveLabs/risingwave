@@ -251,7 +251,7 @@ def _(outer_panels: Panels):
                     "",
                     [
                         panels.target(
-                            f"sum(rate({metric('refill_bytes')}[$__rate_interval])) by (foyer, op, {NODE_LABEL})",
+                            f"sum(rate({metric('refill_bytes')}[$__rate_interval])) by (type, op, {NODE_LABEL})",
                             "{{type}} file cache - {{op}} @ {{%s}}" % NODE_LABEL,
                         ),
                     ],
@@ -262,9 +262,9 @@ def _(outer_panels: Panels):
                     [
                         *quantile(
                             lambda quantile, legend: panels.target(
-                                f"histogram_quantile({quantile}, sum(rate({metric('refill_duration_bucket')}[$__rate_interval])) by (le, foyer, op, {NODE_LABEL}))",
+                                f"histogram_quantile({quantile}, sum(rate({metric('refill_duration_bucket')}[$__rate_interval])) by (le, type, op, {NODE_LABEL}))",
                                 f"p{legend}"
-                                + " - {{foyer}} cache refill - {{op}} @ {{%s}}"
+                                + " - {{type}} cache refill - {{op}} @ {{%s}}"
                                 % NODE_LABEL,
                             ),
                             [50, 90, 99, "max"],

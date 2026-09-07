@@ -127,6 +127,33 @@ pub mod vacuum;
 pub mod variable;
 mod wait;
 
+fn rate_limit_type_to_throttle_type(
+    rate_limit_type: AlterRateLimitType,
+) -> risingwave_pb::common::PbThrottleType {
+    match rate_limit_type {
+        AlterRateLimitType::Source => risingwave_pb::common::PbThrottleType::Source,
+        AlterRateLimitType::Backfill => risingwave_pb::common::PbThrottleType::Backfill,
+        AlterRateLimitType::Dml => risingwave_pb::common::PbThrottleType::Dml,
+        AlterRateLimitType::Sink => risingwave_pb::common::PbThrottleType::Sink,
+    }
+}
+
+fn ensure_rate_limit_type_supported(
+    rate_limit: &AlterRateLimit,
+    supported_types: &[AlterRateLimitType],
+    target: &str,
+) -> Result<()> {
+    if supported_types.contains(&rate_limit.rate_limit_type) {
+        Ok(())
+    } else {
+        Err(ErrorCode::InvalidInputSyntax(format!(
+            "ALTER {target} SET {} is not supported",
+            rate_limit.rate_limit_type
+        ))
+        .into())
+    }
+}
+
 pub use alter_table_column::{
     fetch_table_catalog_for_alter, get_new_table_definition_for_cdc_table, get_replace_table_plan,
 };
@@ -924,13 +951,22 @@ pub async fn handle(
                 ))
                 .await
             }
-            AlterTableOperation::SetSourceRateLimit { rate_limit } => {
+            AlterTableOperation::AlterRateLimit(rate_limit) => {
+                ensure_rate_limit_type_supported(
+                    &rate_limit,
+                    &[
+                        AlterRateLimitType::Source,
+                        AlterRateLimitType::Backfill,
+                        AlterRateLimitType::Dml,
+                    ],
+                    "TABLE",
+                )?;
                 alter_streaming_rate_limit::handle_alter_streaming_rate_limit(
                     handler_args,
                     PbThrottleTarget::Table,
-                    risingwave_pb::common::PbThrottleType::Source,
+                    rate_limit_type_to_throttle_type(rate_limit.rate_limit_type),
                     name,
-                    rate_limit,
+                    rate_limit.rate_limit,
                 )
                 .await
             }
@@ -940,16 +976,6 @@ pub async fn handle(
                         handler_args,
                         name,
                     ),
-                )
-                .await
-            }
-            AlterTableOperation::SetDmlRateLimit { rate_limit } => {
-                alter_streaming_rate_limit::handle_alter_streaming_rate_limit(
-                    handler_args,
-                    PbThrottleTarget::Table,
-                    risingwave_pb::common::PbThrottleType::Dml,
-                    name,
-                    rate_limit,
                 )
                 .await
             }
@@ -968,16 +994,6 @@ pub async fn handle(
                     name,
                     keys,
                     StatementType::ALTER_TABLE,
-                )
-                .await
-            }
-            AlterTableOperation::SetBackfillRateLimit { rate_limit } => {
-                alter_streaming_rate_limit::handle_alter_streaming_rate_limit(
-                    handler_args,
-                    PbThrottleTarget::Table,
-                    risingwave_pb::common::PbThrottleType::Backfill,
-                    name,
-                    rate_limit,
                 )
                 .await
             }
@@ -1158,16 +1174,21 @@ pub async fn handle(
                     )
                     .await
                 }
-                AlterViewOperation::SetBackfillRateLimit { rate_limit } => {
+                AlterViewOperation::AlterRateLimit(rate_limit) => {
+                    ensure_rate_limit_type_supported(
+                        &rate_limit,
+                        &[AlterRateLimitType::Backfill],
+                        "MATERIALIZED VIEW",
+                    )?;
                     if !materialized {
                         bail_not_implemented!("ALTER VIEW SET BACKFILL RATE LIMIT");
                     }
                     alter_streaming_rate_limit::handle_alter_streaming_rate_limit(
                         handler_args,
                         PbThrottleTarget::Mv,
-                        risingwave_pb::common::PbThrottleType::Backfill,
+                        rate_limit_type_to_throttle_type(rate_limit.rate_limit_type),
                         name,
-                        rate_limit,
+                        rate_limit.rate_limit,
                     )
                     .await
                 }
@@ -1318,23 +1339,18 @@ pub async fn handle(
                 )
                 .await
             }
-            AlterSinkOperation::SetSinkRateLimit { rate_limit } => {
+            AlterSinkOperation::AlterRateLimit(rate_limit) => {
+                ensure_rate_limit_type_supported(
+                    &rate_limit,
+                    &[AlterRateLimitType::Sink, AlterRateLimitType::Backfill],
+                    "SINK",
+                )?;
                 alter_streaming_rate_limit::handle_alter_streaming_rate_limit(
                     handler_args,
                     PbThrottleTarget::Sink,
-                    risingwave_pb::common::PbThrottleType::Sink,
+                    rate_limit_type_to_throttle_type(rate_limit.rate_limit_type),
                     name,
-                    rate_limit,
-                )
-                .await
-            }
-            AlterSinkOperation::SetBackfillRateLimit { rate_limit } => {
-                alter_streaming_rate_limit::handle_alter_streaming_rate_limit(
-                    handler_args,
-                    PbThrottleTarget::Sink,
-                    risingwave_pb::common::PbThrottleType::Backfill,
-                    name,
-                    rate_limit,
+                    rate_limit.rate_limit,
                 )
                 .await
             }
@@ -1434,13 +1450,18 @@ pub async fn handle(
             AlterSourceOperation::RefreshSchema => {
                 alter_source_with_sr::handler_refresh_schema(handler_args, name).await
             }
-            AlterSourceOperation::SetSourceRateLimit { rate_limit } => {
+            AlterSourceOperation::AlterRateLimit(rate_limit) => {
+                ensure_rate_limit_type_supported(
+                    &rate_limit,
+                    &[AlterRateLimitType::Source],
+                    "SOURCE",
+                )?;
                 alter_streaming_rate_limit::handle_alter_streaming_rate_limit(
                     handler_args,
                     PbThrottleTarget::Source,
-                    risingwave_pb::common::PbThrottleType::Source,
+                    rate_limit_type_to_throttle_type(rate_limit.rate_limit_type),
                     name,
-                    rate_limit,
+                    rate_limit.rate_limit,
                 )
                 .await
             }
@@ -1560,6 +1581,9 @@ pub async fn handle(
         Statement::AlterSystem { param, value } => {
             alter_system::handle_alter_system(handler_args, param, value).await
         }
+        Statement::AlterSystemClearFileCache { cache_type } => {
+            alter_system::handle_clear_file_cache(handler_args, cache_type).await
+        }
         Statement::AlterSecret { name, operation } => match operation {
             AlterSecretOperation::ChangeCredential {
                 with_options,
@@ -1583,10 +1607,10 @@ pub async fn handle(
             fragment_ids,
             operation,
         } => match operation {
-            AlterFragmentOperation::AlterBackfillRateLimit { rate_limit } => {
+            AlterFragmentOperation::AlterRateLimit(rate_limit) => {
                 let [fragment_id] = fragment_ids.as_slice() else {
                     return Err(ErrorCode::InvalidInputSyntax(
-                        "ALTER FRAGMENT ... SET RATE_LIMIT supports exactly one fragment id"
+                        "ALTER FRAGMENT ... SET rate limit supports exactly one fragment id"
                             .to_owned(),
                     )
                     .into());
@@ -1594,9 +1618,9 @@ pub async fn handle(
                 alter_streaming_rate_limit::handle_alter_streaming_rate_limit_by_id(
                     &handler_args.session,
                     PbThrottleTarget::Fragment,
-                    risingwave_pb::common::PbThrottleType::Backfill,
+                    rate_limit_type_to_throttle_type(rate_limit.rate_limit_type),
                     *fragment_id,
-                    rate_limit,
+                    rate_limit.rate_limit,
                     StatementType::SET_VARIABLE,
                 )
                 .await
@@ -1760,13 +1784,6 @@ fn check_ban_alter_table_operation_for_iceberg_engine_table(
                 table_name
             );
         }
-        AlterTableOperation::SetSchema { .. } => {
-            bail!(
-                "ALTER TABLE SET SCHEMA is not supported for iceberg table: {}.{}",
-                schema_name,
-                table_name
-            );
-        }
         AlterTableOperation::RefreshSchema => {
             bail!(
                 "ALTER TABLE REFRESH SCHEMA is not supported for iceberg table: {}.{}",
@@ -1774,7 +1791,9 @@ fn check_ban_alter_table_operation_for_iceberg_engine_table(
                 table_name
             );
         }
-        AlterTableOperation::SetSourceRateLimit { .. } => {
+        AlterTableOperation::AlterRateLimit(rate_limit)
+            if rate_limit.rate_limit_type == AlterRateLimitType::Source =>
+        {
             bail!(
                 "ALTER TABLE SET SOURCE RATE LIMIT is not supported for iceberg table: {}.{}",
                 schema_name,

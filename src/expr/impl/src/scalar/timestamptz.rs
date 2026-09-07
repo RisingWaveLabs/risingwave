@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use chrono::LocalResult;
+use chrono::{LocalResult, Utc};
 use chrono_tz::Tz;
 use num_traits::CheckedNeg;
 use risingwave_common::types::{
@@ -30,6 +30,15 @@ pub fn time_zone_err(inner_err: String) -> ExprError {
     }
 }
 
+/// Returns the wall-clock timestamp at evaluation time.
+///
+/// `volatile` tells the function registry this result can change across evaluations with the same
+/// inputs, so stream planning treats it as an impure expression.
+#[function("clock_timestamp() -> timestamptz", volatile)]
+fn clock_timestamp() -> Timestamptz {
+    Utc::now().into()
+}
+
 #[function("sec_to_timestamptz(float8) -> timestamptz")]
 pub fn f64_sec_to_timestamptz(elem: F64) -> Result<Timestamptz> {
     // TODO(#4515): handle +/- infinity
@@ -37,7 +46,7 @@ pub fn f64_sec_to_timestamptz(elem: F64) -> Result<Timestamptz> {
         .into_ordered()
         .try_into()
         .map_err(|_| ExprError::NumericOutOfRange)?;
-    Ok(Timestamptz::from_micros(micros))
+    Timestamptz::from_micros(micros).ok_or(ExprError::NumericOutOfRange)
 }
 
 #[function("at_time_zone(timestamptz, varchar) -> timestamp")]
@@ -84,7 +93,7 @@ pub fn timestamp_at_time_zone_internal(input: Timestamp, time_zone: Tz) -> Resul
         LocalResult::Ambiguous(_, latest) => latest,
     };
     let usec = instant_local.timestamp_micros();
-    Ok(Timestamptz::from_micros(usec))
+    Ok(Timestamptz::from_micros_uncheck(usec))
 }
 
 #[function("cast_with_time_zone(timestamptz, varchar) -> varchar")]
@@ -205,7 +214,7 @@ fn timestamptz_interval_quantitative(
     }
     let delta_usecs = r.usecs();
     let usecs = f(l.timestamp_micros(), delta_usecs).ok_or(ExprError::NumericOutOfRange)?;
-    Ok(Timestamptz::from_micros(usecs))
+    Timestamptz::from_micros(usecs).ok_or(ExprError::NumericOutOfRange)
 }
 
 #[cfg(test)]

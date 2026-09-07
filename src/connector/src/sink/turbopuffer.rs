@@ -66,6 +66,8 @@ pub struct TurbopufferConfig {
     pub distance_metric: Option<String>,
     #[serde_as(as = "Option<DisplayFromStr>")]
     pub disable_backpressure: Option<bool>,
+    #[serde_as(as = "Option<DisplayFromStr>")]
+    pub num_shards: Option<usize>,
     pub full_text_search_columns: Option<String>,
     pub filterable_columns: Option<String>,
     #[serde(default = "default_write_batch_size")]
@@ -77,7 +79,12 @@ pub struct TurbopufferConfig {
     #[with_option(allow_alter_on_fly)]
     pub max_linger_second: u64,
     pub r#type: String, // accept "append-only" or "upsert"
+
+    #[serde(flatten)]
+    pub unknown_fields: std::collections::HashMap<String, String>,
 }
+
+crate::impl_sink_unknown_fields!(TurbopufferConfig);
 
 impl EnforceSecret for TurbopufferConfig {
     const ENFORCE_SECRET_PROPERTIES: phf::Set<&'static str> = phf::phf_set! {
@@ -99,6 +106,11 @@ impl TurbopufferConfig {
         if config.max_linger_second == 0 {
             return Err(SinkError::Config(anyhow!(
                 "`max_linger_second` must be greater than 0"
+            )));
+        }
+        if config.num_shards == Some(0) {
+            return Err(SinkError::Config(anyhow!(
+                "`num_shards` must be greater than 0"
             )));
         }
         Ok(config)
@@ -255,6 +267,8 @@ impl Sink for TurbopufferSink {
 
     const SINK_NAME: &'static str = TURBOPUFFER_SINK;
 
+    crate::impl_validate_sink_unknown_fields!();
+
     async fn validate(&self) -> Result<()> {
         Ok(())
     }
@@ -410,6 +424,7 @@ pub struct TurbopufferSinkWriter {
     base_url: String,
     distance_metric: Option<String>,
     disable_backpressure: Option<bool>,
+    num_shards: Option<usize>,
     schema: Value,
     pk_index: usize,
     namespace: TurbopufferNamespace,
@@ -459,6 +474,7 @@ impl TurbopufferSinkWriter {
             base_url,
             distance_metric: config.distance_metric,
             disable_backpressure: config.disable_backpressure,
+            num_shards: config.num_shards,
             schema: generated_schema,
             pk_index,
             namespace,
@@ -541,6 +557,14 @@ impl TurbopufferSinkWriter {
                 "distance_metric".to_owned(),
                 Value::String(distance_metric.clone()),
             );
+        }
+        if let Some(num_shards) = self.num_shards {
+            let mut sharding = Map::new();
+            sharding.insert(
+                "num_shards".to_owned(),
+                serde_json::to_value(num_shards).expect("serialize num_shards"),
+            );
+            body.insert("sharding".to_owned(), Value::Object(sharding));
         }
         if !upsert_rows.is_empty() {
             if let Some(disable_backpressure) = self.disable_backpressure {
@@ -929,11 +953,13 @@ mod tests {
             api_key: "tpuf_test_key".to_owned(),
             distance_metric: None,
             disable_backpressure: Some(true),
+            num_shards: Some(8),
             full_text_search_columns: Some("body".to_owned()),
             filterable_columns: Some("*".to_owned()),
             write_batch_size: DEFAULT_WRITE_BATCH_SIZE,
             max_linger_second: DEFAULT_MAX_LINGER_SECOND,
             r#type: "upsert".to_owned(),
+            unknown_fields: Default::default(),
         };
         let mut writer = TurbopufferSinkWriter::new(
             config,
@@ -965,6 +991,7 @@ mod tests {
         let body = request.split("\r\n\r\n").nth(1).unwrap();
         let body: Value = serde_json::from_str(body).unwrap();
         assert_eq!(body["disable_backpressure"], json!(true));
+        assert_eq!(body["sharding"]["num_shards"], json!(8));
         assert_eq!(body["schema"]["body"]["type"], json!("string"));
         assert_eq!(body["schema"]["body"]["filterable"], json!(true));
         assert_eq!(body["schema"]["body"]["full_text_search"], json!(true));
@@ -986,6 +1013,7 @@ mod tests {
         .unwrap();
         assert_eq!(config.write_batch_size, DEFAULT_WRITE_BATCH_SIZE);
         assert_eq!(config.max_linger_second, DEFAULT_MAX_LINGER_SECOND);
+        assert_eq!(config.num_shards, None);
 
         let err = TurbopufferConfig::from_btreemap(BTreeMap::from([
             ("base_url".to_owned(), "http://127.0.0.1:0".to_owned()),
@@ -1006,6 +1034,16 @@ mod tests {
         ]))
         .unwrap_err();
         assert!(err.to_string().contains("max_linger_second"));
+
+        let err = TurbopufferConfig::from_btreemap(BTreeMap::from([
+            ("base_url".to_owned(), "http://127.0.0.1:0".to_owned()),
+            ("namespace".to_owned(), "ns".to_owned()),
+            ("api_key".to_owned(), "key".to_owned()),
+            ("type".to_owned(), "upsert".to_owned()),
+            ("num_shards".to_owned(), "0".to_owned()),
+        ]))
+        .unwrap_err();
+        assert!(err.to_string().contains("num_shards"));
     }
 
     #[test]
@@ -1037,11 +1075,13 @@ mod tests {
             api_key: "tpuf_test_key".to_owned(),
             distance_metric: None,
             disable_backpressure: None,
+            num_shards: None,
             full_text_search_columns: None,
             filterable_columns: None,
             write_batch_size: 2,
             max_linger_second: DEFAULT_MAX_LINGER_SECOND,
             r#type: "upsert".to_owned(),
+            unknown_fields: Default::default(),
         };
         let mut writer = TurbopufferSinkWriter::new(
             config,
@@ -1097,11 +1137,13 @@ mod tests {
             api_key: "tpuf_test_key".to_owned(),
             distance_metric: None,
             disable_backpressure: None,
+            num_shards: None,
             full_text_search_columns: None,
             filterable_columns: None,
             write_batch_size: DEFAULT_WRITE_BATCH_SIZE,
             max_linger_second: DEFAULT_MAX_LINGER_SECOND,
             r#type: "upsert".to_owned(),
+            unknown_fields: Default::default(),
         };
         let mut writer = TurbopufferSinkWriter::new(
             config,
@@ -1358,6 +1400,7 @@ mod tests {
             api_key: "tpuf_test_key".to_owned(),
             distance_metric: Some("cosine_distance".to_owned()),
             disable_backpressure: Some(true),
+            num_shards: Some(32),
             full_text_search_columns: Some(
                 "content,content_segments,user_name,user_identifier,title".to_owned(),
             ),
@@ -1365,6 +1408,7 @@ mod tests {
             write_batch_size: DEFAULT_WRITE_BATCH_SIZE,
             max_linger_second: DEFAULT_MAX_LINGER_SECOND,
             r#type: "upsert".to_owned(),
+            unknown_fields: Default::default(),
         };
         let writer = TurbopufferSinkWriter::new(
             config,
@@ -1397,9 +1441,9 @@ mod tests {
                 1_781_582_706,
                 123_456_789,
             ))),
-            Some(ScalarImpl::Timestamptz(Timestamptz::from_micros(
-                1_781_598_707_000_000,
-            ))),
+            Some(ScalarImpl::Timestamptz(
+                Timestamptz::from_micros(1_781_598_707_000_000).unwrap(),
+            )),
             Some(ScalarImpl::Int64(12345)),
             Some(ScalarImpl::Int64(67890)),
             Some(ScalarImpl::List(ListValue::from_iter([
@@ -1414,6 +1458,7 @@ mod tests {
 
         assert_eq!(body["distance_metric"], json!("cosine_distance"));
         assert_eq!(body["disable_backpressure"], json!(true));
+        assert_eq!(body["sharding"]["num_shards"], json!(32));
         assert_eq!(body["schema"], generated_schema);
         assert_eq!(body["upsert_rows"][0]["id"], json!("doc-1"));
         assert_eq!(body["upsert_rows"][0]["content"], json!("content text"));
@@ -1518,11 +1563,13 @@ mod tests {
             api_key: "tpuf_test_key".to_owned(),
             distance_metric: None,
             disable_backpressure: None,
+            num_shards: None,
             full_text_search_columns: None,
             filterable_columns: None,
             write_batch_size,
             max_linger_second: DEFAULT_MAX_LINGER_SECOND,
             r#type: "upsert".to_owned(),
+            unknown_fields: Default::default(),
         };
         TurbopufferSinkWriter::new(
             config,

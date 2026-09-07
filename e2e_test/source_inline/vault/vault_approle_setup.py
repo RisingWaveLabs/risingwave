@@ -92,7 +92,7 @@ def create_vault_approle(vault_addr, vault_token, role_name="test-role"):
         )
         secret_id_resp.raise_for_status()
         secret_id = secret_id_resp.json()["data"]["secret_id"]
-        print(f"Generated secret ID: {secret_id}")
+        print("Generated secret ID successfully")
     except requests.exceptions.RequestException as e:
         print(f"Failed to generate secret ID: {e}")
         sys.exit(1)
@@ -187,7 +187,6 @@ def main():
 
     print("✅ Setup completed successfully!")
     print(f"Role ID: {role_id}")
-    print(f"Secret ID: {secret_id}")
 
     # Export environment variables for potential use by other tests
     os.environ["VAULT_TEST_ROLE_ID"] = role_id

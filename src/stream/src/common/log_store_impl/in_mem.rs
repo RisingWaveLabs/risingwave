@@ -169,9 +169,9 @@ impl LogReader for BoundedInMemLogStoreReader {
     }
 
     async fn next_item(&mut self) -> LogStoreResult<(u64, LogStoreReadItem)> {
-        match self.item_rx.recv().await {
-            Some(item) => match self.epoch_progress {
-                Consuming(current_epoch) => match item {
+        match self.epoch_progress {
+            Consuming(current_epoch) => match self.item_rx.recv().await {
+                Some(item) => match item {
                     InMemLogStoreItem::StreamChunk(chunk) => {
                         let chunk_id = match self.latest_offset {
                             TruncateOffset::Chunk { epoch, chunk_id } => {
@@ -223,11 +223,9 @@ impl LogReader for BoundedInMemLogStoreReader {
                         ))
                     }
                 },
-                AwaitingTruncate { .. } => Err(anyhow!(
-                    "should not call next_item on checkpoint barrier for in-mem log store"
-                )),
+                None => Err(anyhow!("end of log stream")),
             },
-            None => Err(anyhow!("end of log stream")),
+            AwaitingTruncate { .. } => std::future::pending().await,
         }
     }
 

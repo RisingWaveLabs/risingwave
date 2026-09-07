@@ -1,0 +1,79 @@
+control substitution on
+
+# ------------ data prepare stage ------------
+statement ok
+drop table if exists temporal_test;
+
+statement ok
+drop source if exists mssql_temporal_source cascade;
+
+system ok
+sqlcmd -C -d master -Q "IF DB_ID('sqlserver_temporal_default_precision_db') IS NOT NULL BEGIN ALTER DATABASE sqlserver_temporal_default_precision_db SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE sqlserver_temporal_default_precision_db; END; CREATE DATABASE sqlserver_temporal_default_precision_db;" -b
+
+system ok
+sqlcmd -C -d sqlserver_temporal_default_precision_db -i e2e_test/source_inline/cdc/sql_server/sql_server_temporal_default_precision_prepare.sql -b
+
+# ------------ create source and table stage ------------
+statement ok
+CREATE SOURCE mssql_temporal_source WITH (
+    connector = 'sqlserver-cdc',
+    hostname = '${SQLCMDSERVER:sqlserver-server}',
+    port = '${SQLCMDPORT:1433}',
+    username = '${SQLCMDUSER:SA}',
+    password = '${SQLCMDPASSWORD}',
+    database.name = 'sqlserver_temporal_default_precision_db'
+);
+
+statement ok
+CREATE TABLE temporal_test (
+    id INT,
+    c_date DATE,
+    c_time TIME,
+    c_time_1 TIME,
+    c_time_5 TIME,
+    c_time_7 TIME,
+    c_datetime TIMESTAMP,
+    c_smalldatetime TIMESTAMP,
+    c_datetime2 TIMESTAMP,
+    c_datetime2_5 TIMESTAMP,
+    c_datetime2_7 TIMESTAMP,
+    c_datetimeoffset TIMESTAMPTZ,
+    PRIMARY KEY (id)
+) from mssql_temporal_source table 'sqlserver_temporal_default_precision_db.dbo.temporal_test';
+
+# sleep to ensure the following rows are consumed from Debezium messages instead of backfill
+sleep 10s
+
+# ------------ add rows stage ------------
+system ok
+sqlcmd -C -d sqlserver_temporal_default_precision_db -i e2e_test/source_inline/cdc/sql_server/sql_server_temporal_default_precision_insert.sql -b
+
+sleep 10s
+
+# ------------ check stage ------------
+query TTTTTTTTTTT
+select
+    id,
+    c_date,
+    c_time,
+    c_time_1,
+    c_time_5,
+    c_time_7,
+    c_datetime,
+    c_smalldatetime,
+    c_datetime2,
+    c_datetime2_5,
+    c_datetime2_7,
+    c_datetimeoffset
+from temporal_test
+order by id;
+----
+1 0001-01-01 00:00:00 00:00:00 00:00:00 00:00:00 NULL NULL 0001-01-01 00:00:00 0001-01-01 00:00:00 0001-01-01 00:00:00 0001-12-30 00:00:00+00:00 BC
+2 8000-06-01 12:00:00 12:00:00 12:00:00 12:00:00 NULL NULL 8000-06-01 12:00:00 8000-06-01 12:00:00 8000-06-01 12:00:00 8000-06-01 12:00:00+00:00
+3 5138-11-16 09:46:40 09:46:40 09:46:40 09:46:40 NULL NULL 5138-11-16 09:46:40 5138-11-16 09:46:40 5138-11-16 09:46:40 5138-11-16 09:46:40+00:00
+4 9999-12-31 23:59:59.999 23:59:59.900 23:59:59.999 23:59:59.999 NULL NULL 9999-12-31 23:59:59.999 9999-12-31 23:59:59.999 9999-12-31 23:59:59.999 9999-12-31 23:59:59.999+00:00
+5 1967-06-30 22:00:00.123 22:00:00.100 22:00:00.123450 22:00:00.123456 1967-06-30 22:00:00 1967-06-30 22:00:00 1967-06-30 22:00:00.123 1967-06-30 22:00:00.123450 1967-06-30 22:00:00.123456 1967-06-30 22:00:01.123+00:00
+
+# ------------ drop stage ------------
+statement ok
+drop source mssql_temporal_source cascade;

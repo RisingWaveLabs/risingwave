@@ -30,6 +30,8 @@ use risingwave_common::catalog::{FragmentTypeFlag, TableId};
 use risingwave_common::session_config::SessionConfig;
 use risingwave_common::session_config::parallelism::ConfigParallelism;
 use risingwave_common::system_param::AdaptiveParallelismStrategy;
+use risingwave_common::types::DataType;
+use risingwave_common::util::stream_graph_visitor::visit_stream_node_internal_tables;
 use risingwave_connector::source::cdc::CdcScanOptions;
 use risingwave_pb::id::{LocalOperatorId, StreamNodeLocalOperatorId};
 use risingwave_pb::plan_common::JoinType;
@@ -45,6 +47,7 @@ use crate::error::ErrorCode::NotSupported;
 use crate::error::{Result, RwError};
 use crate::optimizer::plan_node::generic::GenericPlanRef;
 use crate::optimizer::plan_node::{StreamPlanRef as PlanRef, reorganize_elements_id};
+use crate::optimizer::variant_key::variant_key_error;
 use crate::stream_fragmenter::parallelism::{
     ResolvedParallelism, derive_backfill_parallelism, derive_parallelism,
 };
@@ -178,7 +181,8 @@ pub fn build_graph_with_strategy(
     let plan_node = reorganize_elements_id(plan_node);
 
     let mut state = BuildFragmentGraphState::default();
-    let stream_node = plan_node.to_stream_prost(&mut state)?;
+    let mut stream_node = plan_node.to_stream_prost(&mut state)?;
+    reject_variant_in_internal_storage_key(&mut stream_node)?;
     generate_fragment_graph(&mut state, stream_node)?;
     if state.has_source_backfill && state.has_snapshot_backfill {
         return Err(RwError::from(NotSupported(
@@ -264,6 +268,35 @@ pub fn build_graph_with_strategy(
         max_parallelism,
         backfill_order,
     })
+}
+
+/// Rejects `VARIANT` (including nested) in the storage pk of any internal state table. Internal
+/// tables only materialize when the plan is lowered to protobuf, so this is the single point that
+/// backstops operators whose state keys no logical checker visits.
+fn reject_variant_in_internal_storage_key(stream_node: &mut StreamNode) -> Result<()> {
+    let mut err = None;
+    visit_stream_node_internal_tables(stream_node, |table, table_name| {
+        if err.is_some() {
+            return;
+        }
+        for order in &table.pk {
+            let column = &table.columns[order.column_index as usize];
+            let column_desc = column.column_desc.as_ref().unwrap();
+            let data_type: DataType = column_desc.column_type.as_ref().unwrap().into();
+            if data_type.contains_variant() {
+                err = Some(variant_key_error(format!(
+                    "VARIANT column \"{}\" is part of the storage primary key of the internal \
+                    state table of `{}`",
+                    column_desc.name, table_name,
+                )));
+                return;
+            }
+        }
+    });
+    match err {
+        Some(err) => Err(err),
+        None => Ok(()),
+    }
 }
 
 #[cfg(any())]
@@ -666,4 +699,60 @@ fn build_fragment(
             .collect::<Result<_>>()?;
         Ok(stream_node)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use risingwave_common::types::StructType;
+    use risingwave_pb::catalog::PbTable;
+    use risingwave_pb::common::PbColumnOrder;
+    use risingwave_pb::plan_common::{PbColumnCatalog, PbColumnDesc};
+    use risingwave_pb::stream_plan::TopNNode;
+
+    use super::*;
+
+    /// A `TopN` node is the simplest body carrying exactly one internal table.
+    fn top_n_with_pk_column(data_type: DataType) -> StreamNode {
+        let table = PbTable {
+            columns: vec![PbColumnCatalog {
+                column_desc: Some(PbColumnDesc {
+                    name: "v".to_owned(),
+                    column_type: Some(data_type.to_protobuf()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }],
+            pk: vec![PbColumnOrder {
+                column_index: 0,
+                order_type: None,
+            }],
+            ..Default::default()
+        };
+        StreamNode {
+            node_body: Some(NodeBody::TopN(Box::new(TopNNode {
+                table: Some(table),
+                ..Default::default()
+            }))),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn rejects_variant_in_internal_state_table_pk() {
+        for data_type in [
+            DataType::Variant,
+            DataType::list(DataType::Variant),
+            DataType::Struct(StructType::new(vec![("v", DataType::Variant)])),
+        ] {
+            let mut node = top_n_with_pk_column(data_type.clone());
+            let err = reject_variant_in_internal_storage_key(&mut node).unwrap_err();
+            assert!(
+                err.to_string().contains("internal state table of `TopN`"),
+                "{data_type:?}: {err}"
+            );
+        }
+
+        let mut node = top_n_with_pk_column(DataType::Jsonb);
+        reject_variant_in_internal_storage_key(&mut node).unwrap();
+    }
 }

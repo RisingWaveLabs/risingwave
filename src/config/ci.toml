@@ -10,6 +10,8 @@ max_vnode_key_range_bytes = 214748364800
 
 [streaming]
 in_flight_barrier_nums = 10
+snapshot_backfill_barrier_amplification_factor = 10
+snapshot_backfill_finish_max_lagged_barriers = 200
 
 [streaming.developer]
 stream_exchange_concurrent_barriers = 10

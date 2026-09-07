@@ -27,6 +27,7 @@ pretty_assertions = "1"
 rand = { workspace = true }
 rand_chacha = { version = "0.9" }
 rdkafka = { workspace = true }
+risingwave_batch = { workspace = true }
 risingwave_batch_executors = { workspace = true }
 risingwave_common = { workspace = true }
 risingwave_compactor = { workspace = true }
@@ -44,6 +45,7 @@ risingwave_pb = { workspace = true }
 risingwave_rpc_client = { workspace = true }
 risingwave_sqlparser = { workspace = true }
 risingwave_sqlsmith = { workspace = true }
+rw-tokio = { version = "=1.53.1", package = "tokio", features = ["rt"] }
 sea-orm = { workspace = true }
 serde = { workspace = true }
 serde_json = "1.0.107"
@@ -53,6 +55,7 @@ tempfile = "3"
 tikv-jemallocator = { workspace = true }
 tokio = { workspace = true }
 tokio-postgres = "0.7"
+tonic = { workspace = true }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = "*"

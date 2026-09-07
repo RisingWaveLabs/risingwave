@@ -1,0 +1,619 @@
+statement ok
+DROP SOURCE IF EXISTS iceberg_variant_source;
+
+statement ok
+CREATE SOURCE iceberg_variant_source
+WITH (
+    connector = 'iceberg',
+    s3.endpoint = 'http://127.0.0.1:9301',
+    s3.region = 'us-east-1',
+    s3.access.key = 'hummockadmin',
+    s3.secret.key = 'hummockadmin',
+    catalog.type = 'storage',
+    warehouse.path = 's3a://icebergdata/demo',
+    database.name = 'demo_db',
+    table.name = 'test_variant_source',
+);
+
+query TTTTTTTTTT
+select
+    pg_typeof(v_null),
+    pg_typeof(v_true),
+    pg_typeof(v_false),
+    pg_typeof(v_int8),
+    pg_typeof(v_int16),
+    pg_typeof(v_int32),
+    pg_typeof(v_int64),
+    pg_typeof(v_float),
+    pg_typeof(v_double),
+    pg_typeof(v_decimal4)
+from iceberg_variant_source
+where id = 1;
+----
+variant variant variant variant variant variant variant variant variant variant
+
+query TTTTTTTTTTTTT
+select
+    pg_typeof(v_decimal8),
+    pg_typeof(v_decimal16),
+    pg_typeof(v_date),
+    pg_typeof(v_timestamp),
+    pg_typeof(v_timestamp_ntz),
+    pg_typeof(v_binary),
+    pg_typeof(v_short_string),
+    pg_typeof(v_long_string),
+    pg_typeof(v_object),
+    pg_typeof(v_array),
+    pg_typeof((nested).top_variant),
+    pg_typeof((nested).variant_list),
+    pg_typeof((nested).variant_map)
+from iceberg_variant_source
+where id = 1;
+----
+variant variant variant variant variant variant variant variant variant variant variant variant[] map(character varying,variant)
+
+# Unlike the jsonb decode of the past, the native variant type preserves the
+# variant type identity of each value.
+query TTTTTTTTTTTT
+select
+    variant_typeof(v_null),
+    variant_typeof(v_true),
+    variant_typeof(v_int8),
+    variant_typeof(v_int16),
+    variant_typeof(v_int32),
+    variant_typeof(v_int64),
+    variant_typeof(v_float),
+    variant_typeof(v_double),
+    variant_typeof(v_decimal4),
+    variant_typeof(v_date),
+    variant_typeof(v_timestamp),
+    variant_typeof(v_timestamp_ntz)
+from iceberg_variant_source
+where id = 1;
+----
+null boolean int8 int16 int32 int64 float double decimal4 date timestamp_micros timestamp_ntz_micros
+
+query TTTTT
+select
+    variant_typeof(v_binary),
+    variant_typeof(v_short_string),
+    variant_typeof(v_object),
+    variant_typeof(v_array),
+    variant_typeof((nested).variant_list[1])
+from iceberg_variant_source
+where id = 1;
+----
+binary string object array int8
+
+query TTTTTTTTTTTT
+select
+    v_null::jsonb = 'null'::jsonb,
+    v_true::jsonb = 'true'::jsonb,
+    v_false::jsonb = 'false'::jsonb,
+    v_int8::jsonb = to_jsonb(cast(34 as smallint)),
+    v_int16::jsonb = to_jsonb(cast(1234 as integer)),
+    v_int32::jsonb = to_jsonb(cast(100000 as integer)),
+    v_int64::jsonb = to_jsonb(cast(5000000000 as bigint)),
+    v_float::jsonb = to_jsonb(cast(3.5 as real)),
+    v_double::jsonb = to_jsonb(cast(14.25 as double precision)),
+    v_decimal4::jsonb = '12345.5'::jsonb,
+    v_decimal8::jsonb = '123456789.5'::jsonb,
+    v_decimal16::jsonb = '1234567890123456789'::jsonb
+from iceberg_variant_source
+where id = 1;
+----
+t t t t t t t t t t t t
+
+query TTTTTT
+select
+    v_date::jsonb = to_jsonb(cast('2024-11-07' as varchar)),
+    v_timestamp::jsonb = to_jsonb(cast('2024-11-07T12:33:54.123456+00:00' as varchar)),
+    v_timestamp_ntz::jsonb = to_jsonb(cast('2024-11-07T12:33:54.123456' as varchar)),
+    v_binary::jsonb = to_jsonb(cast('CgsMDQ==' as varchar)),
+    v_short_string::jsonb = to_jsonb(cast('iceberg' as varchar)),
+    v_long_string::jsonb = to_jsonb(cast(repeat('x', 64) as varchar))
+from iceberg_variant_source
+where id = 1;
+----
+t t t t t t
+
+query TTTTTTTTT
+select
+    v_object::jsonb = '{"a":1,"b":true}'::jsonb,
+    v_array::jsonb = '[1,true,null]'::jsonb,
+    (nested).top_variant::jsonb = to_jsonb(cast('2024-11-08' as varchar)),
+    (nested).variant_list[1]::jsonb = to_jsonb(cast(7 as smallint)),
+    (nested).variant_list[2]::jsonb = '{"x":2}'::jsonb,
+    (nested).variant_list[3]::jsonb = to_jsonb(cast('q80=' as varchar)),
+    (nested).variant_map['k1']::jsonb = to_jsonb(cast(42 as integer)),
+    (nested).variant_map['k2']::jsonb = to_jsonb(cast(repeat('y', 64) as varchar)),
+    (nested).variant_map['k3']::jsonb = 'null'::jsonb
+from iceberg_variant_source
+where id = 1;
+----
+t t t t t t t t t
+
+query TTT
+select
+    variant_get(v_object, '$.a')::jsonb = '1'::jsonb,
+    variant_typeof(variant_get(v_object, '$.b')),
+    try_variant_get(v_object, '$.missing') is null
+from iceberg_variant_source
+where id = 1;
+----
+t boolean t
+
+# A variant nested inside list<struct> decodes with its siblings on the iceberg path.
+query ITT
+select
+    (evolved[1]).a,
+    (evolved[1]).v::jsonb = to_jsonb(cast(7 as smallint)),
+    variant_typeof((evolved[1]).v)
+from iceberg_variant_source
+where id = 1;
+----
+5 t int8
+
+query II
+select count(*), max(id) from iceberg_variant_source;
+----
+3 3
+
+query I
+select count(*) from iceberg_variant_source
+where id = 2
+  and v_null is null and v_true is null and v_false is null
+  and v_int8 is null and v_int16 is null and v_int32 is null and v_int64 is null
+  and v_float is null and v_double is null
+  and v_decimal4 is null and v_decimal8 is null and v_decimal16 is null
+  and v_date is null and v_timestamp is null and v_timestamp_ntz is null
+  and v_binary is null and v_short_string is null and v_long_string is null
+  and v_object is null and v_array is null and nested is null and evolved is null;
+----
+1
+
+# NaN is a valid variant double: it normalizes to the canonical bit pattern and
+# renders as the string "NaN", following to_jsonb(float8).
+query TTTTTTTTT
+select
+    v_object::jsonb = '{}'::jsonb,
+    v_array::jsonb = '[]'::jsonb,
+    variant_typeof(v_double) = 'double',
+    v_double::jsonb = '"NaN"'::jsonb,
+    v_int8 is null,
+    (nested).top_variant::jsonb = '{"a":{"b":[1,{"c":2}],"d":{},"e":[]}}'::jsonb,
+    (nested).variant_list[1]::jsonb = '{}'::jsonb,
+    (nested).variant_list[2]::jsonb = '[]'::jsonb,
+    (nested).variant_map['empty']::jsonb = '{}'::jsonb
+from iceberg_variant_source
+where id = 3;
+----
+t t t t t t t t t
+
+query TT
+select
+    variant_get((nested).top_variant, '$.a.b[1].c')::jsonb = '2'::jsonb,
+    variant_typeof(variant_get((nested).top_variant, '$.a.d'))
+from iceberg_variant_source
+where id = 3;
+----
+t object
+
+# Variant is gated out of the DataFusion batch engine, so these queries fall back to the
+# RisingWave engine. Grouping/ordering on a variant column is rejected outright before
+# either engine sees it; `e2e_test/ddl/variant.slt` pins that.
+# Bare top-level variant expression, no cast: renders as the canonical JSON text.
+query T
+select variant_get(v_object, '$.a') from iceberg_variant_source where id = 1;
+----
+1
+
+# The variant is manufactured by the projection, so the scan schema has none and only a
+# non-scan node schema carries it — the other half of the DataFusion schema gate.
+query T
+select id::varchar::variant from iceberg_variant_source where id = 1;
+----
+1
+
+# A variant-typed subexpression over a variant-free plan schema passes the DataFusion
+# schema gate but must still fall back at plan time (variant-returning fallback expr).
+query I
+select id from iceberg_variant_source where (id::varchar::variant) is not null and id = 1;
+----
+1
+
+# file_scan the Spark-written data files directly: the generic parquet path must
+# infer variant columns via the extension metadata and decode them.
+query I
+select count(*) from file_scan(
+    'parquet',
+    's3',
+    'http://127.0.0.1:9301',
+    'hummockadmin',
+    'hummockadmin',
+    's3://icebergdata/demo/demo_db/test_variant_source/data/'
+);
+----
+3
+
+query TTTTT
+select
+    pg_typeof(v_object),
+    v_object::jsonb = '{"a":1,"b":true}'::jsonb,
+    (nested).top_variant::jsonb = to_jsonb(cast('2024-11-08' as varchar)),
+    (nested).variant_list[1]::jsonb = to_jsonb(cast(7 as smallint)),
+    (nested).variant_map['k1']::jsonb = to_jsonb(cast(42 as integer))
+from file_scan(
+    'parquet',
+    's3',
+    'http://127.0.0.1:9301',
+    'hummockadmin',
+    'hummockadmin',
+    's3://icebergdata/demo/demo_db/test_variant_source/data/'
+) where id = 1;
+----
+variant t t t t
+
+# Streaming parquet source with a declared subset + reordered struct: conversion goes
+# through the struct projection path, which must decode nested variants (incl. in map)
+# by the declared type.
+statement ok
+drop table if exists parquet_variant_projected;
+
+statement ok
+create table parquet_variant_projected (
+    id int,
+    nested struct<variant_map map(varchar, variant), top_variant variant>
+) with (
+    connector = 's3',
+    match_pattern = 'demo/demo_db/test_variant_source/data/*.parquet',
+    s3.region_name = 'us-east-1',
+    s3.bucket_name = 'icebergdata',
+    s3.credentials.access = 'hummockadmin',
+    s3.credentials.secret = 'hummockadmin',
+    s3.endpoint_url = 'http://127.0.0.1:9301',
+    refresh.interval.sec = 1
+) format plain encode parquet;
+
+query TT retry 11 backoff 1s
+select
+    (nested).top_variant::jsonb = to_jsonb(cast('2024-11-08' as varchar)),
+    (nested).variant_map['k1']::jsonb = to_jsonb(cast(42 as integer))
+from parquet_variant_projected
+where id = 1;
+----
+t t
+
+statement ok
+drop table parquet_variant_projected;
+
+# A variant column declared as a non-variant type (here its raw physical struct) is an illegal
+# type mismatch: the `arrow.parquet.variant` extension binds exclusively to `variant`, so the
+# column NULL-fills instead of decoding to a diverging struct. Other columns decode normally.
+statement ok
+drop table if exists parquet_variant_as_struct;
+
+statement ok
+create table parquet_variant_as_struct (
+    id int,
+    v_object struct<metadata bytea, value bytea>
+) with (
+    connector = 's3',
+    match_pattern = 'demo/demo_db/test_variant_source/data/*.parquet',
+    s3.region_name = 'us-east-1',
+    s3.bucket_name = 'icebergdata',
+    s3.credentials.access = 'hummockadmin',
+    s3.credentials.secret = 'hummockadmin',
+    s3.endpoint_url = 'http://127.0.0.1:9301',
+    refresh.interval.sec = 1
+) format plain encode parquet;
+
+query II retry 11 backoff 1s
+select
+    count(*) filter (where id is not null),
+    count(*) filter (where v_object is not null)
+from parquet_variant_as_struct;
+----
+3 0
+
+statement ok
+drop table parquet_variant_as_struct;
+
+# Declared `struct<a int>[]` while the file element struct also carries a variant child:
+# decode follows the declared fields, so the undeclared variant extra is dropped and the
+# subset decodes.
+statement ok
+drop table if exists parquet_variant_evolved;
+
+statement ok
+create table parquet_variant_evolved (
+    id int,
+    evolved struct<a int>[]
+) with (
+    connector = 's3',
+    match_pattern = 'demo/demo_db/test_variant_source/data/*.parquet',
+    s3.region_name = 'us-east-1',
+    s3.bucket_name = 'icebergdata',
+    s3.credentials.access = 'hummockadmin',
+    s3.credentials.secret = 'hummockadmin',
+    s3.endpoint_url = 'http://127.0.0.1:9301',
+    refresh.interval.sec = 1
+) format plain encode parquet;
+
+query II retry 11 backoff 1s
+select
+    count(*) filter (where id is not null),
+    count(*) filter (where evolved is not null)
+from parquet_variant_evolved;
+----
+3 1
+
+query I
+select (evolved[1]).a from parquet_variant_evolved where id = 1;
+----
+5
+
+statement ok
+drop table parquet_variant_evolved;
+
+# IS [NOT] NULL on variant and struct columns has no iceberg accessor, so it must stay
+# in the RisingWave filter (pushing it down used to fail the whole scan). Also
+# distinguishes SQL NULL (rows 2/3) from variant JSON null (row 1's v_null).
+query I
+select count(*) from iceberg_variant_source where v_null is null;
+----
+2
+
+query I
+select count(*) from iceberg_variant_source where nested is not null;
+----
+2
+
+# Streaming read: an MV over the iceberg source decodes variants through the
+# list + fetch executor path, not the batch scan.
+statement ok
+create materialized view variant_streaming_mv as
+select id, v_int32, v_object, (nested).top_variant as nested_variant, evolved
+from iceberg_variant_source;
+
+query TTT retry 11 backoff 1s
+select
+    v_int32::jsonb = to_jsonb(cast(100000 as integer)),
+    v_object::jsonb = '{"a":1,"b":true}'::jsonb,
+    nested_variant::jsonb = to_jsonb(cast('2024-11-08' as varchar))
+from variant_streaming_mv
+where id = 1;
+----
+t t t
+
+query I retry 11 backoff 1s
+select count(*) from variant_streaming_mv;
+----
+3
+
+statement ok
+drop materialized view variant_streaming_mv;
+
+statement ok
+DROP SOURCE iceberg_variant_source;
+
+statement ok
+DROP TABLE IF EXISTS iceberg_variant_batch_table;
+
+statement ok
+CREATE TABLE iceberg_variant_batch_table (
+    *,
+    PRIMARY KEY (id)
+) WITH (
+    connector = 'iceberg',
+    refresh_mode = 'FULL_RELOAD',
+    s3.endpoint = 'http://127.0.0.1:9301',
+    s3.region = 'us-east-1',
+    s3.access.key = 'hummockadmin',
+    s3.secret.key = 'hummockadmin',
+    catalog.type = 'storage',
+    warehouse.path = 's3a://icebergdata/demo',
+    database.name = 'demo_db',
+    table.name = 'test_variant_source',
+);
+
+statement ok
+REFRESH TABLE iceberg_variant_batch_table;
+
+query TTTTTTTTTT retry 11 backoff 1s
+select
+    pg_typeof(v_null),
+    pg_typeof(v_true),
+    pg_typeof(v_false),
+    pg_typeof(v_int8),
+    pg_typeof(v_int16),
+    pg_typeof(v_int32),
+    pg_typeof(v_int64),
+    pg_typeof(v_float),
+    pg_typeof(v_double),
+    pg_typeof(v_decimal4)
+from iceberg_variant_batch_table
+where id = 1;
+----
+variant variant variant variant variant variant variant variant variant variant
+
+query TTTTTTTTTTTTT retry 11 backoff 1s
+select
+    pg_typeof(v_decimal8),
+    pg_typeof(v_decimal16),
+    pg_typeof(v_date),
+    pg_typeof(v_timestamp),
+    pg_typeof(v_timestamp_ntz),
+    pg_typeof(v_binary),
+    pg_typeof(v_short_string),
+    pg_typeof(v_long_string),
+    pg_typeof(v_object),
+    pg_typeof(v_array),
+    pg_typeof((nested).top_variant),
+    pg_typeof((nested).variant_list),
+    pg_typeof((nested).variant_map)
+from iceberg_variant_batch_table
+where id = 1;
+----
+variant variant variant variant variant variant variant variant variant variant variant variant[] map(character varying,variant)
+
+query TTTTTTTTTTTT retry 11 backoff 1s
+select
+    v_null::jsonb = 'null'::jsonb,
+    v_true::jsonb = 'true'::jsonb,
+    v_false::jsonb = 'false'::jsonb,
+    v_int8::jsonb = to_jsonb(cast(34 as smallint)),
+    v_int16::jsonb = to_jsonb(cast(1234 as integer)),
+    v_int32::jsonb = to_jsonb(cast(100000 as integer)),
+    v_int64::jsonb = to_jsonb(cast(5000000000 as bigint)),
+    v_float::jsonb = to_jsonb(cast(3.5 as real)),
+    v_double::jsonb = to_jsonb(cast(14.25 as double precision)),
+    v_decimal4::jsonb = '12345.5'::jsonb,
+    v_decimal8::jsonb = '123456789.5'::jsonb,
+    v_decimal16::jsonb = '1234567890123456789'::jsonb
+from iceberg_variant_batch_table
+where id = 1;
+----
+t t t t t t t t t t t t
+
+query TTTTTT retry 11 backoff 1s
+select
+    v_date::jsonb = to_jsonb(cast('2024-11-07' as varchar)),
+    v_timestamp::jsonb = to_jsonb(cast('2024-11-07T12:33:54.123456+00:00' as varchar)),
+    v_timestamp_ntz::jsonb = to_jsonb(cast('2024-11-07T12:33:54.123456' as varchar)),
+    v_binary::jsonb = to_jsonb(cast('CgsMDQ==' as varchar)),
+    v_short_string::jsonb = to_jsonb(cast('iceberg' as varchar)),
+    v_long_string::jsonb = to_jsonb(cast(repeat('x', 64) as varchar))
+from iceberg_variant_batch_table
+where id = 1;
+----
+t t t t t t
+
+query TTTTTTTTT retry 11 backoff 1s
+select
+    v_object::jsonb = '{"a":1,"b":true}'::jsonb,
+    v_array::jsonb = '[1,true,null]'::jsonb,
+    (nested).top_variant::jsonb = to_jsonb(cast('2024-11-08' as varchar)),
+    (nested).variant_list[1]::jsonb = to_jsonb(cast(7 as smallint)),
+    (nested).variant_list[2]::jsonb = '{"x":2}'::jsonb,
+    (nested).variant_list[3]::jsonb = to_jsonb(cast('q80=' as varchar)),
+    (nested).variant_map['k1']::jsonb = to_jsonb(cast(42 as integer)),
+    (nested).variant_map['k2']::jsonb = to_jsonb(cast(repeat('y', 64) as varchar)),
+    (nested).variant_map['k3']::jsonb = 'null'::jsonb
+from iceberg_variant_batch_table
+where id = 1;
+----
+t t t t t t t t t
+
+query II retry 11 backoff 1s
+select count(*), max(id) from iceberg_variant_batch_table;
+----
+3 3
+
+query I retry 11 backoff 1s
+select count(*) from iceberg_variant_batch_table
+where id = 2
+  and v_null is null and v_true is null and v_false is null
+  and v_int8 is null and v_int16 is null and v_int32 is null and v_int64 is null
+  and v_float is null and v_double is null
+  and v_decimal4 is null and v_decimal8 is null and v_decimal16 is null
+  and v_date is null and v_timestamp is null and v_timestamp_ntz is null
+  and v_binary is null and v_short_string is null and v_long_string is null
+  and v_object is null and v_array is null and nested is null and evolved is null;
+----
+1
+
+query TTTTTTTTT retry 11 backoff 1s
+select
+    v_object::jsonb = '{}'::jsonb,
+    v_array::jsonb = '[]'::jsonb,
+    variant_typeof(v_double) = 'double',
+    v_double::jsonb = '"NaN"'::jsonb,
+    v_int8 is null,
+    (nested).top_variant::jsonb = '{"a":{"b":[1,{"c":2}],"d":{},"e":[]}}'::jsonb,
+    (nested).variant_list[1]::jsonb = '{}'::jsonb,
+    (nested).variant_list[2]::jsonb = '[]'::jsonb,
+    (nested).variant_map['empty']::jsonb = '{}'::jsonb
+from iceberg_variant_batch_table
+where id = 3;
+----
+t t t t t t t t t
+
+statement ok
+DROP TABLE iceberg_variant_batch_table;
+
+# Schema evolution: `v2` was added after the first two rows were written, so their
+# files lack the column entirely and it must NULL-fill; the post-evolution file
+# decodes it. Predicates on `b` — positioned after a variant column in the files —
+# prune the right rows (the variant's id-less parquet sub-leaves must not shift the
+# field-id map).
+statement ok
+CREATE SOURCE iceberg_variant_evolution_source
+WITH (
+    connector = 'iceberg',
+    s3.endpoint = 'http://127.0.0.1:9301',
+    s3.region = 'us-east-1',
+    s3.access.key = 'hummockadmin',
+    s3.secret.key = 'hummockadmin',
+    catalog.type = 'storage',
+    warehouse.path = 's3a://icebergdata/demo',
+    database.name = 'demo_db',
+    table.name = 'test_variant_evolution',
+);
+
+query I
+select count(*) from iceberg_variant_evolution_source where v2 is null;
+----
+2
+
+query TT
+select payload::jsonb = '{"k":3}'::jsonb, v2::jsonb = '{"new":true}'::jsonb
+from iceberg_variant_evolution_source where id = 3;
+----
+t t
+
+query I
+select id from iceberg_variant_evolution_source where b = 200;
+----
+2
+
+query I
+select id from iceberg_variant_evolution_source where b = 300;
+----
+3
+
+statement ok
+DROP SOURCE iceberg_variant_evolution_source;
+
+# ALTER SOURCE ADD COLUMN variant must bind the new column to file data by name and
+# decode values, not merely pass DDL.
+statement ok
+create source parquet_variant_alter_source (id int)
+with (
+    connector = 's3',
+    match_pattern = 'demo/demo_db/test_variant_source/data/*.parquet',
+    s3.region_name = 'us-east-1',
+    s3.bucket_name = 'icebergdata',
+    s3.credentials.access = 'hummockadmin',
+    s3.credentials.secret = 'hummockadmin',
+    s3.endpoint_url = 'http://127.0.0.1:9301',
+    refresh.interval.sec = 1
+) format plain encode parquet;
+
+statement ok
+alter source parquet_variant_alter_source add column v_object variant;
+
+statement ok
+create materialized view variant_alter_mv as
+select id, v_object from parquet_variant_alter_source;
+
+query I retry 11 backoff 1s
+select count(*) from variant_alter_mv where v_object::jsonb = '{"a":1,"b":true}'::jsonb;
+----
+1
+
+statement ok
+drop materialized view variant_alter_mv;
+
+statement ok
+drop source parquet_variant_alter_source;

@@ -76,6 +76,27 @@ def _(outer_panels: Panels):
                         )
                     ],
                 ),
+                panels.timeseries_latency(
+                    "Source Worker Tick Duration",
+                    "Duration of each source worker tick (split discovery + enumerator monitoring). Long ticks indicate slow or hanging network I/O toward the upstream system.",
+                    quantile(
+                        lambda quantile, legend: panels.target(
+                            f"histogram_quantile({quantile}, sum(rate({metric('source_worker_tick_duration_seconds_bucket')}[$__rate_interval])) by (le, source_id, source_name))",
+                            f"p{legend} - {{{{source_id}}}} {{{{source_name}}}}",
+                        ),
+                        [50, 90, 99, "max"],
+                    ),
+                ),
+                panels.timeseries_ops(
+                    "Source Enumerator Monitor Errors (errors/s)",
+                    "Rate of enumerator monitoring errors per source. Nonzero means the periodic upstream health check is failing (drives Source Upstream Status to 0).",
+                    [
+                        panels.target(
+                            f"rate({metric('source_enumerator_monitor_error_count')}[$__rate_interval])",
+                            "source_id={{source_id}} source_name={{source_name}}",
+                        ),
+                    ],
+                ),
                 panels.timeseries_ops(
                     "Source Split Change Events frequency(events/s)",
                     "Source Split Change Events frequency by source_id and actor_id",
