@@ -15,6 +15,7 @@
 use std::sync::Arc;
 
 use pgwire::pg_response::{PgResponse, StatementType};
+use risingwave_batch::task::{ShutdownSender, ShutdownToken};
 use risingwave_common::catalog::Field;
 use risingwave_common::session_config::QueryMode;
 use risingwave_common::util::epoch::Epoch;
@@ -29,9 +30,10 @@ use super::query::{
 use super::util::convert_unix_millis_to_logstore_u64;
 use crate::error::{ErrorCode, Result};
 use crate::handler::HandlerArgs;
-use crate::handler::query::{distribute_execute, local_execute};
+use crate::handler::query::{distribute_execute_for_cursor, local_execute_for_cursor};
+use crate::scheduler::ReadSnapshot;
 use crate::session::SessionImpl;
-use crate::session::cursor_manager::CursorDataChunkStream;
+use crate::session::cursor_manager::{CursorQueryStream, QueryCursor};
 use crate::{Binder, OptimizerContext};
 
 pub async fn handle_declare_cursor(
@@ -127,12 +129,12 @@ async fn handle_declare_query_cursor(
     cursor_name: Ident,
     query: Box<Query>,
 ) -> Result<RwPgResponse> {
-    let (chunk_stream, fields) =
-        create_stream_for_cursor_stmt(handler_args.clone(), Statement::Query(query)).await?;
+    let cursor =
+        create_query_cursor_from_stmt(handler_args.clone(), Statement::Query(query)).await?;
     handler_args
         .session
         .get_cursor_manager()
-        .add_query_cursor(cursor_name.real_value(), chunk_stream, fields)
+        .add_query_cursor(cursor_name.real_value(), cursor)
         .await?;
     Ok(PgResponse::empty_result(StatementType::DECLARE_CURSOR))
 }
@@ -143,21 +145,21 @@ pub async fn handle_bound_declare_query_cursor(
     plan_fragmenter_result: BatchPlanFragmenterResult,
 ) -> Result<RwPgResponse> {
     let session = handler_args.session.clone();
-    let (chunk_stream, fields) =
-        create_chunk_stream_for_cursor(session, plan_fragmenter_result).await?;
+    let cursor = create_query_cursor_from_fragment(session, plan_fragmenter_result).await?;
 
     handler_args
         .session
         .get_cursor_manager()
-        .add_query_cursor(cursor_name.real_value(), chunk_stream, fields)
+        .add_query_cursor(cursor_name.real_value(), cursor)
         .await?;
     Ok(PgResponse::empty_result(StatementType::DECLARE_CURSOR))
 }
 
-pub async fn create_stream_for_cursor_stmt(
+/// Plans a cursor statement and creates its raw data stream.
+pub async fn create_query_cursor_from_stmt(
     handler_args: HandlerArgs,
     stmt: Statement,
-) -> Result<(CursorDataChunkStream, Vec<Field>)> {
+) -> Result<QueryCursor> {
     let session = handler_args.session.clone();
     let plan_fragmenter_result = {
         let context = OptimizerContext::from_handler_args(handler_args);
@@ -165,13 +167,26 @@ pub async fn create_stream_for_cursor_stmt(
             gen_batch_plan_by_statement(&session, context.into(), stmt)?.unwrap_rw()?;
         gen_batch_plan_fragmenter(&session, plan_result)?
     };
-    create_chunk_stream_for_cursor(session, plan_fragmenter_result).await
+    create_query_cursor_from_fragment(session, plan_fragmenter_result).await
 }
 
-pub async fn create_chunk_stream_for_cursor(
+/// Creates a cursor lifecycle and starts producing chunks for a planned regular query.
+pub async fn create_query_cursor_from_fragment(
     session: Arc<SessionImpl>,
     plan_fragmenter_result: BatchPlanFragmenterResult,
-) -> Result<(CursorDataChunkStream, Vec<Field>)> {
+) -> Result<QueryCursor> {
+    QueryCursor::new(session, plan_fragmenter_result).await
+}
+
+/// Creates a cursor-owned local or distributed query stream using an explicit snapshot and
+/// cursor-scoped shutdown handle.
+pub async fn create_cursor_query_stream(
+    session: Arc<SessionImpl>,
+    plan_fragmenter_result: BatchPlanFragmenterResult,
+    query_shutdown_tx: ShutdownSender,
+    query_shutdown_rx: ShutdownToken,
+    snapshot: ReadSnapshot,
+) -> Result<(CursorQueryStream, Vec<Field>)> {
     let BatchPlanFragmenterResult {
         plan_fragmenter,
         query_mode,
@@ -179,20 +194,20 @@ pub async fn create_chunk_stream_for_cursor(
         ..
     } = plan_fragmenter_result;
 
-    let can_timeout_cancel = true;
-
     let query = plan_fragmenter.generate_complete_query().await?;
     tracing::trace!("Generated query after plan fragmenter: {:?}", &query);
 
     Ok((
         match query_mode {
             QueryMode::Auto => unreachable!(),
-            QueryMode::Local => CursorDataChunkStream::LocalDataChunk(Some(
-                local_execute(session.clone(), query, can_timeout_cancel).await?,
-            )),
-            QueryMode::Distributed => CursorDataChunkStream::DistributedDataChunk(Some(
-                distribute_execute(session.clone(), query, can_timeout_cancel).await?,
-            )),
+            QueryMode::Local => CursorQueryStream::local(
+                local_execute_for_cursor(session.clone(), query, query_shutdown_rx, snapshot)?,
+                query_shutdown_tx,
+            ),
+            QueryMode::Distributed => CursorQueryStream::distributed(
+                distribute_execute_for_cursor(session.clone(), query, snapshot).await?,
+                session.env().query_manager().clone(),
+            ),
         },
         schema.fields.clone(),
     ))

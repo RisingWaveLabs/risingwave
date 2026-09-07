@@ -137,7 +137,7 @@ impl CursorMetrics {
 
         let opts = histogram_opts!(
             "subscription_cursor_fetch_duration",
-            "Subscription cursor duration of fetch",
+            "Subscription cursor duration of fetching one successful subscription cursor row",
             exponential_buckets(1.0, 5.0, 11).unwrap(),
         );
         let subscription_cursor_fetch_duration =

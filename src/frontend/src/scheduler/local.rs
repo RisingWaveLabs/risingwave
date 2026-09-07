@@ -56,22 +56,27 @@ use crate::scheduler::{SchedulerError, SchedulerResult};
 use crate::session::{FrontendEnv, SessionImpl};
 
 // TODO(error-handling): use a concrete error type.
+/// A stream of raw chunks produced by a frontend-local batch query.
 pub type LocalQueryStream = ReceiverStream<Result<DataChunk, BoxedError>>;
+/// Owns the plan, snapshot context, and shutdown policy for a frontend-local batch query.
 pub struct LocalQueryExecution {
     query: Query,
     front_env: FrontendEnv,
     session: Arc<SessionImpl>,
     worker_node_manager: WorkerNodeSelector,
     timeout: Option<Duration>,
+    shutdown_rx: ShutdownToken,
 }
 
 impl LocalQueryExecution {
+    /// Creates a local query execution with either caller-provided or session cancellation.
     pub fn new(
         query: Query,
         front_env: FrontendEnv,
         support_barrier_read: bool,
         session: Arc<SessionImpl>,
         timeout: Option<Duration>,
+        shutdown_rx: ShutdownToken,
     ) -> Self {
         let worker_node_manager =
             WorkerNodeSelector::new(front_env.worker_node_manager_ref(), support_barrier_read);
@@ -82,15 +87,18 @@ impl LocalQueryExecution {
             session,
             worker_node_manager,
             timeout,
+            shutdown_rx,
         }
     }
 
     fn shutdown_rx(&self) -> ShutdownToken {
-        self.session.reset_cancel_query_flag()
+        self.shutdown_rx.clone()
     }
 
     #[try_stream(ok = DataChunk, error = RwError)]
-    pub async fn run_inner(self) {
+    /// Builds the local executor and yields chunks until it completes or is canceled. There could
+    /// be remaining chunks discarded after the cancel signal received.
+    pub async fn run_inner(self, shutdown_rx: ShutdownToken) {
         debug!(
             query_id = %self.query.query_id,
             "Starting to run query"
@@ -105,7 +113,7 @@ impl LocalQueryExecution {
         let plan_fragment = self.create_plan_fragment()?;
         let plan_node = plan_fragment.root.unwrap();
 
-        let executor = ExecutorBuilder::new(&plan_node, &task_id, context, self.shutdown_rx());
+        let executor = ExecutorBuilder::new(&plan_node, &task_id, context, shutdown_rx);
         let executor = executor.build().await?;
         // The following loop can be slow.
         // Release potential large object in Query and PlanNode early.
@@ -118,15 +126,17 @@ impl LocalQueryExecution {
         }
     }
 
-    fn run(self) -> BoxStream<'static, Result<DataChunk, RwError>> {
+    fn run(self, shutdown_rx: ShutdownToken) -> BoxStream<'static, Result<DataChunk, RwError>> {
         let span = tracing::info_span!("local_execute", query_id = self.query.query_id.id,);
-        Box::pin(self.run_inner().instrument(span))
+        Box::pin(self.run_inner(shutdown_rx).instrument(span))
     }
 
+    /// Runs this execution on the frontend compute runtime and returns its raw chunk stream.
     pub fn stream_rows(self) -> LocalQueryStream {
         let compute_runtime = self.front_env.compute_runtime();
         let (sender, receiver) = mpsc::channel(10);
         let shutdown_rx = self.shutdown_rx();
+        let executor_shutdown_rx = shutdown_rx.clone();
 
         let catalog_reader = self.front_env.catalog_reader().clone();
         let user_info_reader = self.front_env.user_info_reader().clone();
@@ -140,7 +150,9 @@ impl LocalQueryExecution {
 
         let sender1 = sender.clone();
         let exec = async move {
-            let mut data_stream = self.run().map(|r| r.map_err(|e| Box::new(e) as BoxedError));
+            let mut data_stream = self
+                .run(executor_shutdown_rx)
+                .map(|r| r.map_err(|e| Box::new(e) as BoxedError));
             while let Some(mut r) = data_stream.next().await {
                 // append a query cancelled error if the query is cancelled.
                 if r.is_err() && shutdown_rx.is_cancelled() {

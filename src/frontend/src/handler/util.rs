@@ -185,7 +185,7 @@ fn timestamptz_to_string_with_session_data(
     result_string.into()
 }
 
-fn to_pg_rows(
+pub(crate) fn to_pg_rows(
     column_types: &[DataType],
     chunk: DataChunk,
     formats: &[Format],
