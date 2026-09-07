@@ -206,7 +206,7 @@ openssl = "0.10.80"
 opentelemetry = "0.31"
 opentelemetry-otlp = { version = "0.31", features = ["grpc-tonic"] }
 opentelemetry-semantic-conventions = "0.31"
-opentelemetry_sdk = { version = "0.31", default-features = false, features = [
+opentelemetry_sdk = { version = "0.32", default-features = false, features = [
     "trace",
 ] }
 otlp-embedded = "0.0.2"
