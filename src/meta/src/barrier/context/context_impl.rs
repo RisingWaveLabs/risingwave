@@ -14,6 +14,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Context;
 use futures::StreamExt;
@@ -53,6 +54,8 @@ use crate::model::FragmentDownstreamRelation;
 use crate::serving::{fetch_serving_infos, sync_serving_table_vnode_mappings_to_hummock};
 use crate::stream::{SourceChange, cleanup_dropped_streaming_jobs};
 use crate::{MetaError, MetaResult};
+
+const WAIT_SINK_COMMITS_DRAINED_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
 fn resolve_since_timestamp_log_store_epoch(
     table_id: TableId,
@@ -732,6 +735,50 @@ impl GlobalBarrierWorkerContextImpl {
     }
 }
 
+async fn wait_old_sink_commits_drained(
+    barrier_manager_context: &GlobalBarrierWorkerContextImpl,
+    old_sink_id: SinkId,
+    target_epoch: u64,
+) -> MetaResult<()> {
+    let wait_result = tokio::time::timeout(
+        WAIT_SINK_COMMITS_DRAINED_TIMEOUT,
+        barrier_manager_context
+            .sink_manager
+            .wait_sink_commits_drained(old_sink_id, target_epoch),
+    )
+    .await;
+    let pending_epoch_count = barrier_manager_context
+        .metadata_manager
+        .catalog_controller
+        .count_pending_sink_epochs(old_sink_id)
+        .await?;
+
+    match wait_result {
+        Ok(Ok(())) if pending_epoch_count == 0 => Ok(()),
+        Ok(Ok(())) => Err(anyhow::anyhow!(
+            "pending exactly-once sink epochs remain before replacing sink: sink_id={}, target_epoch={}, pending_epoch_count={}",
+            old_sink_id,
+            target_epoch,
+            pending_epoch_count,
+        )
+        .into()),
+        Ok(Err(err)) => Err(err
+            .context(format!(
+                "failed to wait for old sink commits drained before replacing sink: sink_id={}, target_epoch={}, pending_epoch_count={}",
+                old_sink_id, target_epoch, pending_epoch_count,
+            ))
+            .into()),
+        Err(_) => Err(anyhow::anyhow!(
+            "timed out waiting for old sink commits drained before replacing sink: sink_id={}, target_epoch={}, pending_epoch_count={}, timeout={:?}",
+            old_sink_id,
+            target_epoch,
+            pending_epoch_count,
+            WAIT_SINK_COMMITS_DRAINED_TIMEOUT,
+        )
+        .into()),
+    }
+}
+
 impl PostCollectCommand {
     /// Do some stuffs after barriers are collected and the new storage version is committed, for
     /// the given command.
@@ -814,6 +861,7 @@ impl PostCollectCommand {
                 job_type,
                 cross_db_snapshot_backfill_info,
                 resolved_split_assignment,
+                replace_sink,
             } => {
                 match &job_type {
                     CreateStreamingJobType::SinkIntoTable(_) | CreateStreamingJobType::Normal => {
@@ -873,7 +921,6 @@ impl PostCollectCommand {
                 let CreateStreamingJobCommandInfo {
                     stream_job_fragments,
                     upstream_fragment_downstreams,
-                    replace_sink,
                     ..
                 } = info;
                 let new_job_id = stream_job_fragments.stream_job_id();
@@ -889,6 +936,20 @@ impl PostCollectCommand {
                         None
                     };
 
+                if let Some(replace_sink) = &replace_sink {
+                    // Deleting the old sink object cascades `pending_sink_state`. Wait for the
+                    // coordinator to finish old sink commits, then assert the durable state before
+                    // deleting the old sink object.
+                    wait_old_sink_commits_drained(
+                        barrier_manager_context,
+                        replace_sink.old_sink_id,
+                        replace_sink.target_epoch,
+                    )
+                    .await?;
+                }
+
+                let old_sink_id = replace_sink.map(|replace_sink| replace_sink.old_sink_id);
+
                 let old_state_table_ids = barrier_manager_context
                     .metadata_manager
                     .catalog_controller
@@ -897,8 +958,8 @@ impl PostCollectCommand {
                         &upstream_fragment_downstreams,
                         new_sink_downstream,
                         Some(&resolved_split_assignment),
-                        replace_sink.as_ref(),
-                        replace_sink.is_none(),
+                        old_sink_id.as_ref(),
+                        old_sink_id.is_none(),
                     )
                     .await?;
 
@@ -915,7 +976,7 @@ impl PostCollectCommand {
                         .await;
                 }
 
-                if let Some(old_sink_id) = replace_sink {
+                if let Some(old_sink_id) = old_sink_id {
                     barrier_manager_context
                         .sink_manager
                         .stop_sink_coordinator(vec![old_sink_id])

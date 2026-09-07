@@ -79,6 +79,7 @@ impl CreateSnapshotBackfillJobCommandInfo {
             job_type,
             cross_db_snapshot_backfill_info: self.cross_db_snapshot_backfill_info,
             resolved_split_assignment: self.resolved_split_assignment,
+            replace_sink: None,
         }
     }
 }

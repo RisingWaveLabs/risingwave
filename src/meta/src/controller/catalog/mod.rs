@@ -1029,6 +1029,17 @@ impl CatalogController {
         Ok(result.into_iter().collect())
     }
 
+    pub async fn count_pending_sink_epochs(&self, sink_id: SinkId) -> MetaResult<u64> {
+        let inner = self.inner.read().await;
+        let pending_epoch_count = pending_sink_state::Entity::find()
+            .filter(pending_sink_state::Column::SinkId.eq(sink_id).and(
+                pending_sink_state::Column::SinkState.eq(pending_sink_state::SinkState::Pending),
+            ))
+            .count(&inner.db)
+            .await?;
+        Ok(pending_epoch_count)
+    }
+
     pub async fn abort_pending_sink_epochs(
         &self,
         sink_committed_epoch: HashMap<SinkId, u64>,
